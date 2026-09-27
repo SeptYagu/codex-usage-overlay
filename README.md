@@ -1,5 +1,10 @@
 # Codex Usage Overlay（Tauri v2）
 
+[![GitHub Release](https://img.shields.io/github/v/release/SeptYagu/codex-usage-overlay?color=3b82f6&logo=github)](https://github.com/SeptYagu/codex-usage-overlay/releases/latest)
+[![CI](https://github.com/SeptYagu/codex-usage-overlay/actions/workflows/ci.yml/badge.svg)](https://github.com/SeptYagu/codex-usage-overlay/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-10b981.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows)](https://github.com/SeptYagu/codex-usage-overlay/releases/latest)
+
 简体中文 · [English](README.en.md)
 
 Windows 桌面悬浮窗，显示 Codex 配额和 Credit 余额。通过本机 Codex `app-server` 的 `account/rateLimits/read` 接口获取用量，不读取或保存 `auth.json`，不修改 Codex 安装文件。
@@ -42,5 +47,9 @@ npm run tauri -- build --ci --bundles nsis,msi
 ```
 
 标签发布流程会测试并构建 Tauri 应用，再发布 NSIS、MSI、便携 ZIP 和校验文件。打包时会验证便携包内容与源文件一致。
+
+## 开源协议
+
+本项目采用 [MIT License](LICENSE) 许可协议开源。
 
 反馈邮箱：septwind@agent.qq.com

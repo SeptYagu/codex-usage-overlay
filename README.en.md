@@ -1,5 +1,10 @@
 # Codex Usage Overlay (Tauri v2)
 
+[![GitHub Release](https://img.shields.io/github/v/release/SeptYagu/codex-usage-overlay?color=3b82f6&logo=github)](https://github.com/SeptYagu/codex-usage-overlay/releases/latest)
+[![CI](https://github.com/SeptYagu/codex-usage-overlay/actions/workflows/ci.yml/badge.svg)](https://github.com/SeptYagu/codex-usage-overlay/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-10b981.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows)](https://github.com/SeptYagu/codex-usage-overlay/releases/latest)
+
 [简体中文](README.md) · English
 
 A Windows desktop overlay that displays Codex quota and credit balances. It reads usage through the local Codex `app-server` command `account/rateLimits/read`; it does not read or save `auth.json` or modify Codex installation files.
@@ -42,5 +47,9 @@ npm run tauri -- build --ci --bundles nsis,msi
 ```
 
 The tag workflow tests and builds the Tauri app, then publishes NSIS, MSI, portable ZIP, and checksums. Packaging verifies the portable archive against its source files.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
 
 Feedback: septwind@agent.qq.com
