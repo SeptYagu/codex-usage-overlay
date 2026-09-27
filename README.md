@@ -6,11 +6,9 @@ Windows 桌面悬浮窗，显示 Codex 配额和 Credit 余额。通过本机 Co
 
 ## 下载与启动
 
-从[发布页](https://github.com/SeptYagu/codex-usage-overlay/releases)下载 Tauri 预览版，可选择 NSIS 安装程序、MSI 安装包或 Windows x64 便携 ZIP。`SHA256SUMS.txt` 包含全部三个包的校验值。
+从[发布页](https://github.com/SeptYagu/codex-usage-overlay/releases)下载最新发布版，可选择 NSIS 安装程序、MSI 安装包或 Windows x64 便携 ZIP。`SHA256SUMS.txt` 包含全部三个包的校验值。
 
-安装程序直接安装；便携版解压后运行 `CodexUsageOverlay.exe`。需要 Windows 10/11、WebView2，以及已安装并登录的 Codex 应用。无需 PowerShell 启动脚本；查找 Microsoft Store 版 Codex 时会使用 Windows 自带的 PowerShell。
-
-稳定版 `v0.1.x` 是旧 PowerShell 版本；Tauri 重写版本目前以预览版发布。
+安装程序直接安装；便携版解压后运行 `CodexUsageOverlay.exe`。需要 Windows 10/11、WebView2，以及已安装并登录的 Codex 应用。无需额外 PowerShell 启动脚本；查找 Microsoft Store 版 Codex 时会使用 Windows 自带的 PowerShell。
 
 ## 浮窗与设置
 
@@ -40,11 +38,9 @@ npm run tauri dev
 
 ```powershell
 npm run tauri -- build --ci --bundles nsis,msi
-.\scripts\Build-TauriRelease.ps1 -Tag v0.3.2-preview
+.\scripts\Build-TauriRelease.ps1 -Tag v1.0.0
 ```
 
 标签发布流程会测试并构建 Tauri 应用，再发布 NSIS、MSI、便携 ZIP 和校验文件。打包时会验证便携包内容与源文件一致。
-
-本分支已移除旧 PowerShell 实现和启动脚本；历史 `v0.1.x` 发布版仍可下载。
 
 反馈邮箱：septwind@agent.qq.com

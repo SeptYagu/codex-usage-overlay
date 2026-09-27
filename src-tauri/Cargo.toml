@@ -1,6 +1,6 @@
 [package]
 name = "codex-usage-overlay"
-version = "0.3.2"
+version = "1.0.0"
 description = "A lightweight Windows overlay for OpenAI Codex usage"
 authors = ["Justin"]
 edition = "2021"

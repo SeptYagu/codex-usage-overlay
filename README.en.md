@@ -6,11 +6,9 @@ A Windows desktop overlay that displays Codex quota and credit balances. It read
 
 ## Download and launch
 
-Get the Tauri preview from the [releases page](https://github.com/SeptYagu/codex-usage-overlay/releases). Choose the NSIS setup executable, MSI installer, or Windows x64 portable ZIP. `SHA256SUMS.txt` includes checksums for all three packages.
+Get the latest release from the [releases page](https://github.com/SeptYagu/codex-usage-overlay/releases). Choose the NSIS setup executable, MSI installer, or Windows x64 portable ZIP. `SHA256SUMS.txt` includes checksums for all three packages.
 
-Install a setup package, or extract the portable ZIP and run `CodexUsageOverlay.exe`. Windows 10/11, WebView2, and an installed, signed-in Codex app are required. No PowerShell launcher is needed; Microsoft Store executable discovery uses the built-in Windows PowerShell.
-
-The stable `v0.1.x` releases are the older PowerShell version; the Tauri rewrite is currently published as preview releases.
+Install a setup package, or extract the portable ZIP and run `CodexUsageOverlay.exe`. Windows 10/11, WebView2, and an installed, signed-in Codex app are required. No extra PowerShell launcher is needed; Microsoft Store executable discovery uses the built-in Windows PowerShell.
 
 ## Overlay and settings
 
@@ -40,11 +38,9 @@ Build and package a release:
 
 ```powershell
 npm run tauri -- build --ci --bundles nsis,msi
-.\scripts\Build-TauriRelease.ps1 -Tag v0.3.2-preview
+.\scripts\Build-TauriRelease.ps1 -Tag v1.0.0
 ```
 
 The tag workflow tests and builds the Tauri app, then publishes NSIS, MSI, portable ZIP, and checksums. Packaging verifies the portable archive against its source files.
-
-The legacy PowerShell implementation and launch scripts have been removed from this branch. They remain available in the historical `v0.1.x` releases.
 
 Feedback: septwind@agent.qq.com
