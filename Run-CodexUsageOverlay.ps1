@@ -1,10 +1,14 @@
 ﻿$ErrorActionPreference = 'Stop'
 $runtimeDir = Join-Path $env:LOCALAPPDATA 'CodexUsageOverlay'
 $logPath = Join-Path $runtimeDir 'startup-error.log'
+$settingsPath = Join-Path $runtimeDir 'settings.json'
 $overlay = Join-Path $PSScriptRoot 'CodexPetUsageOverlay.ps1'
-New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
+$language = 'en'
 
 try {
+    . (Join-Path $PSScriptRoot 'Localization.ps1')
+    $language = Get-OverlayLanguageFromSettings -SettingsPath $settingsPath
+    New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
     & $overlay
 }
 catch {
@@ -17,10 +21,17 @@ catch {
     }
     catch { }
 
-    $message = "悬浮窗启动失败：$($_.Exception.Message)`r`n详细信息已保存到：$logPath"
     try {
         Add-Type -AssemblyName PresentationFramework
-        [Windows.MessageBox]::Show($message, 'Codex 用量悬浮窗') | Out-Null
+        if (Get-Command Get-OverlayText -ErrorAction SilentlyContinue) {
+            $message = Get-OverlayText -Language $language -Key 'StartupFailed' -FormatValues @($logPath)
+            $title = Get-OverlayText -Language $language -Key 'StartupErrorTitle'
+        }
+        else {
+            $message = "悬浮窗启动失败 / The overlay could not start.`r`n详细信息：$logPath / Details: $logPath"
+            $title = 'Codex 用量悬浮窗 / Codex Usage Overlay'
+        }
+        [Windows.MessageBox]::Show($message, $title) | Out-Null
     }
     catch { }
     exit 1

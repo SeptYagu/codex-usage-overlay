@@ -5,6 +5,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'Localization.ps1')
+
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
@@ -24,13 +26,20 @@ $pidPath = Join-Path $runtimeDir 'overlay.pid'
 $usageStatusPath = Join-Path $runtimeDir 'usage-status.json'
 $settingsPath = Join-Path $runtimeDir 'settings.json'
 $positionPath = Join-Path $runtimeDir 'window-position.json'
+$script:diagnosticPath = Join-Path $runtimeDir 'overlay-error.log'
 New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
 $script:overlayScalePercent = 175
 $script:backgroundTransparencyPercent = 23
 $script:showCredits = $true
+$script:settingsValues = [ordered]@{}
+$script:language = Get-DefaultOverlayLanguage
+$script:languageOverride = $false
 if (Test-Path -LiteralPath $settingsPath) {
     try {
         $savedSettings = Get-Content -Raw -LiteralPath $settingsPath | ConvertFrom-Json
+        foreach ($property in $savedSettings.PSObject.Properties) {
+            $script:settingsValues[$property.Name] = $property.Value
+        }
         $savedScale = $savedSettings.PSObject.Properties['scalePercent']
         if ($null -ne $savedScale -and [int]::TryParse([string]$savedScale.Value, [ref]$script:overlayScalePercent)) {
             $script:overlayScalePercent = [Math]::Max(100, [Math]::Min(250, $script:overlayScalePercent))
@@ -50,11 +59,19 @@ if (Test-Path -LiteralPath $settingsPath) {
             [bool]::TryParse([string]$savedCredits.Value, [ref]$parsedCredits)) {
             $script:showCredits = $parsedCredits
         }
+        $savedLanguage = $savedSettings.PSObject.Properties['language']
+        if ($null -ne $savedLanguage -and ($savedLanguage.Value -eq 'zh' -or $savedLanguage.Value -eq 'en')) {
+            $script:language = [string]$savedLanguage.Value
+            $script:languageOverride = $true
+        }
     }
     catch {
         $script:overlayScalePercent = 175
         $script:backgroundTransparencyPercent = 23
         $script:showCredits = $true
+        $script:settingsValues = [ordered]@{}
+        $script:language = Get-DefaultOverlayLanguage
+        $script:languageOverride = $false
     }
 }
 
@@ -75,7 +92,7 @@ if (Test-Path -LiteralPath $settingsPath) {
   </Window.ContextMenu>
   <Border Name="Root" Background="#C41B1D24" CornerRadius="12" Padding="8,3"
           BorderThickness="1" BorderBrush="#664C5362"
-          ToolTip="按住鼠标左键拖动；右键打开菜单。">
+          ToolTip="">
     <Border.LayoutTransform>
       <ScaleTransform ScaleX="1.75" ScaleY="1.75"/>
     </Border.LayoutTransform>
@@ -150,6 +167,13 @@ $creditsText.Visibility = $creditsVisibility
 $refreshNowItem = $window.ContextMenu.Items[0]
 $hideItem = $window.ContextMenu.Items[2]
 $exitItem = $window.ContextMenu.Items[4]
+$script:window = $window
+$script:root = $root
+$script:refreshNowItem = $refreshNowItem
+$script:hideItem = $hideItem
+$script:exitItem = $exitItem
+$script:usageUiState = 'loading'
+$script:lastUsageUpdatedAt = $null
 
 $greenBrush = [Windows.Media.SolidColorBrush]::new([Windows.Media.ColorConverter]::ConvertFromString('#FF52D273'))
 $yellowBrush = [Windows.Media.SolidColorBrush]::new([Windows.Media.ColorConverter]::ConvertFromString('#FFFFC857'))
@@ -247,6 +271,13 @@ $script:trayIcon = $null
 $script:windowMenuItem = $null
 $script:trayMenu = $null
 $script:autoStartEnabled = $false
+$script:settingsMenuItem = $null
+$script:languageSelectorHost = $null
+$script:languageChineseButton = $null
+$script:languageEnglishButton = $null
+$script:settingsWindow = $null
+$script:activeBalloonKey = $null
+$script:activeBalloonUntil = [DateTime]::MinValue
 
 function Set-AutoStart {
     param(
@@ -293,7 +324,112 @@ function Initialize-AutoStart {
 
 function Update-WindowMenuText {
     if ($null -eq $script:windowMenuItem) { return }
-    $script:windowMenuItem.Text = if ($window.IsVisible) { '隐藏悬浮窗' } else { '显示悬浮窗' }
+    $script:windowMenuItem.Text = if ($window.IsVisible) {
+        Get-OverlayText -Language $script:language -Key 'WindowHide'
+    }
+    else {
+        Get-OverlayText -Language $script:language -Key 'WindowShow'
+    }
+}
+
+function Write-OverlayDiagnostic {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Detail
+    )
+    try {
+        $entry = "[$([DateTimeOffset]::Now.ToString('o'))] [$Source]`r`n$Detail`r`n"
+        [IO.File]::AppendAllText($script:diagnosticPath, $entry, [Text.Encoding]::UTF8)
+    }
+    catch { }
+}
+
+function Show-OverlayBalloon {
+    param([Parameter(Mandatory)][string]$Key)
+    if ($null -eq $script:notifyIcon) { return }
+    $script:activeBalloonKey = $Key
+    $script:activeBalloonUntil = [DateTime]::UtcNow.AddSeconds(5)
+    $script:notifyIcon.BalloonTipTitle = Get-OverlayText -Language $script:language -Key 'AppTitle'
+    $script:notifyIcon.BalloonTipText = Get-OverlayText -Language $script:language -Key $Key
+    $script:notifyIcon.ShowBalloonTip(5000)
+}
+
+function Update-OverlayToolTip {
+    if ($null -eq $script:root) { return }
+    switch ($script:usageUiState) {
+        'ok' {
+            $culture = Get-OverlayDisplayCulture -Language $script:language
+            $formattedTime = $script:lastUsageUpdatedAt.ToString('g', $culture)
+            $message = Get-OverlayText -Language $script:language -Key 'TipUpdatedAt' -FormatValues @($formattedTime)
+        }
+        'read-error' { $message = Get-OverlayText -Language $script:language -Key 'TipUsageFailed' }
+        'start-error' { $message = Get-OverlayText -Language $script:language -Key 'TipUsageStartFailed' }
+        'process-error' { $message = Get-OverlayText -Language $script:language -Key 'TipUsageProcessFailed' }
+        default { $message = Get-OverlayText -Language $script:language -Key 'TipLoading' }
+    }
+    $script:root.ToolTip = $message
+}
+
+function Update-TrayStatusText {
+    if ($null -eq $script:notifyIcon) { return }
+    switch ($script:usageUiState) {
+        'ok' { Update-TrayUsageText }
+        'read-error' { Set-TrayUsageText (Get-OverlayText -Language $script:language -Key 'TrayUsageError') }
+        'start-error' { Set-TrayUsageText (Get-OverlayText -Language $script:language -Key 'TrayUsageError') }
+        'process-error' { Set-TrayUsageText (Get-OverlayText -Language $script:language -Key 'TrayUsageError') }
+        default { Set-TrayUsageText (Get-OverlayText -Language $script:language -Key 'TrayLoading') }
+    }
+}
+
+function Update-LanguageSelector {
+    if ($null -ne $script:languageChineseButton) {
+        $script:languageChineseButton.Text = if ($script:language -eq 'zh') { '✓ 中文' } else { '中文' }
+        $script:languageChineseButton.AccessibleName = '中文'
+    }
+    if ($null -ne $script:languageEnglishButton) {
+        $script:languageEnglishButton.Text = if ($script:language -eq 'en') { '✓ english' } else { 'english' }
+        $script:languageEnglishButton.AccessibleName = 'english'
+    }
+}
+
+function Apply-OverlayLanguage {
+    if ($null -ne $script:window) {
+        $script:window.Title = Get-OverlayText -Language $script:language -Key 'AppTitle'
+    }
+    if ($null -ne $script:refreshNowItem) {
+        $script:refreshNowItem.Header = Get-OverlayText -Language $script:language -Key 'RefreshUsage'
+        $script:hideItem.Header = Get-OverlayText -Language $script:language -Key 'WindowHide'
+        $script:exitItem.Header = Get-OverlayText -Language $script:language -Key 'ExitOverlay'
+    }
+    if ($null -ne $script:settingsWindow) {
+        $script:settingsWindow.Title = Get-OverlayText -Language $script:language -Key 'SettingsTitle'
+        $script:settingsOverlaySizeLabel.Text = Get-OverlayText -Language $script:language -Key 'OverlaySize'
+        $script:settingsTransparencyLabel.Text = Get-OverlayText -Language $script:language -Key 'BackgroundTransparency'
+        $script:settingsCreditsCheckBox.Content = Get-OverlayText -Language $script:language -Key 'ShowCreditBalance'
+        $script:settingsHelpText.Text = Get-OverlayText -Language $script:language -Key 'SettingsHelp'
+        $script:settingsFeedbackText.Text = Get-OverlayText -Language $script:language -Key 'Feedback'
+    }
+    if ($null -ne $script:settingsMenuItem) {
+        $script:settingsMenuItem.Text = Get-OverlayText -Language $script:language -Key 'OverlaySettings'
+        $script:autoStartMenuItem.Text = Get-OverlayText -Language $script:language -Key 'AutoStart'
+    }
+    Update-LanguageSelector
+    Update-WindowMenuText
+    Update-OverlayToolTip
+    Update-TrayStatusText
+    if ($null -ne $script:activeBalloonKey -and [DateTime]::UtcNow -lt $script:activeBalloonUntil) {
+        $script:notifyIcon.BalloonTipTitle = Get-OverlayText -Language $script:language -Key 'AppTitle'
+        $script:notifyIcon.BalloonTipText = Get-OverlayText -Language $script:language -Key $script:activeBalloonKey
+        $script:notifyIcon.ShowBalloonTip(5000)
+    }
+}
+
+function Set-OverlayLanguage {
+    param([Parameter(Mandatory)][ValidateSet('zh', 'en')][string]$Language)
+    $script:language = $Language
+    $script:languageOverride = $true
+    Apply-OverlayLanguage
+    $null = Save-OverlaySettings -FailureTextKey 'SaveLanguageFailed'
 }
 
 function Toggle-OverlayWindow {
@@ -310,7 +446,7 @@ function Toggle-OverlayWindow {
 function Set-TrayUsageText {
     param([string]$Text)
     if ($null -eq $script:notifyIcon) { return }
-    if ([string]::IsNullOrWhiteSpace($Text)) { $Text = 'Codex 用量悬浮窗' }
+    if ([string]::IsNullOrWhiteSpace($Text)) { $Text = Get-OverlayText -Language $script:language -Key 'AppTitle' }
     if ($Text.Length -gt 63) { $Text = $Text.Substring(0, 63) }
     $script:notifyIcon.Text = $Text
 }
@@ -383,23 +519,24 @@ function Set-CreditsVisibility {
 }
 
 function Save-OverlaySettings {
+    param([string]$FailureTextKey = 'SaveSettingsFailed')
+
     $temporaryPath = "$settingsPath.tmp"
-    $settings = [ordered]@{
-        scalePercent = $script:overlayScalePercent
-        backgroundTransparencyPercent = $script:backgroundTransparencyPercent
-        showCredits = $script:showCredits
-    }
+    $script:settingsValues['scalePercent'] = $script:overlayScalePercent
+    $script:settingsValues['backgroundTransparencyPercent'] = $script:backgroundTransparencyPercent
+    $script:settingsValues['showCredits'] = $script:showCredits
+    if ($script:languageOverride) { $script:settingsValues['language'] = $script:language }
+    elseif ($script:settingsValues.Contains('language')) { $script:settingsValues.Remove('language') }
     try {
-        [IO.File]::WriteAllText($temporaryPath, ($settings | ConvertTo-Json -Compress), [Text.Encoding]::UTF8)
+        [IO.File]::WriteAllText($temporaryPath, ($script:settingsValues | ConvertTo-Json -Compress -Depth 100), [Text.Encoding]::UTF8)
         Move-Item -LiteralPath $temporaryPath -Destination $settingsPath -Force
+        return $true
     }
     catch {
+        Write-OverlayDiagnostic -Source 'settings-save' -Detail ($_ | Out-String)
         Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
-        if ($null -ne $script:notifyIcon) {
-            $script:notifyIcon.BalloonTipTitle = 'Codex 用量悬浮窗'
-            $script:notifyIcon.BalloonTipText = "保存浮窗设置失败：$($_.Exception.Message)"
-            $script:notifyIcon.ShowBalloonTip(5000)
-        }
+        Show-OverlayBalloon -Key $FailureTextKey
+        return $false
     }
 }
 
@@ -412,24 +549,22 @@ function Show-OverlaySettings {
         ShowInTaskbar="False" Topmost="True" Background="#FFF5F6F8">
   <StackPanel Margin="18,14,18,16">
     <Grid Margin="0,0,0,2">
-      <TextBlock Text="浮窗大小" FontSize="14" FontWeight="SemiBold"/>
+      <TextBlock Name="OverlaySizeLabel" Text="浮窗大小" FontSize="14" FontWeight="SemiBold"/>
       <TextBlock Name="ScaleValue" HorizontalAlignment="Right" FontSize="14" FontWeight="SemiBold"/>
     </Grid>
     <Slider Name="ScaleSlider" Minimum="100" Maximum="250" TickFrequency="5"
             IsSnapToTickEnabled="True" TickPlacement="BottomRight" Margin="0,0,0,14"/>
     <Grid Margin="0,0,0,2">
-      <TextBlock Text="背景透明度" FontSize="14" FontWeight="SemiBold"/>
+      <TextBlock Name="BackgroundTransparencyLabel" Text="背景透明度" FontSize="14" FontWeight="SemiBold"/>
       <TextBlock Name="TransparencyValue" HorizontalAlignment="Right" FontSize="14" FontWeight="SemiBold"/>
     </Grid>
     <Slider Name="TransparencySlider" Minimum="0" Maximum="80" TickFrequency="5"
             IsSnapToTickEnabled="True" TickPlacement="BottomRight" Margin="0,0,0,4"/>
     <CheckBox Name="ShowCreditsCheckBox" Content="显示 Credit 余额" FontSize="13" Margin="0,12,0,0"/>
-    <TextBlock Text="调整时即时预览，关闭窗口后保存。透明度只影响背景，文字保持清晰。"
+    <TextBlock Name="SettingsHelpText" Text="调整时即时预览，关闭窗口后保存。透明度只影响背景，文字保持清晰。"
                Foreground="#FF626A78" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
-    <TextBlock Foreground="#FF626A78" FontSize="11" TextWrapping="Wrap" Margin="0,10,0,0">
-      <Run Text="反馈和建议请联系 "/>
-      <Run Text="septwind@agent.qq.com" FontWeight="Bold"/>
-    </TextBlock>
+    <TextBlock Name="FeedbackText" Text="反馈和建议请联系 septwind@agent.qq.com"
+               Foreground="#FF626A78" FontSize="11" TextWrapping="Wrap" Margin="0,10,0,0"/>
   </StackPanel>
 </Window>
 '@
@@ -442,12 +577,18 @@ function Show-OverlaySettings {
     $script:settingsTransparencySlider = $settingsWindow.FindName('TransparencySlider')
     $script:settingsTransparencyValue = $settingsWindow.FindName('TransparencyValue')
     $script:settingsCreditsCheckBox = $settingsWindow.FindName('ShowCreditsCheckBox')
+    $script:settingsWindow = $settingsWindow
+    $script:settingsOverlaySizeLabel = $settingsWindow.FindName('OverlaySizeLabel')
+    $script:settingsTransparencyLabel = $settingsWindow.FindName('BackgroundTransparencyLabel')
+    $script:settingsHelpText = $settingsWindow.FindName('SettingsHelpText')
+    $script:settingsFeedbackText = $settingsWindow.FindName('FeedbackText')
 
     $script:settingsScaleSlider.Value = $script:overlayScalePercent
     $script:settingsTransparencySlider.Value = $script:backgroundTransparencyPercent
     $script:settingsCreditsCheckBox.IsChecked = $script:showCredits
     $script:settingsScaleValue.Text = "$script:overlayScalePercent%"
     $script:settingsTransparencyValue.Text = "$script:backgroundTransparencyPercent%"
+    Apply-OverlayLanguage
 
     $script:settingsScaleSlider.add_ValueChanged({
         $percent = [int][Math]::Round($script:settingsScaleSlider.Value)
@@ -466,6 +607,7 @@ function Show-OverlaySettings {
     }
     finally {
         Save-OverlaySettings
+        $script:settingsWindow = $null
     }
 }
 
@@ -473,6 +615,7 @@ function Initialize-SystemTray {
     $script:trayMenu = [System.Windows.Forms.ContextMenuStrip]::new()
     $script:windowMenuItem = [System.Windows.Forms.ToolStripMenuItem]::new()
     $settingsMenuItem = [System.Windows.Forms.ToolStripMenuItem]::new('浮窗设置…')
+    $script:settingsMenuItem = $settingsMenuItem
     $script:autoStartMenuItem = [System.Windows.Forms.ToolStripMenuItem]::new('登录时自动启动')
     $script:autoStartMenuItem.CheckOnClick = $true
     $refreshMenuItem = [System.Windows.Forms.ToolStripMenuItem]::new('立即刷新用量')
@@ -486,11 +629,59 @@ function Initialize-SystemTray {
     $null = $script:trayMenu.Items.Add($script:autoStartMenuItem)
     $null = $script:trayMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new())
     $null = $script:trayMenu.Items.Add($exitMenuItem)
+    $null = $script:trayMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new())
+
+    $languagePanel = [System.Windows.Forms.FlowLayoutPanel]::new()
+    $languagePanel.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
+    $languagePanel.WrapContents = $false
+    $languagePanel.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $languagePanel.Size = [System.Drawing.Size]::new(210, 32)
+    $languagePanel.Padding = [System.Windows.Forms.Padding]::new(5, 1, 5, 1)
+    $languagePanel.Margin = [System.Windows.Forms.Padding]::Empty
+    $languagePanel.BackColor = $script:trayMenu.BackColor
+
+    $script:languageChineseButton = [System.Windows.Forms.Button]::new()
+    $script:languageChineseButton.AutoSize = $true
+    $script:languageChineseButton.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $script:languageChineseButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $script:languageChineseButton.FlatAppearance.BorderSize = 0
+    $script:languageChineseButton.UseVisualStyleBackColor = $false
+    $script:languageChineseButton.BackColor = $languagePanel.BackColor
+    $script:languageChineseButton.Margin = [System.Windows.Forms.Padding]::new(1, 1, 1, 1)
+    $script:languageChineseButton.Padding = [System.Windows.Forms.Padding]::new(4, 1, 4, 1)
+    $script:languageChineseButton.add_Click({ Set-OverlayLanguage -Language 'zh' })
+
+    $script:languageEnglishButton = [System.Windows.Forms.Button]::new()
+    $script:languageEnglishButton.AutoSize = $true
+    $script:languageEnglishButton.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $script:languageEnglishButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $script:languageEnglishButton.FlatAppearance.BorderSize = 0
+    $script:languageEnglishButton.UseVisualStyleBackColor = $false
+    $script:languageEnglishButton.BackColor = $languagePanel.BackColor
+    $script:languageEnglishButton.Margin = [System.Windows.Forms.Padding]::new(1, 1, 1, 1)
+    $script:languageEnglishButton.Padding = [System.Windows.Forms.Padding]::new(4, 1, 4, 1)
+    $script:languageEnglishButton.add_Click({ Set-OverlayLanguage -Language 'en' })
+
+    $null = $languagePanel.Controls.Add($script:languageChineseButton)
+    $languageSeparator = [System.Windows.Forms.Label]::new()
+    $languageSeparator.Text = '|'
+    $languageSeparator.AutoSize = $true
+    $languageSeparator.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $languageSeparator.Margin = [System.Windows.Forms.Padding]::new(2, 5, 2, 0)
+    $null = $languagePanel.Controls.Add($languageSeparator)
+    $null = $languagePanel.Controls.Add($script:languageEnglishButton)
+
+    $script:languageSelectorHost = [System.Windows.Forms.ToolStripControlHost]::new($languagePanel)
+    $script:languageSelectorHost.AutoSize = $false
+    $script:languageSelectorHost.Size = [System.Drawing.Size]::new(210, 32)
+    $script:languageSelectorHost.Margin = [System.Windows.Forms.Padding]::Empty
+    $script:languageSelectorHost.Padding = [System.Windows.Forms.Padding]::Empty
+    $null = $script:trayMenu.Items.Add($script:languageSelectorHost)
 
     $script:notifyIcon = [System.Windows.Forms.NotifyIcon]::new()
     $script:trayIcon = New-DashboardIcon
     $script:notifyIcon.Icon = $script:trayIcon
-    $script:notifyIcon.Text = 'Codex 用量悬浮窗'
+    $script:notifyIcon.Text = Get-OverlayText -Language $script:language -Key 'AppTitle'
     $script:notifyIcon.ContextMenuStrip = $script:trayMenu
     $script:notifyIcon.Visible = $true
 
@@ -503,15 +694,14 @@ function Initialize-SystemTray {
         }
         catch {
             $script:autoStartMenuItem.Checked = $script:autoStartEnabled
-            $script:notifyIcon.BalloonTipTitle = 'Codex 用量悬浮窗'
-            $script:notifyIcon.BalloonTipText = "设置开机启动失败：$($_.Exception.Message)"
-            $script:notifyIcon.ShowBalloonTip(5000)
+            Write-OverlayDiagnostic -Source 'autostart-toggle' -Detail ($_ | Out-String)
+            Show-OverlayBalloon -Key 'AutoStartFailed'
         }
     })
     $exitMenuItem.add_Click({ $script:allowExit = $true; $window.Close() })
     $script:notifyIcon.add_DoubleClick({ Toggle-OverlayWindow })
     $window.add_IsVisibleChanged({ Update-WindowMenuText })
-    Update-WindowMenuText
+    Apply-OverlayLanguage
 }
 
 function Save-WindowPosition {
@@ -673,29 +863,32 @@ function Complete-UsageRefresh {
             $script:lastCreditDisplay = $credit
             $script:fiveHourResetAt = $usage.fiveHourResetsAt
             $script:weekResetAt = $usage.weekResetsAt
+            $script:lastUsageUpdatedAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$usage.fetchedAt).ToLocalTime()
+            $script:usageUiState = 'ok'
             Update-ResetCountdowns
             $fiveHourText.Foreground = Get-UsageBrush $usage.fiveHourRemainingPercent
             $weekText.Foreground = Get-UsageBrush $usage.weekRemainingPercent
             Update-TrayUsageText
-
-            $updatedAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$usage.fetchedAt).ToLocalTime()
-            $window.ToolTip = "最近更新：$($updatedAt.ToString('g'))。按住鼠标左键可移动，右键打开菜单。"
+            Update-OverlayToolTip
             Write-UsageStatus -State 'ok'
         }
         elseif ($errorOutput -ne '') {
-            $window.ToolTip = "读取 Codex 用量失败：$errorOutput"
-            Set-TrayUsageText 'Codex 用量读取失败'
+            $script:usageUiState = 'read-error'
+            Update-OverlayToolTip
+            Update-TrayStatusText
             Write-UsageStatus -State 'error' -ErrorMessage $errorOutput
         }
         else {
-            $window.ToolTip = "读取 Codex 用量失败（退出代码 $($script:usageProcess.ExitCode)）。"
-            Set-TrayUsageText 'Codex 用量读取失败'
+            $script:usageUiState = 'process-error'
+            Update-OverlayToolTip
+            Update-TrayStatusText
             Write-UsageStatus -State 'error' -ErrorMessage "退出代码 $($script:usageProcess.ExitCode)"
         }
     }
     catch {
-        $window.ToolTip = "读取 Codex 用量失败：$($_.Exception.Message)"
-        Set-TrayUsageText 'Codex 用量读取失败'
+        $script:usageUiState = 'read-error'
+        Update-OverlayToolTip
+        Update-TrayStatusText
         Write-UsageStatus -State 'error' -ErrorMessage $_.Exception.Message
     }
     finally {
@@ -725,9 +918,8 @@ try {
 catch {
     $script:autoStartMenuItem.Checked = $false
     $script:autoStartEnabled = $false
-    $script:notifyIcon.BalloonTipTitle = 'Codex 用量悬浮窗'
-    $script:notifyIcon.BalloonTipText = "无法设置登录时自动启动：$($_.Exception.Message)"
-    $script:notifyIcon.ShowBalloonTip(5000)
+    Write-OverlayDiagnostic -Source 'autostart-initialize' -Detail ($_ | Out-String)
+    Show-OverlayBalloon -Key 'StartupAutoStartFailed'
 }
 
 $timer = [Windows.Threading.DispatcherTimer]::new()
@@ -741,7 +933,10 @@ $timer.add_Tick({
             $script:nextRefresh = [DateTime]::UtcNow.AddSeconds([Math]::Max(15, $RefreshSeconds))
         }
         catch {
-            $window.ToolTip = "无法启动用量读取程序：$($_.Exception.Message)"
+            $script:usageUiState = 'start-error'
+            Update-OverlayToolTip
+            Update-TrayStatusText
+            Write-UsageStatus -State 'error' -ErrorMessage $_.Exception.Message
             $script:nextRefresh = [DateTime]::UtcNow.AddSeconds([Math]::Max(15, $RefreshSeconds))
         }
     }
