@@ -276,6 +276,7 @@ $script:refreshMenuItem = $null
 $script:trayExitMenuItem = $null
 $script:languageChineseMenuItem = $null
 $script:languageEnglishMenuItem = $null
+$script:keepTrayMenuOpenForSelection = $false
 $script:settingsWindow = $null
 $script:activeBalloonKey = $null
 $script:activeBalloonUntil = [DateTime]::MinValue
@@ -640,6 +641,21 @@ function Initialize-SystemTray {
     $null = $script:trayMenu.Items.Add($script:languageEnglishMenuItem)
     $null = $script:trayMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new())
     $null = $script:trayMenu.Items.Add($exitMenuItem)
+    $script:trayMenu.add_ItemClicked({
+        param($sender, $eventArgs)
+        $script:keepTrayMenuOpenForSelection =
+            ($eventArgs.ClickedItem -eq $script:languageChineseMenuItem -or
+             $eventArgs.ClickedItem -eq $script:languageEnglishMenuItem -or
+             $eventArgs.ClickedItem -eq $script:autoStartMenuItem)
+    })
+    $script:trayMenu.add_Closing({
+        param($sender, $eventArgs)
+        if ($eventArgs.CloseReason -eq [System.Windows.Forms.ToolStripDropDownCloseReason]::ItemClicked -and
+            $script:keepTrayMenuOpenForSelection) {
+            $eventArgs.Cancel = $true
+        }
+        $script:keepTrayMenuOpenForSelection = $false
+    })
 
     $script:notifyIcon = [System.Windows.Forms.NotifyIcon]::new()
     $script:trayIcon = New-DashboardIcon
