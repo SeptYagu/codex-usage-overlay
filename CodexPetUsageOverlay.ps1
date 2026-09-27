@@ -272,6 +272,8 @@ $script:windowMenuItem = $null
 $script:trayMenu = $null
 $script:autoStartEnabled = $false
 $script:settingsMenuItem = $null
+$script:refreshMenuItem = $null
+$script:trayExitMenuItem = $null
 $script:languageSelectorHost = $null
 $script:languageChineseButton = $null
 $script:languageEnglishButton = $null
@@ -387,8 +389,8 @@ function Update-LanguageSelector {
         $script:languageChineseButton.AccessibleName = '中文'
     }
     if ($null -ne $script:languageEnglishButton) {
-        $script:languageEnglishButton.Text = if ($script:language -eq 'en') { '✓ english' } else { 'english' }
-        $script:languageEnglishButton.AccessibleName = 'english'
+        $script:languageEnglishButton.Text = if ($script:language -eq 'en') { '✓ English' } else { 'English' }
+        $script:languageEnglishButton.AccessibleName = 'English'
     }
 }
 
@@ -412,6 +414,8 @@ function Apply-OverlayLanguage {
     if ($null -ne $script:settingsMenuItem) {
         $script:settingsMenuItem.Text = Get-OverlayText -Language $script:language -Key 'OverlaySettings'
         $script:autoStartMenuItem.Text = Get-OverlayText -Language $script:language -Key 'AutoStart'
+        $script:refreshMenuItem.Text = Get-OverlayText -Language $script:language -Key 'RefreshUsage'
+        $script:trayExitMenuItem.Text = Get-OverlayText -Language $script:language -Key 'ExitOverlay'
     }
     Update-LanguageSelector
     Update-WindowMenuText
@@ -620,6 +624,8 @@ function Initialize-SystemTray {
     $script:autoStartMenuItem.CheckOnClick = $true
     $refreshMenuItem = [System.Windows.Forms.ToolStripMenuItem]::new('立即刷新用量')
     $exitMenuItem = [System.Windows.Forms.ToolStripMenuItem]::new('退出悬浮窗')
+    $script:refreshMenuItem = $refreshMenuItem
+    $script:trayExitMenuItem = $exitMenuItem
 
     $null = $script:trayMenu.Items.Add($script:windowMenuItem)
     $null = $script:trayMenu.Items.Add($refreshMenuItem)
@@ -627,8 +633,6 @@ function Initialize-SystemTray {
     $null = $script:trayMenu.Items.Add($settingsMenuItem)
     $null = $script:trayMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new())
     $null = $script:trayMenu.Items.Add($script:autoStartMenuItem)
-    $null = $script:trayMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new())
-    $null = $script:trayMenu.Items.Add($exitMenuItem)
     $null = $script:trayMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new())
 
     $languagePanel = [System.Windows.Forms.FlowLayoutPanel]::new()
@@ -677,6 +681,8 @@ function Initialize-SystemTray {
     $script:languageSelectorHost.Margin = [System.Windows.Forms.Padding]::Empty
     $script:languageSelectorHost.Padding = [System.Windows.Forms.Padding]::Empty
     $null = $script:trayMenu.Items.Add($script:languageSelectorHost)
+    $null = $script:trayMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new())
+    $null = $script:trayMenu.Items.Add($exitMenuItem)
 
     $script:notifyIcon = [System.Windows.Forms.NotifyIcon]::new()
     $script:trayIcon = New-DashboardIcon
