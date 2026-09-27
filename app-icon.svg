@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1E232E" />
+      <stop offset="100%" stop-color="#0E1015" />
+    </linearGradient>
+
+    <!-- Outer Rim Gradient -->
+    <linearGradient id="rimGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4F596F" />
+      <stop offset="50%" stop-color="#2D3340" />
+      <stop offset="100%" stop-color="#181B22" />
+    </linearGradient>
+
+    <!-- Outer Arc Gradient (5H: Vibrant Emerald to Cyan) -->
+    <linearGradient id="outerRingGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#52D273" />
+      <stop offset="60%" stop-color="#10B981" />
+      <stop offset="100%" stop-color="#00F2FE" />
+    </linearGradient>
+
+    <!-- Inner Arc Gradient (WK: Warm Amber to Gold) -->
+    <linearGradient id="innerRingGrad" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FF5C5C" />
+      <stop offset="35%" stop-color="#FFA726" />
+      <stop offset="100%" stop-color="#FFC857" />
+    </linearGradient>
+
+    <!-- Core Glow Gradient -->
+    <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00F2FE" stop-opacity="0.3" />
+      <stop offset="60%" stop-color="#00F2FE" stop-opacity="0.05" />
+      <stop offset="100%" stop-color="#00F2FE" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Outer Glow Filter -->
+    <filter id="glow-outer" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="14" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Inner Glow Filter -->
+    <filter id="glow-inner" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="10" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Base Squircle -->
+  <rect x="64" y="64" width="896" height="896" rx="224" fill="url(#bgGrad)" stroke="url(#rimGrad)" stroke-width="16" />
+
+  <!-- Ambient Plate Shadow & Core Glow -->
+  <circle cx="512" cy="512" r="400" fill="none" stroke="#161920" stroke-width="2" />
+  <circle cx="512" cy="512" r="280" fill="url(#coreGlow)" />
+
+  <!-- Outer Ring Track (5H) -->
+  <circle cx="512" cy="512" r="330" fill="none" stroke="#252A36" stroke-width="48" stroke-opacity="0.75" />
+
+  <!-- Outer Ring Progress Arc (5H ~ 78% sweep from top) -->
+  <!-- Circumference = 2 * PI * 330 = 2073.45 -->
+  <!-- 78% = 1617.29, gap = 456.16 -->
+  <circle cx="512" cy="512" r="330" fill="none"
+          stroke="url(#outerRingGrad)"
+          stroke-width="48"
+          stroke-linecap="round"
+          stroke-dasharray="1550 2073"
+          stroke-dashoffset="0"
+          transform="rotate(-90 512 512)"
+          filter="url(#glow-outer)" />
+
+  <!-- Inner Ring Track (Weekly) -->
+  <circle cx="512" cy="512" r="215" fill="none" stroke="#252A36" stroke-width="40" stroke-opacity="0.65" />
+
+  <!-- Inner Ring Progress Arc (Weekly ~ 65% sweep from top) -->
+  <!-- Circumference = 2 * PI * 215 = 1350.88 -->
+  <!-- 65% = 878.07, gap = 472.81 -->
+  <circle cx="512" cy="512" r="215" fill="none"
+          stroke="url(#innerRingGrad)"
+          stroke-width="40"
+          stroke-linecap="round"
+          stroke-dasharray="880 1351"
+          stroke-dashoffset="0"
+          transform="rotate(-90 512 512)"
+          filter="url(#glow-inner)" />
+
+  <!-- Center Hub Glass Disc -->
+  <circle cx="512" cy="512" r="110" fill="#141720" stroke="#373E4F" stroke-width="6" />
+
+  <!-- Center Codex Prompt Emblem (>_) -->
+  <!-- Chevron > -->
+  <path d="M 465 465 L 515 512 L 465 559"
+        fill="none"
+        stroke="#00F2FE"
+        stroke-width="18"
+        stroke-linecap="round"
+        stroke-linejoin="round" />
+
+  <!-- Underscore _ -->
+  <line x1="535" y1="560" x2="570" y2="560"
+        stroke="#52D273"
+        stroke-width="18"
+        stroke-linecap="round" />
+</svg>
