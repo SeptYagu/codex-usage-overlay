@@ -28,6 +28,12 @@ $scripts = @(
     Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -File
 )
 foreach ($scriptFile in $scripts) {
+    $bytes = [IO.File]::ReadAllBytes($scriptFile.FullName)
+    $hasUtf8Bom = ($bytes.Length -ge 3 -and
+        $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+    if (-not $hasUtf8Bom -and @($bytes | Where-Object { $_ -gt 0x7F }).Count -gt 0) {
+        throw "UTF-8 BOM is required for non-ASCII Windows PowerShell 5.1 script: $($scriptFile.Name)"
+    }
     $tokens = $null
     $errors = $null
     [Management.Automation.Language.Parser]::ParseFile(

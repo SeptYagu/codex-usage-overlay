@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Localization.ps1')
 $runtimeDir = Join-Path $env:LOCALAPPDATA 'CodexUsageOverlay'
 $logPath = Join-Path $runtimeDir 'startup-error.log'
