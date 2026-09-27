@@ -1,8 +1,8 @@
 # Publishing a version / 发布版本
 
-Release ZIPs are built from the tagged source by GitHub Actions. Do not upload the tracked `output/` ZIP as a release asset.
+Release ZIPs are built from the tagged source by GitHub Actions. Do not upload a locally built `output/` ZIP as a release asset.
 
-GitHub Actions 会从标签对应的源码生成便携版压缩包；不要把仓库 `output/` 中的旧压缩包直接上传为发布附件。
+GitHub Actions 会从标签对应的源码生成便携版压缩包；不要把本机 `output/` 中的压缩包直接上传为发布附件。
 
 1. Finish and push the changes to `main`.
 2. Create and push a version tag on that commit:
