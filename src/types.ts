@@ -10,6 +10,7 @@ export interface CodexUsage {
 }
 
 export interface OverlaySettings {
+  overlayLayout: 'grouped' | 'stacks';
   scalePercent: number;
   backgroundTransparencyPercent: number;
   showCredits: boolean;
@@ -19,6 +20,7 @@ export interface OverlaySettings {
 }
 
 export const DEFAULT_SETTINGS: OverlaySettings = {
+  overlayLayout: 'grouped',
   scalePercent: 175,
   backgroundTransparencyPercent: 23,
   showCredits: true,

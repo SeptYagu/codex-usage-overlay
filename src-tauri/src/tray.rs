@@ -70,9 +70,6 @@ pub fn setup_tray(app: &AppHandle, autostart_enabled: bool, is_installed: bool) 
                 toggle_main_window(app);
             }
         })
-        .on_menu_event(|app, event| {
-            handle_menu_action(app, event.id.as_ref());
-        })
         .build(app)?;
 
     Ok(tray)

@@ -2,9 +2,20 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OverlayLayout {
+    Stacks,
+    #[default]
+    #[serde(other)]
+    Grouped,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlaySettings {
+    #[serde(default)]
+    pub overlay_layout: OverlayLayout,
     #[serde(default = "default_scale")]
     pub scale_percent: u32,
     #[serde(default = "default_transparency")]
@@ -28,6 +39,7 @@ fn default_language() -> String { "auto".to_string() }
 impl Default for OverlaySettings {
     fn default() -> Self {
         Self {
+            overlay_layout: OverlayLayout::default(),
             scale_percent: default_scale(),
             background_transparency_percent: default_transparency(),
             show_credits: default_true(),
@@ -141,6 +153,59 @@ fn chrono_like_now() -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     format!("timestamp:{}", duration.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn legacy_settings() -> serde_json::Value {
+        json!({"scalePercent":220,"backgroundTransparencyPercent":50,
+            "showCredits":false,"refreshIntervalSeconds":300,
+            "language":"zh-CN","autoStart":false})
+    }
+
+    fn assert_preferences(settings: &OverlaySettings) {
+        assert_eq!(settings.scale_percent, 220);
+        assert_eq!(settings.background_transparency_percent, 50);
+        assert!(!settings.show_credits);
+        assert_eq!(settings.refresh_interval_seconds, 300);
+        assert_eq!(settings.language, "zh-CN");
+        assert!(!settings.auto_start);
+    }
+
+    #[test]
+    fn legacy_settings_default_to_grouped_without_resetting_preferences() {
+        let settings: OverlaySettings = serde_json::from_value(legacy_settings()).unwrap();
+        assert_eq!(settings.overlay_layout, OverlayLayout::Grouped);
+        assert_preferences(&settings);
+        assert_eq!(OverlaySettings::default().overlay_layout, OverlayLayout::Grouped);
+    }
+
+    #[test]
+    fn both_layouts_round_trip_with_existing_preferences() {
+        for (wire, layout) in [("grouped", OverlayLayout::Grouped), ("stacks", OverlayLayout::Stacks)] {
+            let mut value = legacy_settings();
+            value["overlayLayout"] = json!(wire);
+            let settings: OverlaySettings = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(settings.overlay_layout, layout);
+            assert_preferences(&settings);
+            assert_eq!(serde_json::to_value(&settings).unwrap(), value);
+            let restored: OverlaySettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(restored.overlay_layout, layout);
+            assert_preferences(&restored);
+        }
+    }
+
+    #[test]
+    fn unknown_layout_defaults_without_resetting_preferences() {
+        let mut value = legacy_settings();
+        value["overlayLayout"] = json!("future-layout");
+        let settings: OverlaySettings = serde_json::from_value(value).unwrap();
+        assert_eq!(settings.overlay_layout, OverlayLayout::Grouped);
+        assert_preferences(&settings);
+    }
 }
 
 /// Detects whether the current executable is running from an installed environment

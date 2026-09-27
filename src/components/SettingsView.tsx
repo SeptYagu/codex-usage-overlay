@@ -15,7 +15,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onUpdateSettings,
 }) => {
   const { t } = useTranslation();
-  const [localSettings, setLocalSettings] = useState<OverlaySettings>(settings);
   const [isInstalled, setIsInstalled] = useState<boolean>(false);
 
   useEffect(() => {
@@ -26,11 +25,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   useEffect(() => {
     getCurrentWindow().setTitle(t('windowSettings')).catch(console.error);
-  }, [t, localSettings.language]);
+  }, [t, settings.language]);
 
   const updateField = <K extends keyof OverlaySettings>(key: K, value: OverlaySettings[K]) => {
-    const next = { ...localSettings, [key]: value };
-    setLocalSettings(next);
+    const next = { ...settings, [key]: value };
     onUpdateSettings(next);
     if (key === 'language') {
       updateLanguage(value as string);
@@ -48,20 +46,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </span>
         </div>
 
+        <div className="flex items-center justify-between p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/60">
+          <label htmlFor="overlay-layout" className="text-sm font-medium">{t('overlayLayout')}</label>
+          <select
+            id="overlay-layout"
+            value={settings.overlayLayout}
+            onChange={(e) => updateField('overlayLayout', e.target.value as OverlaySettings['overlayLayout'])}
+            className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+          >
+            <option value="grouped">{t('groupedLayout')}</option>
+            <option value="stacks">{t('stacksLayout')}</option>
+          </select>
+        </div>
+
         {/* 1. Scale Slider */}
         <div className="space-y-1.5">
           <div className="flex justify-between items-center text-sm font-semibold">
             <span>{t('scale')}</span>
             <span className="font-mono text-cyan-600 dark:text-cyan-400 text-sm">
-              {localSettings.scalePercent}%
+              {settings.scalePercent}%
             </span>
           </div>
           <input
+            aria-label={t('scale')}
             type="range"
             min="100"
             max="250"
             step="5"
-            value={localSettings.scalePercent}
+            value={settings.scalePercent}
             onChange={(e) => updateField('scalePercent', parseInt(e.target.value, 10))}
             className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
           />
@@ -77,15 +89,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="flex justify-between items-center text-sm font-semibold">
             <span>{t('transparency')}</span>
             <span className="font-mono text-cyan-600 dark:text-cyan-400 text-sm">
-              {localSettings.backgroundTransparencyPercent}%
+              {settings.backgroundTransparencyPercent}%
             </span>
           </div>
           <input
+            aria-label={t('transparency')}
             type="range"
             min="0"
             max="80"
             step="5"
-            value={localSettings.backgroundTransparencyPercent}
+            value={settings.backgroundTransparencyPercent}
             onChange={(e) => updateField('backgroundTransparencyPercent', parseInt(e.target.value, 10))}
             className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
           />
@@ -103,7 +116,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <span className="text-sm font-medium">{t('showCredits')}</span>
             <input
               type="checkbox"
-              checked={localSettings.showCredits}
+              checked={settings.showCredits}
               onChange={(e) => updateField('showCredits', e.target.checked)}
               className="w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 accent-cyan-500 cursor-pointer"
             />
@@ -115,7 +128,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <span className="text-sm font-medium">{t('autoStart')}</span>
               <input
                 type="checkbox"
-                checked={localSettings.autoStart}
+                checked={settings.autoStart}
                 onChange={(e) => {
                   const checked = e.target.checked;
                   updateField('autoStart', checked);
@@ -130,7 +143,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="flex items-center justify-between p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/60">
             <span className="text-sm font-medium">{t('language')}</span>
             <select
-              value={localSettings.language}
+              aria-label={t('language')}
+              value={settings.language}
               onChange={(e) => updateField('language', e.target.value)}
               className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500"
             >
@@ -144,7 +158,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="flex items-center justify-between p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/60">
             <span className="text-sm font-medium">{t('refreshInterval')}</span>
             <select
-              value={localSettings.refreshIntervalSeconds}
+              aria-label={t('refreshInterval')}
+              value={settings.refreshIntervalSeconds}
               onChange={(e) => updateField('refreshIntervalSeconds', parseInt(e.target.value, 10))}
               className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono"
             >

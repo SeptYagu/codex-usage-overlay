@@ -64,10 +64,6 @@ pub fn run() {
         .setup(move |app| {
             // Setup system tray
             let is_installed = config::is_installed_environment();
-            if !is_installed {
-                use tauri_plugin_autostart::ManagerExt;
-                let _ = app.autolaunch().disable();
-            }
             let autostart_enabled = is_installed && initial_settings.auto_start;
             let _ = setup_tray(app.handle(), autostart_enabled, is_installed);
 

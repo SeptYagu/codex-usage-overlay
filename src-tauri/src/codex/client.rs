@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -36,37 +37,60 @@ impl CodexClient {
         }
     }
 
-    pub fn refresh_executable(&mut self) -> Option<&PathBuf> {
-        self.exe_path = find_codex_executable();
-        self.exe_path.as_ref()
+    fn spawn_with_recovery<T>(
+        &mut self,
+        mut find_executable: impl FnMut() -> Option<PathBuf>,
+        mut spawn: impl FnMut(&Path) -> io::Result<T>,
+    ) -> Result<T> {
+        if !self.exe_path.as_ref().is_some_and(|p| p.is_file()) {
+            self.exe_path = find_executable();
+        }
+
+        for attempt in 0..2 {
+            let exe = self.exe_path.clone().ok_or_else(|| {
+                anyhow!(
+                    "找不到 Codex app-server。请确认已安装并登录 Codex，或设置 CODEX_CLI_PATH。"
+                )
+            })?;
+
+            match spawn(&exe) {
+                Ok(child) => return Ok(child),
+                Err(error) => {
+                    if error.kind() == io::ErrorKind::NotFound {
+                        self.exe_path = None;
+                        if attempt == 0 {
+                            self.exe_path = find_executable();
+                            continue;
+                        }
+                    }
+                    return Err(error).with_context(|| format!("启动 Codex 进程失败: {:?}", exe));
+                }
+            }
+        }
+
+        unreachable!("each spawn attempt returns or retries once")
     }
 
     pub async fn fetch_usage(&mut self, timeout_duration: Duration) -> Result<CodexUsage> {
-        let exe = match &self.exe_path {
-            Some(p) => p.clone(),
-            None => {
-                if let Some(found) = self.refresh_executable() {
-                    found.clone()
-                } else {
-                    return Err(anyhow!(
-                        "找不到 Codex app-server。请确认已安装并登录 Codex，或设置 CODEX_CLI_PATH。"
-                    ));
-                }
-            }
-        };
+        let mut child = self.spawn_with_recovery(find_codex_executable, |exe| {
+            Command::new(exe)
+                .arg("app-server")
+                .arg("--stdio")
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+        })?;
 
-        let mut child = Command::new(&exe)
-            .arg("app-server")
-            .arg("--stdio")
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .with_context(|| format!("启动 Codex 进程失败: {:?}", exe))?;
-
-        let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("无法连接子进程 stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("无法连接子进程 stdout"))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("无法连接子进程 stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("无法连接子进程 stdout"))?;
         let mut reader = BufReader::new(stdout).lines();
 
         let request_future = async move {
@@ -74,7 +98,9 @@ impl CodexClient {
             let init_notif = r#"{"method":"initialized","params":{}}"#;
             let query_req = r#"{"id":2,"method":"account/rateLimits/read","params":{"excludeResetCreditDetails":true,"supportsLunaReserveFallback":false}}"#;
 
-            stdin.write_all(format!("{}\n{}\n{}\n", init_req, init_notif, query_req).as_bytes()).await?;
+            stdin
+                .write_all(format!("{}\n{}\n{}\n", init_req, init_notif, query_req).as_bytes())
+                .await?;
             stdin.flush().await?;
 
             while let Some(line) = reader.next_line().await? {
@@ -136,7 +162,10 @@ fn parse_usage_result(result: &Value) -> Result<CodexUsage> {
     let mut has_credits = false;
 
     if let Some(credits) = bucket.get("credits") {
-        has_credits = credits.get("hasCredits").and_then(|h| h.as_bool()).unwrap_or(false);
+        has_credits = credits
+            .get("hasCredits")
+            .and_then(|h| h.as_bool())
+            .unwrap_or(false);
         if credits.get("unlimited").and_then(|u| u.as_bool()) == Some(true) {
             credits_display = "∞".to_string();
         } else if let Some(bal) = credits.get("balance") {
@@ -183,6 +212,172 @@ fn parse_usage_result(result: &Value) -> Result<CodexUsage> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn existing_executable() -> PathBuf {
+        std::env::current_exe().unwrap()
+    }
+
+    fn replacement_executable() -> PathBuf {
+        // Spawn is injected, so any existing file is a valid fixture.
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")
+    }
+
+    #[test]
+    fn valid_cached_executable_does_not_repeat_discovery() {
+        let cached = existing_executable();
+        let mut client = CodexClient {
+            exe_path: Some(cached.clone()),
+        };
+        let spawned = client
+            .spawn_with_recovery(
+                || panic!("valid cached path should not trigger discovery"),
+                |path| Ok(path.to_path_buf()),
+            )
+            .unwrap();
+        assert_eq!(spawned, cached);
+    }
+
+    #[test]
+    fn absent_or_missing_cached_executable_is_rediscovered() {
+        let missing = existing_executable().join("missing-codex.exe");
+        for cache in [None, Some(missing)] {
+            let replacement = replacement_executable();
+            let mut client = CodexClient { exe_path: cache };
+            let mut lookups = 0;
+            let spawned = client
+                .spawn_with_recovery(
+                    || {
+                        lookups += 1;
+                        Some(replacement.clone())
+                    },
+                    |path| Ok(path.to_path_buf()),
+                )
+                .unwrap();
+            assert_eq!(lookups, 1);
+            assert_eq!(spawned, replacement);
+            assert_eq!(client.exe_path, Some(replacement));
+        }
+    }
+
+    #[test]
+    fn missing_replacement_leaves_cache_empty_for_later_polls() {
+        let mut client = CodexClient {
+            exe_path: Some(existing_executable().join("missing-codex.exe")),
+        };
+        let result: Result<()> = client.spawn_with_recovery(
+            || None,
+            |_| panic!("spawn should not run when discovery fails"),
+        );
+        assert!(result.is_err());
+        assert!(client.exe_path.is_none());
+
+        let replacement = replacement_executable();
+        let spawned = client
+            .spawn_with_recovery(|| Some(replacement.clone()), |path| Ok(path.to_path_buf()))
+            .unwrap();
+        assert_eq!(spawned, replacement);
+    }
+
+    #[test]
+    fn executable_disappearing_during_spawn_is_retried_with_replacement() {
+        let cached = existing_executable();
+        let replacement = replacement_executable();
+        let mut client = CodexClient {
+            exe_path: Some(cached.clone()),
+        };
+        let mut lookups = 0;
+        let mut attempts = 0;
+        let spawned = client
+            .spawn_with_recovery(
+                || {
+                    lookups += 1;
+                    Some(replacement.clone())
+                },
+                |path| {
+                    attempts += 1;
+                    if attempts == 1 {
+                        assert_eq!(path, cached);
+                        Err(io::Error::from(io::ErrorKind::NotFound))
+                    } else {
+                        Ok(path.to_path_buf())
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(lookups, 1);
+        assert_eq!(spawned, replacement);
+        assert_eq!(client.exe_path, Some(replacement));
+    }
+
+    #[test]
+    fn spawn_time_disappearance_without_replacement_clears_cache() {
+        let mut client = CodexClient {
+            exe_path: Some(existing_executable()),
+        };
+        let mut attempts = 0;
+        let result: Result<()> = client.spawn_with_recovery(
+            || None,
+            |_| {
+                attempts += 1;
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+        assert!(client.exe_path.is_none());
+    }
+
+    #[test]
+    fn spawn_retries_once_and_clears_a_second_missing_path() {
+        let mut client = CodexClient {
+            exe_path: Some(existing_executable()),
+        };
+        let mut attempts = 0;
+        let mut lookups = 0;
+        let error = client
+            .spawn_with_recovery::<()>(
+                || {
+                    lookups += 1;
+                    Some(replacement_executable())
+                },
+                |_| {
+                    attempts += 1;
+                    Err(io::Error::from(io::ErrorKind::NotFound))
+                },
+            )
+            .unwrap_err();
+        assert_eq!(attempts, 2);
+        assert_eq!(lookups, 1);
+        assert!(client.exe_path.is_none());
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn unrelated_spawn_errors_are_not_retried() {
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::InvalidInput] {
+            let cached = existing_executable();
+            let mut client = CodexClient {
+                exe_path: Some(cached.clone()),
+            };
+            let mut attempts = 0;
+            let error = client
+                .spawn_with_recovery::<()>(
+                    || panic!("unrelated errors should not trigger discovery"),
+                    |_| {
+                        attempts += 1;
+                        Err(io::Error::from(kind))
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(attempts, 1);
+            assert_eq!(client.exe_path, Some(cached));
+            assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), kind);
+        }
+    }
 
     #[test]
     fn test_parse_usage_result_with_bucket() {
@@ -242,4 +437,3 @@ mod tests {
         assert_eq!(parsed.has_credits, true);
     }
 }
-

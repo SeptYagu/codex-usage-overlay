@@ -1,84 +1,50 @@
-# Codex Usage Overlay (Tauri v2)
+# Codex Usage Overlay（Tauri v2）
 
-[![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-2F6FEB?style=for-the-badge)](README.md) [![English](https://img.shields.io/badge/Language-English-lightgrey?style=for-the-badge)](README.en.md)
+简体中文 · [English](README.en.md)
 
-现代化、超轻量级的 OpenAI Codex 桌面悬浮窗小部件。
+Windows 桌面悬浮窗，显示 Codex 配额和 Credit 余额。通过本机 Codex `app-server` 的 `account/rateLimits/read` 接口获取用量，不读取或保存 `auth.json`，不修改 Codex 安装文件。
 
-通过本机 Codex `app-server` 的 `account/rateLimits/read` 接口获取实时用量与配额，无需配置 `auth.json`，不调用远程未授权网页接口。
+## 下载与启动
 
-基于 **Tauri v2 (Rust + React + Tailwind CSS + Windows WebView2)** 构建，常驻内存仅需 ~25MB（原 PowerShell 方案的 1/4），无控制台黑框，不触发杀毒软件误报。
+从[发布页](https://github.com/SeptYagu/codex-usage-overlay/releases)下载 Tauri 预览版，可选择 NSIS 安装程序、MSI 安装包或 Windows x64 便携 ZIP。`SHA256SUMS.txt` 包含全部三个包的校验值。
 
-## 下载
+安装程序直接安装；便携版解压后运行 `CodexUsageOverlay.exe`。需要 Windows 10/11、WebView2，以及已安装并登录的 Codex 应用。无需 PowerShell 启动脚本；查找 Microsoft Store 版 Codex 时会使用 Windows 自带的 PowerShell。
 
-从 [最新版本](https://github.com/SeptYagu/codex-usage-overlay/releases/latest) 下载编译好的安装包或便携版本。发布页还提供 [SHA256 校验值](https://github.com/SeptYagu/codex-usage-overlay/releases/latest/download/SHA256SUMS.txt)。
+稳定版 `v0.1.x` 是旧 PowerShell 版本；Tauri 重写版本目前以预览版发布。
 
----
+## 浮窗与设置
 
-## 核心特性
+- 显示 5 小时和每周配额的**剩余百分比**、重置倒计时及可选的 Credit 余额。数值余额保留两位小数，无限余额显示 `∞`。
+- 默认使用**分组胶囊**布局：配额值下方显示倒计时，余额居中排列。**指标堆叠**布局在数值上方显示标签，下方显示倒计时或余额说明。可在浮窗设置中切换。
+- 两种布局均跟随 Windows 浅色/深色主题。支持缩放（100%–250%）、背景透明度（0%–80%）、余额显隐、刷新间隔（30/60/120/300 秒）及中英文。
+- 设置即时生效，并在各窗口间同步。旧设置文件保留原有偏好，布局默认为分组胶囊。
+- 按住鼠标左键拖动；右键浮窗可刷新、打开设置、隐藏或退出。单击托盘图标可显示或隐藏浮窗。
+- 仅安装版提供开机自启设置。启动便携版或开发版不会修改安装版的自启注册表项。
+- Codex 可执行文件遵循原有的自定义路径/PATH/CLI/Store 查找顺序。文件移动或消失后，后续轮询可重新查找。自定义位置可通过 `CODEX_CLI_PATH` 指定。
 
-- **置顶透明悬浮窗**：固定置顶、无边框、无任务栏图标、支持亚克力/毛玻璃磨砂质感；背景透明度可调，文字与数值始终保持高对比度清晰易读。
-- **平滑自由拖动**：鼠标左键按住悬浮窗即可随心拖曳摆放；程序智能识别多显示器虚拟屏幕边缘，关闭后自动将坐标保存至 `%LOCALAPPDATA%\CodexUsageOverlay\overlay-position.json`。
-- **实时用量监控**：
-  - **5H / WK 剩余百分比**：直观展示 5 小时与每周用量配额，依据阈值动态着色（$\ge 50\%$ 绿色、$\ge 20\%$ 黄色、$< 20\%$ 红色警示）。
-  - **动态倒计时**：前端本地秒级计算重置倒计时（例如 `167H 05min`），无需重复频繁向 Codex 轮询。
-  - **Credit 余额显示**：支持查看 Credit 余额（`CR`）或无限额度（`∞`）。
-- **系统托盘集成**：
-  - 动态双环仪表盘托盘图标，随配额消耗动态缩短与变色。
-  - Hover Tooltip 实时显示 `5H 80% | WK 60% | CR 12.50`。
-  - 左键双击托盘图标快速显隐悬浮窗。
-  - 右键托盘菜单支持：立即刷新用量、浮窗设置、开机自启切换、退出程序。
-- **现代化设置面板**：
-  - **多语言界面**：支持简体中文 (`zh-CN`) 与 English (`en-US`)。
-  - **浮窗缩放**：100% ~ 250% 自由无级缩放。
-  - **背景透明度**：0%（实体黑底）~ 80%（高透玻璃）即时调节预览。
-  - **刷新频率控制**：可按需选择 15 秒、30 秒、60 秒、2 分钟、5 分钟。
-  - **开机自动启动**：一键开启 Windows 登录自启动。
-- **进程与通讯优化**：
-  - Rust 异步 Tokio 直接处理 stdio JSON-RPC 通信，彻底消除旧脚本每分钟反复唤醒 PowerShell 子进程带来的 CPU 抖动。
-  - 单实例互斥保护：已运行时再次双击直接呼出已有窗口。
-
----
+设置、位置和用量状态保存在 `%LOCALAPPDATA%\CodexUsageOverlay\` 下的 `settings.json`、`window-position.json` 和 `usage-status.json` 中。
 
 ## 开发与构建
 
-### 运行环境要求
-- **Windows 10 / 11**
-- **Node.js** >= 18
-- **Rust** >= 1.78 (`cargo`, `rustc`)
+安装 Node.js 22、当前稳定 Rust 工具链及 Windows Tauri 构建依赖。
 
-### 启动开发模式
 ```powershell
-# 1. 安装前端依赖
-npm install
-
-# 2. 启动 Tauri 开发模式（支持热重载）
+npm ci
+npm test
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml --locked
 npm run tauri dev
 ```
 
-### 构建独立发布版本
+构建并打包发布版：
+
 ```powershell
-npm run tauri build
+npm run tauri -- build --ci --bundles nsis,msi
+.\scripts\Build-TauriRelease.ps1 -Tag v0.3.2-preview
 ```
-编译产物位于 `src-tauri/target/release/codex-usage-overlay.exe` 及 NSIS 安装包。
 
----
+标签发布流程会测试并构建 Tauri 应用，再发布 NSIS、MSI、便携 ZIP 和校验文件。打包时会验证便携包内容与源文件一致。
 
-## 历史版本（PowerShell 脚本版）
+本分支已移除旧 PowerShell 实现和启动脚本；历史 `v0.1.x` 发布版仍可下载。
 
-原基于 PowerShell 5.1 + WPF 的独立脚本及打包测试工具依然完整保留在项目根目录与 `scripts/` 中：
-- **启动与控制**：`Start-CodexUsageOverlay.cmd`、`Start-CodexPetUsage.ps1`、`Stop-CodexPetUsage.ps1`
-- **核心逻辑**：`CodexPetUsageOverlay.ps1`、`Get-CodexUsage.ps1`、`Run-CodexUsageOverlay.ps1`、`Localization.ps1`
-- **便携打包与验证**：`scripts/Build-Portable.ps1`、`scripts/Test-Portable.ps1`
-
-如果需要在无 WebView2 的极端受限环境运行，依然可直接双击根目录下的 `Start-CodexUsageOverlay.cmd` 启动 PowerShell 脚本版。
-
-### 兼容性说明
-- 适用于 Windows 10/11。
-- 默认使用 Windows 自带的 Windows PowerShell 5.1，无需安装 PowerShell 7，无需管理员权限。
-- 需要安装并登录 Codex 桌面应用。程序会自动查找 PATH 中的 Codex、用户目录下的 Codex CLI，或 Microsoft Store 版本的 Codex。
-- 如果 Codex 安装在自定义位置，可在启动前设置 `CODEX_CLI_PATH`。
-
----
-
-## 反馈与交流
-如有建议或问题，欢迎联系：`septwind@agent.qq.com`。
+反馈邮箱：septwind@agent.qq.com
