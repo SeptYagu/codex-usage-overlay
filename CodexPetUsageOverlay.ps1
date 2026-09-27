@@ -547,7 +547,7 @@ function Show-OverlaySettings {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="浮窗设置" Width="340" SizeToContent="Height"
-        ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize" WindowStartupLocation="CenterScreen"
         ShowInTaskbar="False" Topmost="True" Background="#FFF5F6F8">
   <StackPanel Margin="18,14,18,16">
     <Grid Margin="0,0,0,2">
