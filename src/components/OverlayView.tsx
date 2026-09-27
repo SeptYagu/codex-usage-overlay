@@ -31,8 +31,34 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
   const [, setTick] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const lastSizeRef = useRef({ width: 0, height: 0 });
+  const [dprComp, setDprComp] = useState(1);
   const scale = settings.scalePercent / 100;
   const layout = settings.overlayLayout === 'stacks' ? 'stacks' : 'grouped';
+
+  // WebView2 renders content at devicePixelRatio = monitor DPI scale x system
+  // text scaling (Windows "make text bigger"), while Tauri converts window
+  // logical/physical sizes using the monitor DPI scale only. When the user
+  // has text scaling != 100% the two diverge and the capsule overflows its
+  // window. Compensate with comp = devicePixelRatio / window scaleFactor:
+  // render the capsule at scale/comp and size the window at rect*comp, which
+  // keeps the physical size identical on every machine.
+  useEffect(() => {
+    const currentWindow = getCurrentWindow();
+    let unlisten: (() => void) | null = null;
+    const update = async () => {
+      try {
+        const sf = await currentWindow.scaleFactor();
+        setDprComp(window.devicePixelRatio > 0 ? window.devicePixelRatio / sf : 1);
+      } catch {
+        setDprComp(1);
+      }
+    };
+    void update();
+    currentWindow.onScaleChanged(() => { void update(); })
+      .then((fn) => { unlisten = fn; })
+      .catch(() => {});
+    return () => { if (unlisten) unlisten(); };
+  }, []);
 
   useEffect(() => {
     const timer = setInterval(() => setTick((tick) => tick + 1), 1000);
@@ -54,16 +80,16 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
       (width === lastSizeRef.current.width && height === lastSizeRef.current.height)) return;
     lastSizeRef.current = { width, height };
     try {
-      await getCurrentWindow().setSize(new LogicalSize(width, height));
+      await getCurrentWindow().setSize(new LogicalSize(width * dprComp, height * dprComp));
     } catch (err) {
       lastSizeRef.current = { width: 0, height: 0 };
       console.error('Failed to fit overlay size:', err);
     }
-  }, []);
+  }, [dprComp]);
 
   useLayoutEffect(() => {
     void fitCapsuleSize();
-  }, [scale, layout, settings.showCredits, settings.language, usage, fitCapsuleSize]);
+  }, [scale, layout, settings.showCredits, settings.language, usage, fitCapsuleSize, dprComp]);
 
   useEffect(() => {
     const el = rootRef.current;
@@ -109,7 +135,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
         title={usage ? t('tooltipUpdated', { time: new Date(usage.fetchedAt * 1000).toLocaleTimeString() }) : t('loadingTooltip')}
         style={{
           '--overlay-alpha': (100 - settings.backgroundTransparencyPercent) / 100,
-          transform: `scale(${scale})`,
+          transform: `scale(${scale / dprComp})`,
           transformOrigin: 'top left',
         } as React.CSSProperties}
         className={`overlay-capsule overlay-${layout}`}

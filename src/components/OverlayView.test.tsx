@@ -10,7 +10,11 @@ const tauri = vi.hoisted(() => ({
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: tauri.invoke }));
 vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ setSize: tauri.setSize }),
+  getCurrentWindow: () => ({
+    setSize: tauri.setSize,
+    scaleFactor: async () => 1,
+    onScaleChanged: async () => () => {},
+  }),
   LogicalSize: class { constructor(public width: number, public height: number) {} },
 }));
 
