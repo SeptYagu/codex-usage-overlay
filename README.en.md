@@ -8,6 +8,10 @@ The window stays on top, is hidden from the taskbar, and can be dragged with the
 
 The app has a bright, dashboard-style system tray icon. Double-click it to show or hide the window. Its right-click menu lets you show or hide the window, refresh usage immediately, open overlay settings, enable or disable launch at sign-in, or exit. Choose `中文` or `English` near the bottom of the menu to switch the interface and tips immediately; **Exit Overlay** is always the final item. On first launch, Chinese Windows interface languages (`zh-*`) default to Simplified Chinese; other languages default to English. A manual choice is saved in the settings file and remembered after restart. Older settings files without a language entry follow the Windows interface language. In **Overlay Settings**, sliders adjust the window size (100%–250%) and background transparency (0%–80%, default 23%). You can also toggle **Show Credit balance**. This setting controls whether the balance appears in both the overlay and the tray tooltip. Choices are saved when the settings window closes. Transparency affects only the background; text remains clear. Settings are saved to `%LOCALAPPDATA%\CodexUsageOverlay\settings.json`. The bottom of the settings window shows the feedback email `septwind@agent.qq.com`. On first launch, the app creates a sign-in startup entry for the current Windows user; administrator rights are not required. Turn off **Launch at sign-in** in the tray menu to disable it. The choice is saved.
 
+## Download
+
+Get the [Windows portable ZIP](https://github.com/SeptYagu/codex-usage-overlay/releases/latest/download/CodexUsageOverlay-Portable.zip) from the [latest release](https://github.com/SeptYagu/codex-usage-overlay/releases/latest). The release also includes a [SHA256 checksum](https://github.com/SeptYagu/codex-usage-overlay/releases/latest/download/SHA256SUMS.txt).
+
 ## Launch
 
 Double-click `Start-CodexUsageOverlay.cmd` to start the app. You can also open PowerShell in the extracted folder and run:

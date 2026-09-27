@@ -8,6 +8,10 @@
 
 程序带明亮的仪表盘样式系统托盘图标。双击图标可显示或隐藏窗口；右键菜单可显示/隐藏、立即刷新、调整浮窗设置、设置登录时自动启动或退出。菜单靠下位置可选择 `中文` 或 `English`，切换后界面和提示立即更新；“退出悬浮窗”始终是最后一项。首次运行时，Windows 界面语言为中文（`zh-*`）则默认简体中文，其他语言默认 English；手动选择会保存到设置文件，重启后继续使用。旧版设置文件没有语言字段时按 Windows 界面语言初始化。打开“浮窗设置”可拖动滑块即时调整大小（100%–250%）和背景透明度（0%–80%，默认 23%），也可勾选或取消“显示 Credit 余额”；该选择同时控制悬浮窗和托盘悬停提示中的余额显示。关闭设置窗口后会保存选择，透明度只影响背景，文字保持清晰。设置保存在当前 Windows 用户的 `%LOCALAPPDATA%\CodexUsageOverlay\settings.json`。设置窗口底部提供反馈邮箱 septwind@agent.qq.com。首次启动时会为当前 Windows 用户创建登录启动项，不需要管理员权限。取消托盘菜单中的“登录时自动启动”即可关闭，选择会保存。
 
+## 下载
+
+从 [最新版本](https://github.com/SeptYagu/codex-usage-overlay/releases/latest) 下载 [Windows 便携版 ZIP](https://github.com/SeptYagu/codex-usage-overlay/releases/latest/download/CodexUsageOverlay-Portable.zip)。发布页还提供 [SHA256 校验值](https://github.com/SeptYagu/codex-usage-overlay/releases/latest/download/SHA256SUMS.txt)。
+
 ## 启动
 
 双击 `Start-CodexUsageOverlay.cmd` 即可启动。也可以在解压后的目录中打开 PowerShell，运行：
