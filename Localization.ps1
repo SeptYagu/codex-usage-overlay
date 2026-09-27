@@ -1,4 +1,4 @@
-$script:OverlayText = @{
+﻿$script:OverlayText = @{
     zh = @{
         AppTitle = 'Codex 用量悬浮窗'
         WindowShow = '显示悬浮窗'
