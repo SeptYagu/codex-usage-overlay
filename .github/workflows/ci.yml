@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, Test & Build Check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Frontend Dependencies
+        shell: pwsh
+        run: npm ci
+
+      - name: Frontend Typecheck & Tests
+        shell: pwsh
+        run: |
+          npm run build
+          npm test
+
+      - name: Rust Unit & Integration Tests
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked

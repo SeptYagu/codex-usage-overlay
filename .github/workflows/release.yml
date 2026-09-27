@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and publish (e.g. v1.0.0)'
+        required: true
 
 permissions:
   contents: write
@@ -27,6 +32,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
       - name: Test and build Tauri app
         shell: pwsh
         run: |
@@ -41,22 +51,27 @@ jobs:
 
       - name: Package and verify Tauri release
         shell: pwsh
-        run: .\scripts\Build-TauriRelease.ps1 -Tag $env:GITHUB_REF_NAME -OutputDirectory "$env:RUNNER_TEMP\codex-usage-release"
+        run: |
+          $releaseTag = "${{ github.event.inputs.tag }}"
+          if (-not $releaseTag) { $releaseTag = $env:GITHUB_REF_NAME }
+          .\scripts\Build-TauriRelease.ps1 -Tag $releaseTag -OutputDirectory "$env:RUNNER_TEMP\codex-usage-release"
 
       - name: Publish GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $releaseTag = "${{ github.event.inputs.tag }}"
+          if (-not $releaseTag) { $releaseTag = $env:GITHUB_REF_NAME }
           $releaseDirectory = Join-Path $env:RUNNER_TEMP 'codex-usage-release'
           $assets = @(Get-ChildItem -LiteralPath $releaseDirectory -File | ForEach-Object { $_.FullName })
           if ($assets.Count -lt 2) { throw 'Release assets are missing.' }
-          gh release view $env:GITHUB_REF_NAME --json id 2>&1 | Out-Null
+          gh release view $releaseTag --json id 2>&1 | Out-Null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:GITHUB_REF_NAME @assets --clobber
+            gh release upload $releaseTag @assets --clobber
           } else {
             $previewArgs = @()
-            if ($env:GITHUB_REF_NAME -match '-') { $previewArgs = @('--prerelease', '--latest=false') }
-            gh release create $env:GITHUB_REF_NAME @assets --verify-tag --generate-notes --title $env:GITHUB_REF_NAME @previewArgs
+            if ($releaseTag -match '-') { $previewArgs = @('--prerelease', '--latest=false') }
+            gh release create $releaseTag @assets --verify-tag --generate-notes --title $releaseTag @previewArgs
           }
           if ($LASTEXITCODE -ne 0) { throw 'GitHub Release publication failed.' }
