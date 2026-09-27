@@ -274,9 +274,8 @@ $script:autoStartEnabled = $false
 $script:settingsMenuItem = $null
 $script:refreshMenuItem = $null
 $script:trayExitMenuItem = $null
-$script:languageSelectorHost = $null
-$script:languageChineseButton = $null
-$script:languageEnglishButton = $null
+$script:languageChineseMenuItem = $null
+$script:languageEnglishMenuItem = $null
 $script:settingsWindow = $null
 $script:activeBalloonKey = $null
 $script:activeBalloonUntil = [DateTime]::MinValue
@@ -384,13 +383,11 @@ function Update-TrayStatusText {
 }
 
 function Update-LanguageSelector {
-    if ($null -ne $script:languageChineseButton) {
-        $script:languageChineseButton.Text = if ($script:language -eq 'zh') { '✓ 中文' } else { '中文' }
-        $script:languageChineseButton.AccessibleName = '中文'
+    if ($null -ne $script:languageChineseMenuItem) {
+        $script:languageChineseMenuItem.Checked = ($script:language -eq 'zh')
     }
-    if ($null -ne $script:languageEnglishButton) {
-        $script:languageEnglishButton.Text = if ($script:language -eq 'en') { '✓ English' } else { 'English' }
-        $script:languageEnglishButton.AccessibleName = 'English'
+    if ($null -ne $script:languageEnglishMenuItem) {
+        $script:languageEnglishMenuItem.Checked = ($script:language -eq 'en')
     }
 }
 
@@ -635,61 +632,12 @@ function Initialize-SystemTray {
     $null = $script:trayMenu.Items.Add($script:autoStartMenuItem)
     $null = $script:trayMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new())
 
-    $menuItemHeight = $script:windowMenuItem.GetPreferredSize([System.Drawing.Size]::Empty).Height
-    $languageButtonHeight = $menuItemHeight - 2
-    $languagePanel = [System.Windows.Forms.FlowLayoutPanel]::new()
-    $languagePanel.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
-    $languagePanel.WrapContents = $false
-    $languagePanel.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $languagePanel.Size = [System.Drawing.Size]::new(210, $menuItemHeight)
-    $languagePanel.Padding = [System.Windows.Forms.Padding]::new(28, 1, 0, 0)
-    $languagePanel.Margin = [System.Windows.Forms.Padding]::Empty
-    $languagePanel.BackColor = $script:trayMenu.BackColor
-
-    $script:languageChineseButton = [System.Windows.Forms.Button]::new()
-    $script:languageChineseButton.Font = $script:trayMenu.Font
-    $script:languageChineseButton.AutoSize = $false
-    $script:languageChineseButton.Size = [System.Drawing.Size]::new(
-        [System.Windows.Forms.TextRenderer]::MeasureText('✓ 中文', $script:trayMenu.Font).Width + 8,
-        $languageButtonHeight)
-    $script:languageChineseButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-    $script:languageChineseButton.FlatAppearance.BorderSize = 0
-    $script:languageChineseButton.UseVisualStyleBackColor = $false
-    $script:languageChineseButton.BackColor = $languagePanel.BackColor
-    $script:languageChineseButton.Margin = [System.Windows.Forms.Padding]::Empty
-    $script:languageChineseButton.Padding = [System.Windows.Forms.Padding]::Empty
-    $script:languageChineseButton.add_Click({ Set-OverlayLanguage -Language 'zh' })
-
-    $script:languageEnglishButton = [System.Windows.Forms.Button]::new()
-    $script:languageEnglishButton.Font = $script:trayMenu.Font
-    $script:languageEnglishButton.AutoSize = $false
-    $script:languageEnglishButton.Size = [System.Drawing.Size]::new(
-        [System.Windows.Forms.TextRenderer]::MeasureText('✓ English', $script:trayMenu.Font).Width + 8,
-        $languageButtonHeight)
-    $script:languageEnglishButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-    $script:languageEnglishButton.FlatAppearance.BorderSize = 0
-    $script:languageEnglishButton.UseVisualStyleBackColor = $false
-    $script:languageEnglishButton.BackColor = $languagePanel.BackColor
-    $script:languageEnglishButton.Margin = [System.Windows.Forms.Padding]::Empty
-    $script:languageEnglishButton.Padding = [System.Windows.Forms.Padding]::Empty
-    $script:languageEnglishButton.add_Click({ Set-OverlayLanguage -Language 'en' })
-
-    $null = $languagePanel.Controls.Add($script:languageChineseButton)
-    $languageSeparator = [System.Windows.Forms.Label]::new()
-    $languageSeparator.Font = $script:trayMenu.Font
-    $languageSeparator.Text = '|'
-    $languageSeparator.Size = [System.Drawing.Size]::new(12, $languageButtonHeight)
-    $languageSeparator.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    $languageSeparator.Margin = [System.Windows.Forms.Padding]::Empty
-    $null = $languagePanel.Controls.Add($languageSeparator)
-    $null = $languagePanel.Controls.Add($script:languageEnglishButton)
-
-    $script:languageSelectorHost = [System.Windows.Forms.ToolStripControlHost]::new($languagePanel)
-    $script:languageSelectorHost.AutoSize = $false
-    $script:languageSelectorHost.Size = [System.Drawing.Size]::new(210, $menuItemHeight)
-    $script:languageSelectorHost.Margin = [System.Windows.Forms.Padding]::Empty
-    $script:languageSelectorHost.Padding = [System.Windows.Forms.Padding]::Empty
-    $null = $script:trayMenu.Items.Add($script:languageSelectorHost)
+    $script:languageChineseMenuItem = [System.Windows.Forms.ToolStripMenuItem]::new('中文')
+    $script:languageEnglishMenuItem = [System.Windows.Forms.ToolStripMenuItem]::new('English')
+    $script:languageChineseMenuItem.add_Click({ Set-OverlayLanguage -Language 'zh' })
+    $script:languageEnglishMenuItem.add_Click({ Set-OverlayLanguage -Language 'en' })
+    $null = $script:trayMenu.Items.Add($script:languageChineseMenuItem)
+    $null = $script:trayMenu.Items.Add($script:languageEnglishMenuItem)
     $null = $script:trayMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new())
     $null = $script:trayMenu.Items.Add($exitMenuItem)
 
