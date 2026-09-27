@@ -1,5 +1,7 @@
 # Codex Usage Overlay
 
+[![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-2F6FEB?style=for-the-badge)](README.md) [![English](https://img.shields.io/badge/Language-English-lightgrey?style=for-the-badge)](README.en.md)
+
 一个独立的 Windows 用量悬浮窗。它不读取 Codex Pets 设置、宠物位置或 Codex 界面状态，也不修改 Codex 安装文件。悬浮窗通过本机 Codex `app-server` 的 `account/rateLimits/read` 获取数据，不读取或保存 `auth.json`，也不调用网页接口。
 
 窗口固定置顶，不在任务栏显示 PowerShell 窗口，可用鼠标左键拖动；位置会保存在当前 Windows 用户的 `%LOCALAPPDATA%\CodexUsageOverlay\window-position.json`。整体界面约为原迷你横栏的 1.75 倍，默认每 60 秒更新一次。第二行显示 5H 和 WK 的重置倒计时，不再显示周期标签；每段格式为累计小时和分钟，例如 `167H 05min`，两段之间留两个空格，数字使用加粗的大号字体。第一行各组之间留一个空格；5H/WK 数值栏预留三位数字和百分号宽度，减少数值位数变化时的整体宽度波动。两行共用同一底板，整体宽度随较长一行调整，内容左对齐。
