@@ -1,4 +1,4 @@
-name: Release portable overlay
+name: Release overlay
 
 on:
   push:
@@ -20,13 +20,28 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build portable archive
-        shell: powershell
-        run: .\scripts\Build-Portable.ps1 -OutputDirectory "$env:RUNNER_TEMP\codex-usage-release"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
 
-      - name: Verify release files
-        shell: powershell
-        run: .\scripts\Test-Portable.ps1 -OutputDirectory "$env:RUNNER_TEMP\codex-usage-release"
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test and build Tauri app
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
+          npm test
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed.' }
+          cargo test --manifest-path src-tauri/Cargo.toml --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
+          npm run tauri -- build --ci --bundles nsis,msi
+          if ($LASTEXITCODE -ne 0) { throw 'Tauri release build failed.' }
+
+      - name: Package and verify Tauri release
+        shell: pwsh
+        run: .\scripts\Build-TauriRelease.ps1 -Tag $env:GITHUB_REF_NAME -OutputDirectory "$env:RUNNER_TEMP\codex-usage-release"
 
       - name: Publish GitHub Release
         shell: pwsh
@@ -34,9 +49,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $releaseDirectory = Join-Path $env:RUNNER_TEMP 'codex-usage-release'
-          gh release create $env:GITHUB_REF_NAME `
-            (Join-Path $releaseDirectory 'CodexUsageOverlay-Portable.zip') `
-            (Join-Path $releaseDirectory 'SHA256SUMS.txt') `
-            --verify-tag --generate-notes --title $env:GITHUB_REF_NAME `
-            --notes 'Windows portable build / Windows 便携版。Download the ZIP and verify it with SHA256SUMS.txt.'
-          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release creation failed.' }
+          $assets = @(Get-ChildItem -LiteralPath $releaseDirectory -File | ForEach-Object { $_.FullName })
+          if ($assets.Count -lt 2) { throw 'Release assets are missing.' }
+          gh release view $env:GITHUB_REF_NAME --json id 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME @assets --clobber
+          } else {
+            $previewArgs = @()
+            if ($env:GITHUB_REF_NAME -match '-') { $previewArgs = @('--prerelease', '--latest=false') }
+            gh release create $env:GITHUB_REF_NAME @assets --verify-tag --generate-notes --title $env:GITHUB_REF_NAME @previewArgs
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release publication failed.' }

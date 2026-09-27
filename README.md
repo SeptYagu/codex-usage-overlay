@@ -1,48 +1,50 @@
-# Codex Usage Overlay
+# Codex Usage Overlay（Tauri v2）
 
-[![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-2F6FEB?style=for-the-badge)](README.md) [![English](https://img.shields.io/badge/Language-English-lightgrey?style=for-the-badge)](README.en.md)
+简体中文 · [English](README.en.md)
 
-一个独立的 Windows 用量悬浮窗。它不读取 Codex Pets 设置、宠物位置或 Codex 界面状态，也不修改 Codex 安装文件。悬浮窗通过本机 Codex `app-server` 的 `account/rateLimits/read` 获取数据，不读取或保存 `auth.json`，也不调用网页接口。
+Windows 桌面悬浮窗，显示 Codex 配额和 Credit 余额。通过本机 Codex `app-server` 的 `account/rateLimits/read` 接口获取用量，不读取或保存 `auth.json`，不修改 Codex 安装文件。
 
-窗口固定置顶，不在任务栏显示 PowerShell 窗口，可用鼠标左键拖动；位置会保存在当前 Windows 用户的 `%LOCALAPPDATA%\CodexUsageOverlay\window-position.json`。整体界面约为原迷你横栏的 1.75 倍，默认每 60 秒更新一次。第二行显示 5H 和 WK 的重置倒计时，不再显示周期标签；每段格式为累计小时和分钟，例如 `167H 05min`，两段之间留两个空格，数字使用加粗的大号字体。第一行各组之间留一个空格；5H/WK 数值栏预留三位数字和百分号宽度，减少数值位数变化时的整体宽度波动。两行共用同一底板，整体宽度随较长一行调整，内容左对齐。
+## 下载与启动
 
-程序带明亮的仪表盘样式系统托盘图标。双击图标可显示或隐藏窗口；右键菜单可显示/隐藏、立即刷新、调整浮窗设置、设置登录时自动启动或退出。菜单靠下位置可选择 `中文` 或 `English`，切换后界面和提示立即更新；“退出悬浮窗”始终是最后一项。首次运行时，Windows 界面语言为中文（`zh-*`）则默认简体中文，其他语言默认 English；手动选择会保存到设置文件，重启后继续使用。旧版设置文件没有语言字段时按 Windows 界面语言初始化。打开“浮窗设置”可拖动滑块即时调整大小（100%–250%）和背景透明度（0%–80%，默认 23%），也可勾选或取消“显示 Credit 余额”；该选择同时控制悬浮窗和托盘悬停提示中的余额显示。关闭设置窗口后会保存选择，透明度只影响背景，文字保持清晰。设置保存在当前 Windows 用户的 `%LOCALAPPDATA%\CodexUsageOverlay\settings.json`。设置窗口底部提供反馈邮箱 septwind@agent.qq.com。首次启动时会为当前 Windows 用户创建登录启动项，不需要管理员权限。取消托盘菜单中的“登录时自动启动”即可关闭，选择会保存。
+从[发布页](https://github.com/SeptYagu/codex-usage-overlay/releases)下载 Tauri 预览版，可选择 NSIS 安装程序、MSI 安装包或 Windows x64 便携 ZIP。`SHA256SUMS.txt` 包含全部三个包的校验值。
 
-## 下载
+安装程序直接安装；便携版解压后运行 `CodexUsageOverlay.exe`。需要 Windows 10/11、WebView2，以及已安装并登录的 Codex 应用。无需 PowerShell 启动脚本；查找 Microsoft Store 版 Codex 时会使用 Windows 自带的 PowerShell。
 
-从 [最新版本](https://github.com/SeptYagu/codex-usage-overlay/releases/latest) 下载 [Windows 便携版 ZIP](https://github.com/SeptYagu/codex-usage-overlay/releases/latest/download/CodexUsageOverlay-Portable.zip)。发布页还提供 [SHA256 校验值](https://github.com/SeptYagu/codex-usage-overlay/releases/latest/download/SHA256SUMS.txt)。
+稳定版 `v0.1.x` 是旧 PowerShell 版本；Tauri 重写版本目前以预览版发布。
 
-## 启动
+## 浮窗与设置
 
-双击 `Start-CodexUsageOverlay.cmd` 即可启动。也可以在解压后的目录中打开 PowerShell，运行：
+- 显示 5 小时和每周配额的**剩余百分比**、重置倒计时及可选的 Credit 余额。数值余额保留两位小数，无限余额显示 `∞`。
+- 默认使用**分组胶囊**布局：配额值下方显示倒计时，余额居中排列。**指标堆叠**布局在数值上方显示标签，下方显示倒计时或余额说明。可在浮窗设置中切换。
+- 两种布局均跟随 Windows 浅色/深色主题。支持缩放（100%–250%）、背景透明度（0%–80%）、余额显隐、刷新间隔（30/60/120/300 秒）及中英文。
+- 设置即时生效，并在各窗口间同步。旧设置文件保留原有偏好，布局默认为分组胶囊。
+- 按住鼠标左键拖动；右键浮窗可刷新、打开设置、隐藏或退出。单击托盘图标可显示或隐藏浮窗。
+- 仅安装版提供开机自启设置。启动便携版或开发版不会修改安装版的自启注册表项。
+- Codex 可执行文件遵循原有的自定义路径/PATH/CLI/Store 查找顺序。文件移动或消失后，后续轮询可重新查找。自定义位置可通过 `CODEX_CLI_PATH` 指定。
+
+设置、位置和用量状态保存在 `%LOCALAPPDATA%\CodexUsageOverlay\` 下的 `settings.json`、`window-position.json` 和 `usage-status.json` 中。
+
+## 开发与构建
+
+安装 Node.js 22、当前稳定 Rust 工具链及 Windows Tauri 构建依赖。
 
 ```powershell
-.\Start-CodexPetUsage.ps1
+npm ci
+npm test
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml --locked
+npm run tauri dev
 ```
 
-首次启动会在屏幕右上方显示悬浮窗。启动后可以关闭 PowerShell 窗口；悬浮窗会继续运行。
-
-## 停止
-
-在 PowerShell 中运行：
+构建并打包发布版：
 
 ```powershell
-.\Stop-CodexPetUsage.ps1
+npm run tauri -- build --ci --bundles nsis,msi
+.\scripts\Build-TauriRelease.ps1 -Tag v0.3.2-preview
 ```
 
-也可以右键悬浮窗并选择 **退出悬浮窗**。
+标签发布流程会测试并构建 Tauri 应用，再发布 NSIS、MSI、便携 ZIP 和校验文件。打包时会验证便携包内容与源文件一致。
 
-## 兼容性
+本分支已移除旧 PowerShell 实现和启动脚本；历史 `v0.1.x` 发布版仍可下载。
 
-- 适用于 Windows 10/11。
-- 默认使用 Windows 自带的 Windows PowerShell 5.1，因此无需安装 PowerShell 7，也无需管理员权限。可通过 `CODEX_USAGE_POWERSHELL_PATH` 指定其他 PowerShell。
-- 需要安装并登录 Codex 桌面应用。程序会自动查找 PATH 中的 Codex、用户目录下的 Codex CLI，或 Microsoft Store 版本的 Codex。
-- 如果 Codex 安装在自定义位置，可在启动前设置 `CODEX_CLI_PATH`，指向该安装中的 `codex.exe`。
-- 如果要指定 PowerShell，可设置 `CODEX_USAGE_POWERSHELL_PATH`，指向 `pwsh.exe` 或 `powershell.exe`。
-- 如果使用自定义 `CODEX_HOME`，请在启动悬浮窗前设置该环境变量；用量读取子进程会继承它。
-- 如果悬浮窗启动失败，会显示错误提示，并将详细信息写入 `%LOCALAPPDATA%\CodexUsageOverlay\startup-error.log`。
-- 设置保存或登录启动设置失败时，界面会显示当前语言的提示，详细信息写入 `%LOCALAPPDATA%\CodexUsageOverlay\overlay-error.log`。
-- 用量读取状态会记录在 `%LOCALAPPDATA%\CodexUsageOverlay\usage-status.json`，包含最近更新时间和错误信息，不包含用量数值。
-- 如果移动了程序文件夹，手动启动一次即可更新登录启动项中的路径。
-
-启动时不需要打开 Codex Pets，也不需要管理员权限。该工具只支持 Windows，目前需要 PowerShell 和 Codex 桌面应用保持可用。
+反馈邮箱：septwind@agent.qq.com

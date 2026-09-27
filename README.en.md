@@ -1,48 +1,50 @@
-# Codex Usage Overlay
+# Codex Usage Overlay (Tauri v2)
 
-[![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-lightgrey?style=for-the-badge)](README.md) [![English](https://img.shields.io/badge/Language-English-2F6FEB?style=for-the-badge)](README.en.md)
+[简体中文](README.md) · English
 
-A standalone usage overlay for Windows. It does not read Codex Pets settings, pet position, or Codex UI state, and it does not modify Codex installation files. The overlay gets usage data from the local Codex `app-server` through `account/rateLimits/read`. It does not read or save `auth.json` or call web APIs.
+A Windows desktop overlay that displays Codex quota and credit balances. It reads usage through the local Codex `app-server` command `account/rateLimits/read`; it does not read or save `auth.json` or modify Codex installation files.
 
-The window stays on top, is hidden from the taskbar, and can be dragged with the left mouse button. Its position is saved to `%LOCALAPPDATA%\CodexUsageOverlay\window-position.json` for the current Windows user. The interface is about 1.75 times the size of the original mini bar and refreshes every 60 seconds by default. The second row shows the 5H and WK reset countdowns without period labels. Each countdown uses cumulative hours and minutes, such as `167H 05min`; the two values are separated by two spaces and use larger, bold text. The groups on the first row are separated by one space. The 5H/WK value fields reserve room for three digits and a percent sign to reduce width changes as values change. Both rows share a background, are left aligned, and determine the window width together based on whichever row is longer.
+## Download and launch
 
-The app has a bright, dashboard-style system tray icon. Double-click it to show or hide the window. Its right-click menu lets you show or hide the window, refresh usage immediately, open overlay settings, enable or disable launch at sign-in, or exit. Choose `中文` or `English` near the bottom of the menu to switch the interface and tips immediately; **Exit Overlay** is always the final item. On first launch, Chinese Windows interface languages (`zh-*`) default to Simplified Chinese; other languages default to English. A manual choice is saved in the settings file and remembered after restart. Older settings files without a language entry follow the Windows interface language. In **Overlay Settings**, sliders adjust the window size (100%–250%) and background transparency (0%–80%, default 23%). You can also toggle **Show Credit balance**. This setting controls whether the balance appears in both the overlay and the tray tooltip. Choices are saved when the settings window closes. Transparency affects only the background; text remains clear. Settings are saved to `%LOCALAPPDATA%\CodexUsageOverlay\settings.json`. The bottom of the settings window shows the feedback email `septwind@agent.qq.com`. On first launch, the app creates a sign-in startup entry for the current Windows user; administrator rights are not required. Turn off **Launch at sign-in** in the tray menu to disable it. The choice is saved.
+Get the Tauri preview from the [releases page](https://github.com/SeptYagu/codex-usage-overlay/releases). Choose the NSIS setup executable, MSI installer, or Windows x64 portable ZIP. `SHA256SUMS.txt` includes checksums for all three packages.
 
-## Download
+Install a setup package, or extract the portable ZIP and run `CodexUsageOverlay.exe`. Windows 10/11, WebView2, and an installed, signed-in Codex app are required. No PowerShell launcher is needed; Microsoft Store executable discovery uses the built-in Windows PowerShell.
 
-Get the [Windows portable ZIP](https://github.com/SeptYagu/codex-usage-overlay/releases/latest/download/CodexUsageOverlay-Portable.zip) from the [latest release](https://github.com/SeptYagu/codex-usage-overlay/releases/latest). The release also includes a [SHA256 checksum](https://github.com/SeptYagu/codex-usage-overlay/releases/latest/download/SHA256SUMS.txt).
+The stable `v0.1.x` releases are the older PowerShell version; the Tauri rewrite is currently published as preview releases.
 
-## Launch
+## Overlay and settings
 
-Double-click `Start-CodexUsageOverlay.cmd` to start the app. You can also open PowerShell in the extracted folder and run:
+- Displays 5-hour and weekly **remaining** percentages, reset countdowns, and optional credits. Numeric balances use two decimals; unlimited credits appear as `∞`.
+- **Grouped capsule** is the default layout: readings with reset times underneath and inline credits. **Metric stacks** puts labels above values and captions below. Switch layouts in **Overlay Settings**.
+- Both layouts follow the Windows light/dark theme. Settings provide scale (100%–250%), background transparency (0%–80%), credits visibility, refresh interval (30/60/120/300 seconds), and English/Simplified Chinese.
+- Settings apply immediately and synchronize between windows. Existing settings files retain their preferences and default to Grouped capsule.
+- Drag with the left mouse button. Right-click the overlay for Refresh, Settings, Hide, and Exit. A single left click on the tray icon shows or hides the overlay.
+- Autostart controls are available only for installed copies. Launching a portable or development copy leaves the installed copy's startup entry untouched.
+- Codex executable discovery follows the existing override/PATH/CLI/Store order. If the executable moves or disappears, later polls can rediscover it. Set `CODEX_CLI_PATH` for a custom location.
+
+Preferences, window position, and usage status are stored under `%LOCALAPPDATA%\CodexUsageOverlay\` in `settings.json`, `window-position.json`, and `usage-status.json`.
+
+## Development
+
+Install Node.js 22 and a current stable Rust toolchain, plus the Windows Tauri build prerequisites.
 
 ```powershell
-.\Start-CodexPetUsage.ps1
+npm ci
+npm test
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml --locked
+npm run tauri dev
 ```
 
-The overlay appears in the upper-right corner of the screen on first launch. After it starts, you can close the PowerShell window; the overlay will keep running.
-
-## Stop
-
-Run this in PowerShell:
+Build and package a release:
 
 ```powershell
-.\Stop-CodexPetUsage.ps1
+npm run tauri -- build --ci --bundles nsis,msi
+.\scripts\Build-TauriRelease.ps1 -Tag v0.3.2-preview
 ```
 
-You can also right-click the overlay and choose **Exit Overlay**.
+The tag workflow tests and builds the Tauri app, then publishes NSIS, MSI, portable ZIP, and checksums. Packaging verifies the portable archive against its source files.
 
-## Compatibility
+The legacy PowerShell implementation and launch scripts have been removed from this branch. They remain available in the historical `v0.1.x` releases.
 
-- Windows 10 and 11.
-- Uses Windows PowerShell 5.1 by default, which is included with Windows. PowerShell 7 and administrator rights are not required. Set `CODEX_USAGE_POWERSHELL_PATH` to use a different PowerShell executable.
-- Requires the Codex desktop app to be installed and signed in. The app automatically looks for Codex on `PATH`, in the user's Codex CLI directory, or in the Microsoft Store installation.
-- If Codex is installed in a custom location, set `CODEX_CLI_PATH` before launch to the `codex.exe` in that installation.
-- To choose a PowerShell executable, set `CODEX_USAGE_POWERSHELL_PATH` to the path of `pwsh.exe` or `powershell.exe`.
-- If you use a custom `CODEX_HOME`, set that environment variable before launching the overlay. The usage-reading child process inherits it.
-- If startup fails, the app displays an error and writes details to `%LOCALAPPDATA%\CodexUsageOverlay\startup-error.log`.
-- If saving settings or changing the sign-in startup setting fails, the app displays a message in the selected language and writes details to `%LOCALAPPDATA%\CodexUsageOverlay\overlay-error.log`.
-- Usage-reading status is recorded in `%LOCALAPPDATA%\CodexUsageOverlay\usage-status.json`. It contains the last update time and any error details, but not usage values.
-- If you move the app folder, launch it manually once to update the path in the sign-in startup entry.
-
-Codex Pets does not need to be open, and administrator rights are not required. This tool supports Windows only and currently requires PowerShell and the Codex desktop app to be available.
+Feedback: septwind@agent.qq.com
