@@ -228,4 +228,53 @@ describe('settings window', () => {
     expect(screen.queryByRole('checkbox', { name: 'Start automatically on boot' })).toBeNull();
     expect(tauri.invoke).not.toHaveBeenCalledWith('set_autostart', expect.anything());
   });
+
+  it('localizes the loading error and retry action in Traditional Chinese (zh-Hant)', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await i18n.changeLanguage('zh-Hant');
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === 'get_settings') throw new Error('Read failed');
+      return null;
+    });
+
+    render(<App />);
+    expect(screen.getByRole('status').textContent).toBe('正在載入設定…');
+    expect((await screen.findByRole('alert')).textContent).toBe('無法載入設定，請重試。');
+    expect(screen.getByRole('button', { name: '重試' })).toBeTruthy();
+  });
 });
+
+describe('matchSupportedLocale', () => {
+  it('matches exact Traditional Chinese string literals', async () => {
+    const { matchSupportedLocale } = await import('./i18n');
+    expect(matchSupportedLocale('zh-TW')).toBe('zh-Hant');
+    expect(matchSupportedLocale('zh_TW')).toBe('zh-Hant');
+    expect(matchSupportedLocale('zh-HK')).toBe('zh-Hant');
+    expect(matchSupportedLocale('zh-MO')).toBe('zh-Hant');
+    expect(matchSupportedLocale('zh-Hant')).toBe('zh-Hant');
+    expect(matchSupportedLocale('zh-Hant-TW')).toBe('zh-Hant');
+    expect(matchSupportedLocale('zh-Hant-HK')).toBe('zh-Hant');
+    expect(matchSupportedLocale('zh-Hant-MO')).toBe('zh-Hant');
+  });
+
+  it('matches exact Simplified Chinese string literals', async () => {
+    const { matchSupportedLocale } = await import('./i18n');
+    expect(matchSupportedLocale('zh')).toBe('zh-CN');
+    expect(matchSupportedLocale('zh-CN')).toBe('zh-CN');
+    expect(matchSupportedLocale('zh_CN')).toBe('zh-CN');
+    expect(matchSupportedLocale('zh-SG')).toBe('zh-CN');
+    expect(matchSupportedLocale('zh-Hans')).toBe('zh-CN');
+    expect(matchSupportedLocale('zh-Hans-CN')).toBe('zh-CN');
+    expect(matchSupportedLocale('zh-Hans-SG')).toBe('zh-CN');
+  });
+
+  it('falls back to en-US for other locales', async () => {
+    const { matchSupportedLocale } = await import('./i18n');
+    expect(matchSupportedLocale('en-US')).toBe('en-US');
+    expect(matchSupportedLocale('en-GB')).toBe('en-US');
+    expect(matchSupportedLocale('ja-JP')).toBe('en-US');
+    expect(matchSupportedLocale('fr-FR')).toBe('en-US');
+    expect(matchSupportedLocale('')).toBe('en-US');
+  });
+});
+

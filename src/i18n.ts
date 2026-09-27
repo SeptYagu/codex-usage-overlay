@@ -81,6 +81,46 @@ const resources = {
       opaque: "0% (完全不透明)",
       transparent: "80% (高透明)",
     }
+  },
+  'zh-Hant': {
+    translation: {
+      refreshNow: "立即重新整理用量",
+      refreshing: "正在重新整理用量",
+      settings: "浮窗設定…",
+      hide: "隱藏懸浮窗",
+      exit: "結束懸浮窗",
+      windowSettings: "浮窗設定",
+      settingsLoading: "正在載入設定…",
+      settingsLoadFailed: "無法載入設定，請重試。",
+      retry: "重試",
+      scale: "浮窗大小",
+      overlayLayout: "浮窗版面配置",
+      groupedLayout: "分組膠囊",
+      stacksLayout: "指標堆疊",
+      fiveHourLabel: "5 小時",
+      weeklyLabel: "每週",
+      creditsLabel: "CREDITS",
+      balanceLabel: "餘額",
+      transparency: "背景透明度",
+      showCredits: "顯示 Credit 餘額",
+      autoStart: "開機時自動啟動",
+      refreshInterval: "重新整理頻率",
+      sec30: "30 秒",
+      sec60: "60 秒 (預設)",
+      min2: "2 分鐘",
+      min5: "5 分鐘",
+      hint: "提示：滑桿調節即時預覽生效。透明度僅影響懸浮窗底板，文字和數值始終保持高對比度清晰顯示。",
+      feedback: "意見反映與建議：",
+      done: "完成",
+      language: "語言 / Language",
+      autoSystem: "自動 / Auto (System)",
+      loadingTooltip: "正在連線 Codex app-server... 按住滑鼠左鍵可拖曳；右鍵開啟功能表。",
+      tooltipUpdated: "最近更新：{{time}}。按住滑鼠左鍵可拖曳；右鍵開啟功能表。",
+      defaultScale: "175% (預設)",
+      defaultAlpha: "23% (預設)",
+      opaque: "0% (完全不透明)",
+      transparent: "80% (高透明)",
+    }
   }
 };
 
@@ -95,13 +135,46 @@ i18n
     }
   });
 
-export const updateLanguage = (lang: string) => {
-  if (lang === 'auto') {
-    const systemLang = navigator.language.startsWith('zh') ? 'zh-CN' : 'en-US';
-    i18n.changeLanguage(systemLang);
-  } else {
-    i18n.changeLanguage(lang);
+export const ZH_HANT_LOCALES = new Set([
+  'zh-tw',
+  'zh-hk',
+  'zh-mo',
+  'zh-hant',
+  'zh-hant-tw',
+  'zh-hant-hk',
+  'zh-hant-mo',
+]);
+
+export const ZH_CN_LOCALES = new Set([
+  'zh',
+  'zh-cn',
+  'zh-sg',
+  'zh-hans',
+  'zh-hans-cn',
+  'zh-hans-sg',
+]);
+
+export const matchSupportedLocale = (systemLocale: string): 'en-US' | 'zh-CN' | 'zh-Hant' => {
+  const normalized = (systemLocale || '').trim().toLowerCase().replace(/_/g, '-');
+  if (ZH_HANT_LOCALES.has(normalized)) {
+    return 'zh-Hant';
   }
+  if (ZH_CN_LOCALES.has(normalized)) {
+    return 'zh-CN';
+  }
+  return 'en-US';
+};
+
+export const resolveClientLocale = (lang: string): 'en-US' | 'zh-CN' | 'zh-Hant' => {
+  if (lang === 'zh-CN' || lang === 'zh-Hant' || lang === 'en-US') {
+    return lang;
+  }
+  const nav = typeof navigator !== 'undefined' ? navigator.language : '';
+  return matchSupportedLocale(nav);
+};
+
+export const updateLanguage = (lang: string) => {
+  i18n.changeLanguage(resolveClientLocale(lang));
 };
 
 export default i18n;

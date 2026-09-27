@@ -14,13 +14,23 @@ pub struct AppState {
     pub settings: Mutex<OverlaySettings>,
 }
 
-fn is_chinese_locale(language_setting: &str) -> bool {
+pub fn match_supported_locale(system_locale: &str) -> &'static str {
+    let normalized = system_locale.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "zh-tw" | "zh-hk" | "zh-mo" | "zh-hant" | "zh-hant-tw" | "zh-hant-hk" | "zh-hant-mo" => "zh-Hant",
+        "zh" | "zh-cn" | "zh-sg" | "zh-hans" | "zh-hans-cn" | "zh-hans-sg" => "zh-CN",
+        _ => "en-US",
+    }
+}
+
+pub fn resolve_locale(language_setting: &str) -> &'static str {
     match language_setting {
-        "zh-CN" => true,
-        "en-US" => false,
+        "zh-CN" => "zh-CN",
+        "zh-Hant" => "zh-Hant",
+        "en-US" => "en-US",
         _ => {
-            let locale = sys_locale::get_locale().unwrap_or_else(|| "en".to_string());
-            locale.starts_with("zh")
+            let sys = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string());
+            match_supported_locale(&sys)
         }
     }
 }
@@ -60,10 +70,10 @@ pub async fn fetch_usage(state: State<'_, Arc<AppState>>, app: AppHandle) -> Res
             state.config_manager.write_status("error", Some(&err_msg));
             
             let current_settings = state.settings.lock().await.clone();
-            let error_text = if is_chinese_locale(&current_settings.language) {
-                "Codex 用量读取失败"
-            } else {
-                "Failed to read Codex usage"
+            let error_text = match resolve_locale(&current_settings.language) {
+                "zh-CN" => "Codex 用量读取失败",
+                "zh-Hant" => "Codex 用量讀取失敗",
+                _ => "Failed to read Codex usage",
             };
             update_tray_tooltip(&app, error_text);
             update_tray_icon(&app, None, None);
@@ -105,20 +115,28 @@ pub async fn save_settings(
         );
     } else {
         // Update error text if in error state
-        let error_text = if is_chinese_locale(&new_settings.language) {
-            "Codex 用量读取失败"
-        } else {
-            "Failed to read Codex usage"
+        let error_text = match resolve_locale(&new_settings.language) {
+            "zh-CN" => "Codex 用量读取失败",
+            "zh-Hant" => "Codex 用量讀取失敗",
+            _ => "Failed to read Codex usage",
         };
         update_tray_tooltip(&app, error_text);
     }
 
     // Update settings window title
     if let Some(settings_win) = app.get_webview_window("settings") {
-        let is_cn = is_chinese_locale(&new_settings.language);
-        let title = if is_cn { "浮窗设置" } else { "Overlay Settings" };
+        let title = match resolve_locale(&new_settings.language) {
+            "zh-CN" => "浮窗设置",
+            "zh-Hant" => "浮窗設定",
+            _ => "Overlay Settings",
+        };
         let _ = settings_win.set_title(title);
     }
+
+    // Update system tray context menu
+    let is_installed = crate::config::is_installed_environment();
+    let autostart_enabled = is_installed && new_settings.auto_start;
+    let _ = crate::tray::update_tray_menu(&app, &new_settings.language, autostart_enabled, is_installed);
 
     // Broadcast updated settings to all windows
     let _ = app.emit("settings_updated", &new_settings);
@@ -168,12 +186,13 @@ pub async fn show_overlay_menu(
 ) -> Result<(), String> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     let current_settings = state.settings.lock().await.clone();
-    let is_cn = is_chinese_locale(&current_settings.language);
+    let locale = resolve_locale(&current_settings.language);
 
-    let refresh_str = if is_cn { "立即刷新用量" } else { "Refresh Now" };
-    let settings_str = if is_cn { "浮窗设置…" } else { "Settings…" };
-    let hide_str = if is_cn { "隐藏悬浮窗" } else { "Hide" };
-    let exit_str = if is_cn { "退出悬浮窗" } else { "Exit" };
+    let (refresh_str, settings_str, hide_str, exit_str) = match locale {
+        "zh-CN" => ("立即刷新用量", "浮窗设置…", "隐藏悬浮窗", "退出悬浮窗"),
+        "zh-Hant" => ("立即重新整理用量", "浮窗設定…", "隱藏懸浮窗", "結束懸浮窗"),
+        _ => ("Refresh Now", "Settings…", "Hide", "Exit"),
+    };
 
     let refresh_i = MenuItem::with_id(&app, "refresh_usage", refresh_str, true, None::<&str>)
         .map_err(|e| e.to_string())?;
@@ -195,3 +214,45 @@ pub async fn show_overlay_menu(
     window.popup_menu(&menu).map_err(|e: tauri::Error| e.to_string())?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_match_supported_locale() {
+        // Traditional Chinese literals
+        assert_eq!(match_supported_locale("zh-TW"), "zh-Hant");
+        assert_eq!(match_supported_locale("zh_TW"), "zh-Hant");
+        assert_eq!(match_supported_locale("zh-HK"), "zh-Hant");
+        assert_eq!(match_supported_locale("zh-MO"), "zh-Hant");
+        assert_eq!(match_supported_locale("zh-Hant"), "zh-Hant");
+        assert_eq!(match_supported_locale("zh-Hant-TW"), "zh-Hant");
+        assert_eq!(match_supported_locale("zh-Hant-HK"), "zh-Hant");
+        assert_eq!(match_supported_locale("zh-Hant-MO"), "zh-Hant");
+
+        // Simplified Chinese literals
+        assert_eq!(match_supported_locale("zh"), "zh-CN");
+        assert_eq!(match_supported_locale("zh-CN"), "zh-CN");
+        assert_eq!(match_supported_locale("zh_CN"), "zh-CN");
+        assert_eq!(match_supported_locale("zh-SG"), "zh-CN");
+        assert_eq!(match_supported_locale("zh-Hans"), "zh-CN");
+        assert_eq!(match_supported_locale("zh-Hans-CN"), "zh-CN");
+        assert_eq!(match_supported_locale("zh-Hans-SG"), "zh-CN");
+
+        // Fallbacks
+        assert_eq!(match_supported_locale("en-US"), "en-US");
+        assert_eq!(match_supported_locale("en-GB"), "en-US");
+        assert_eq!(match_supported_locale("ja-JP"), "en-US");
+        assert_eq!(match_supported_locale("fr-FR"), "en-US");
+        assert_eq!(match_supported_locale(""), "en-US");
+    }
+
+    #[test]
+    fn test_resolve_locale_explicit() {
+        assert_eq!(resolve_locale("zh-CN"), "zh-CN");
+        assert_eq!(resolve_locale("zh-Hant"), "zh-Hant");
+        assert_eq!(resolve_locale("en-US"), "en-US");
+    }
+}
+

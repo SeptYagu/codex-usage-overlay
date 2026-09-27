@@ -6,20 +6,50 @@ use tauri::{
 
 pub const TRAY_ID: &str = "main-tray";
 
-pub fn setup_tray(app: &AppHandle, autostart_enabled: bool, is_installed: bool) -> Result<TrayIcon<Wry>, tauri::Error> {
-    let toggle_i = MenuItem::with_id(app, "toggle_overlay", "显示/隐藏悬浮窗", true, None::<&str>)?;
-    let refresh_i = MenuItem::with_id(app, "refresh_usage", "立即刷新用量", true, None::<&str>)?;
-    let settings_i = MenuItem::with_id(app, "open_settings", "浮窗设置…", true, None::<&str>)?;
+pub fn build_tray_menu(
+    app: &AppHandle,
+    language_setting: &str,
+    autostart_enabled: bool,
+    is_installed: bool,
+) -> Result<Menu<Wry>, tauri::Error> {
+    let locale = crate::commands::resolve_locale(language_setting);
+    let (toggle_str, refresh_str, settings_str, autostart_str, exit_str) = match locale {
+        "zh-CN" => (
+            "显示/隐藏悬浮窗",
+            "立即刷新用量",
+            "浮窗设置…",
+            "开机时自动启动",
+            "退出悬浮窗",
+        ),
+        "zh-Hant" => (
+            "顯示/隱藏懸浮窗",
+            "立即重新整理用量",
+            "浮窗設定…",
+            "開機時自動啟動",
+            "結束懸浮窗",
+        ),
+        _ => (
+            "Show/Hide Overlay",
+            "Refresh Usage Now",
+            "Settings…",
+            "Start automatically on boot",
+            "Exit Overlay",
+        ),
+    };
+
+    let toggle_i = MenuItem::with_id(app, "toggle_overlay", toggle_str, true, None::<&str>)?;
+    let refresh_i = MenuItem::with_id(app, "refresh_usage", refresh_str, true, None::<&str>)?;
+    let settings_i = MenuItem::with_id(app, "open_settings", settings_str, true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
-    let sep3 = PredefinedMenuItem::separator(app)?;
-    let exit_i = MenuItem::with_id(app, "exit_app", "退出悬浮窗", true, None::<&str>)?;
+    let exit_i = MenuItem::with_id(app, "exit_app", exit_str, true, None::<&str>)?;
 
-    let menu = if is_installed {
+    if is_installed {
+        let sep3 = PredefinedMenuItem::separator(app)?;
         let autostart_i = CheckMenuItem::with_id(
             app,
             "toggle_autostart",
-            "开机时自动启动",
+            autostart_str,
             true,
             autostart_enabled,
             None::<&str>,
@@ -36,7 +66,7 @@ pub fn setup_tray(app: &AppHandle, autostart_enabled: bool, is_installed: bool) 
                 &sep3,
                 &exit_i,
             ],
-        )?
+        )
     } else {
         Menu::with_items(
             app,
@@ -48,14 +78,41 @@ pub fn setup_tray(app: &AppHandle, autostart_enabled: bool, is_installed: bool) 
                 &sep2,
                 &exit_i,
             ],
-        )?
-    };
+        )
+    }
+}
+
+pub fn update_tray_menu(
+    app: &AppHandle,
+    language_setting: &str,
+    autostart_enabled: bool,
+    is_installed: bool,
+) -> Result<(), tauri::Error> {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let menu = build_tray_menu(app, language_setting, autostart_enabled, is_installed)?;
+        tray.set_menu(Some(menu))?;
+    }
+    Ok(())
+}
+
+pub fn setup_tray(
+    app: &AppHandle,
+    language_setting: &str,
+    autostart_enabled: bool,
+    is_installed: bool,
+) -> Result<TrayIcon<Wry>, tauri::Error> {
+    let menu = build_tray_menu(app, language_setting, autostart_enabled, is_installed)?;
 
     // Initial dual-ring gauge icon
     let initial_icon = generate_dual_ring_icon(None, None);
+    let tooltip = match crate::commands::resolve_locale(language_setting) {
+        "zh-CN" => "Codex 用量悬浮窗",
+        "zh-Hant" => "Codex 用量懸浮窗",
+        _ => "Codex Usage Overlay",
+    };
 
     let tray = TrayIconBuilder::with_id(TRAY_ID)
-        .tooltip("Codex 用量悬浮窗")
+        .tooltip(tooltip)
         .icon(initial_icon)
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -109,6 +166,7 @@ pub fn handle_menu_action(app: &AppHandle, id: &str) {
                         settings.auto_start = new_state;
                         state.config_manager.save_settings(&settings);
                         let _ = app_clone.emit("settings_updated", &*settings);
+                        let _ = update_tray_menu(&app_clone, &settings.language, new_state, true);
                     }
                 }
             });

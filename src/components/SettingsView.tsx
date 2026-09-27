@@ -151,6 +151,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <option value="auto">{t('autoSystem')}</option>
               <option value="en-US">English (en-US)</option>
               <option value="zh-CN">简体中文 (zh-CN)</option>
+              <option value="zh-Hant">繁體中文 (zh-Hant)</option>
             </select>
           </div>
 

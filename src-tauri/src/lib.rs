@@ -65,16 +65,15 @@ pub fn run() {
             // Setup system tray
             let is_installed = config::is_installed_environment();
             let autostart_enabled = is_installed && initial_settings.auto_start;
-            let _ = setup_tray(app.handle(), autostart_enabled, is_installed);
+            let _ = setup_tray(app.handle(), &initial_settings.language, autostart_enabled, is_installed);
 
             // Set initial settings window title based on language
             if let Some(settings_win) = app.get_webview_window("settings") {
-                let is_cn = match initial_settings.language.as_str() {
-                    "zh-CN" => true,
-                    "en-US" => false,
-                    _ => sys_locale::get_locale().unwrap_or_default().starts_with("zh"),
+                let title = match commands::resolve_locale(&initial_settings.language) {
+                    "zh-CN" => "浮窗设置",
+                    "zh-Hant" => "浮窗設定",
+                    _ => "Overlay Settings",
                 };
-                let title = if is_cn { "浮窗设置" } else { "Overlay Settings" };
                 let _ = settings_win.set_title(title);
             }
 
