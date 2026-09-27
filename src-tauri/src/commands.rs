@@ -131,7 +131,15 @@ pub fn open_settings_window(app: AppHandle) {
 }
 
 #[tauri::command]
+pub fn is_installed_version() -> bool {
+    crate::config::is_installed_environment()
+}
+
+#[tauri::command]
 pub async fn set_autostart(enable: bool, app: AppHandle) -> Result<(), String> {
+    if !crate::config::is_installed_environment() {
+        return Err("Autostart is only supported in installer versions".to_string());
+    }
     use tauri_plugin_autostart::ManagerExt;
     let autostart_mgr = app.autolaunch();
     if enable {

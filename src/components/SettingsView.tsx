@@ -16,6 +16,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 }) => {
   const { t } = useTranslation();
   const [localSettings, setLocalSettings] = useState<OverlaySettings>(settings);
+  const [isInstalled, setIsInstalled] = useState<boolean>(false);
+
+  useEffect(() => {
+    invoke<boolean>('is_installed_version')
+      .then((installed) => setIsInstalled(installed))
+      .catch(() => setIsInstalled(false));
+  }, []);
 
   useEffect(() => {
     getCurrentWindow().setTitle(t('windowSettings')).catch(console.error);
@@ -102,20 +109,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             />
           </label>
 
-          {/* Autostart */}
-          <label className="flex items-center justify-between p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/60 hover:bg-slate-200/60 dark:hover:bg-slate-800 cursor-pointer transition-colors">
-            <span className="text-sm font-medium">{t('autoStart')}</span>
-            <input
-              type="checkbox"
-              checked={localSettings.autoStart}
-              onChange={(e) => {
-                const checked = e.target.checked;
-                updateField('autoStart', checked);
-                invoke('set_autostart', { enable: checked }).catch(console.error);
-              }}
-              className="w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 accent-cyan-500 cursor-pointer"
-            />
-          </label>
+          {/* Autostart (Only shown for installed/installer versions) */}
+          {isInstalled && (
+            <label className="flex items-center justify-between p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/60 hover:bg-slate-200/60 dark:hover:bg-slate-800 cursor-pointer transition-colors">
+              <span className="text-sm font-medium">{t('autoStart')}</span>
+              <input
+                type="checkbox"
+                checked={localSettings.autoStart}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  updateField('autoStart', checked);
+                  invoke('set_autostart', { enable: checked }).catch(console.error);
+                }}
+                className="w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 accent-cyan-500 cursor-pointer"
+              />
+            </label>
+          )}
 
           {/* Language Selection */}
           <div className="flex items-center justify-between p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/60">

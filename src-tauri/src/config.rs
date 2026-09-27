@@ -142,3 +142,34 @@ fn chrono_like_now() -> String {
         .unwrap_or_default();
     format!("timestamp:{}", duration.as_secs())
 }
+
+/// Detects whether the current executable is running from an installed environment
+/// (e.g. NSIS or MSI installer) vs standalone portable executable.
+pub fn is_installed_environment() -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+
+    let exe_dir = match exe.parent() {
+        Some(d) => d,
+        None => return false,
+    };
+
+    // 1. NSIS installer creates uninstall.exe next to the main binary
+    if exe_dir.join("uninstall.exe").exists() {
+        return true;
+    }
+
+    // 2. Installed in standard Windows program directory locations
+    let exe_lower = exe.to_string_lossy().to_lowercase();
+    if exe_lower.contains(r"\appdata\local\programs\codex-usage-overlay")
+        || exe_lower.contains(r"\program files\codex-usage-overlay")
+        || exe_lower.contains(r"\program files (x86)\codex-usage-overlay")
+    {
+        return true;
+    }
+
+    false
+}
+

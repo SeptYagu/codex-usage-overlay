@@ -55,6 +55,7 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::open_settings_window,
+            commands::is_installed_version,
             commands::set_autostart,
             commands::start_dragging,
             commands::exit_app,
@@ -62,8 +63,13 @@ pub fn run() {
         ])
         .setup(move |app| {
             // Setup system tray
-            let autostart_enabled = initial_settings.auto_start;
-            let _ = setup_tray(app.handle(), autostart_enabled);
+            let is_installed = config::is_installed_environment();
+            if !is_installed {
+                use tauri_plugin_autostart::ManagerExt;
+                let _ = app.autolaunch().disable();
+            }
+            let autostart_enabled = is_installed && initial_settings.auto_start;
+            let _ = setup_tray(app.handle(), autostart_enabled, is_installed);
 
             // Set initial settings window title based on language
             if let Some(settings_win) = app.get_webview_window("settings") {

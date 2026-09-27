@@ -6,36 +6,50 @@ use tauri::{
 
 pub const TRAY_ID: &str = "main-tray";
 
-pub fn setup_tray(app: &AppHandle, autostart_enabled: bool) -> Result<TrayIcon<Wry>, tauri::Error> {
+pub fn setup_tray(app: &AppHandle, autostart_enabled: bool, is_installed: bool) -> Result<TrayIcon<Wry>, tauri::Error> {
     let toggle_i = MenuItem::with_id(app, "toggle_overlay", "显示/隐藏悬浮窗", true, None::<&str>)?;
     let refresh_i = MenuItem::with_id(app, "refresh_usage", "立即刷新用量", true, None::<&str>)?;
     let settings_i = MenuItem::with_id(app, "open_settings", "浮窗设置…", true, None::<&str>)?;
-    let autostart_i = CheckMenuItem::with_id(
-        app,
-        "toggle_autostart",
-        "开机时自动启动",
-        true,
-        autostart_enabled,
-        None::<&str>,
-    )?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let sep3 = PredefinedMenuItem::separator(app)?;
     let exit_i = MenuItem::with_id(app, "exit_app", "退出悬浮窗", true, None::<&str>)?;
 
-    let menu = Menu::with_items(
-        app,
-        &[
-            &toggle_i,
-            &refresh_i,
-            &sep1,
-            &settings_i,
-            &sep2,
-            &autostart_i,
-            &sep3,
-            &exit_i,
-        ],
-    )?;
+    let menu = if is_installed {
+        let autostart_i = CheckMenuItem::with_id(
+            app,
+            "toggle_autostart",
+            "开机时自动启动",
+            true,
+            autostart_enabled,
+            None::<&str>,
+        )?;
+        Menu::with_items(
+            app,
+            &[
+                &toggle_i,
+                &refresh_i,
+                &sep1,
+                &settings_i,
+                &sep2,
+                &autostart_i,
+                &sep3,
+                &exit_i,
+            ],
+        )?
+    } else {
+        Menu::with_items(
+            app,
+            &[
+                &toggle_i,
+                &refresh_i,
+                &sep1,
+                &settings_i,
+                &sep2,
+                &exit_i,
+            ],
+        )?
+    };
 
     // Initial dual-ring gauge icon
     let initial_icon = generate_dual_ring_icon(None, None);
@@ -79,7 +93,28 @@ pub fn handle_menu_action(app: &AppHandle, id: &str) {
             open_settings_window(app);
         }
         "toggle_autostart" => {
-            let _ = app.emit("toggle_autostart_requested", ());
+            if !crate::config::is_installed_environment() {
+                return;
+            }
+            let app_clone = app.clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri_plugin_autostart::ManagerExt;
+                let autostart_mgr = app_clone.autolaunch();
+                if let Ok(is_enabled) = autostart_mgr.is_enabled() {
+                    let new_state = !is_enabled;
+                    if new_state {
+                        let _ = autostart_mgr.enable();
+                    } else {
+                        let _ = autostart_mgr.disable();
+                    }
+                    if let Some(state) = app_clone.try_state::<std::sync::Arc<crate::commands::AppState>>() {
+                        let mut settings = state.settings.lock().await;
+                        settings.auto_start = new_state;
+                        state.config_manager.save_settings(&settings);
+                        let _ = app_clone.emit("settings_updated", &*settings);
+                    }
+                }
+            });
         }
         "exit_app" => {
             app.exit(0);
