@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -14,6 +14,15 @@ pub const PILL_WIDTH_LOGICAL: f64 = 46.0;
 pub const PILL_HEIGHT_LOGICAL: f64 = 100.0;
 pub const EDGE_INSET_LOGICAL: f64 = 2.0;
 const COLLAPSE_DELAY: Duration = Duration::from_millis(400);
+/// Physical-pixel margin kept between the cursor and the nearest window edge
+/// after an authoritative reposition, so rounding cannot push the pointer out
+/// and trigger `mouseleave` (spec §3.4).
+const CURSOR_COVER_MARGIN: i64 = 1;
+/// Upper bound on how long background repositioning stands down for the
+/// authoritative size write-back of a hover expand. It only has to outlive one
+/// IPC round trip, and the lease ensures a lost `dock_window_resized` can
+/// never latch the guard on (spec §3.4).
+const HOVER_RESIZE_LEASE: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -41,6 +50,25 @@ struct Runtime {
     pointer_inside: bool,
     timer_generation: u64,
     anchor_center: Option<(i32, i32)>,
+    hover: Option<Hover>,
+}
+
+/// Geometry captured when the pointer entered the collapsed pill, valid for the
+/// expanded session it opens.
+///
+/// `pill` is the hit area the cursor can be resting on: the expanded capsule is
+/// always shorter than the pill along the free axis, so every reposition of the
+/// expanded window has to keep the cursor — not the whole pill — inside, and it
+/// needs the pill to tell whether the cursor is still on the hit area at all.
+///
+/// `resize_deadline` is the acquire of the transition guard: background
+/// repositioning stands down until the frontend reports the authoritative
+/// capsule size, or until the lease expires (spec §3.4).
+#[derive(Debug, Clone, Copy)]
+struct Hover {
+    pill: PhysicalRect,
+    anchor_center: (i32, i32),
+    resize_deadline: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -86,6 +114,7 @@ impl DockManager {
                 pointer_inside: false,
                 timer_generation: 0,
                 anchor_center: None,
+                hover: None,
             })),
         }
     }
@@ -124,6 +153,58 @@ impl DockManager {
         lock(&self.runtime).anchor_center
     }
 
+    /// Records the pill the pointer entered and the centre its expanded
+    /// session is anchored to, and arms the write-back guard (spec §3.4).
+    fn begin_hover(&self, pill: PhysicalRect, anchor_center: (i32, i32)) {
+        lock(&self.runtime).hover = Some(Hover {
+            pill,
+            anchor_center,
+            resize_deadline: Some(Instant::now() + HOVER_RESIZE_LEASE),
+        });
+    }
+
+    fn hover(&self) -> Option<Hover> {
+        lock(&self.runtime).hover
+    }
+
+    /// True while the authoritative capsule size for a hover expand is still on
+    /// its way. Background repositioning must stand down for that window: it
+    /// would otherwise pull the window back to the static anchor and undo the
+    /// coverage the transition just wrote (spec §3.4).
+    fn is_awaiting_resize(&self) -> bool {
+        lock(&self.runtime).hover.is_some_and(|hover| {
+            hover
+                .resize_deadline
+                .is_some_and(|deadline| Instant::now() < deadline)
+        })
+    }
+
+    /// Releases the write-back guard. The pill itself is kept: the rest of the
+    /// expanded session is still centred on it.
+    fn finish_hover_resize(&self) {
+        let mut runtime = lock(&self.runtime);
+        if let Some(hover) = runtime.hover {
+            runtime.hover = Some(Hover {
+                resize_deadline: None,
+                ..hover
+            });
+        }
+    }
+
+    /// Centre of the expanded session's free axis: the pill centre recorded on
+    /// hover entry, falling back to the runtime anchor.
+    fn expanded_anchor_center(&self) -> Option<(i32, i32)> {
+        let runtime = lock(&self.runtime);
+        match runtime.hover {
+            Some(hover) => Some(hover.anchor_center),
+            None => runtime.anchor_center,
+        }
+    }
+
+    fn drop_hover(&self) {
+        lock(&self.runtime).hover = None;
+    }
+
     fn docked_edge(&self) -> Option<Edge> {
         match lock(&self.runtime).state {
             DockState::Docked(edge) => Some(edge),
@@ -157,7 +238,10 @@ impl DockManager {
     }
 
     fn revert_expansion(&self) {
-        lock(&self.runtime).expanded = false;
+        let mut runtime = lock(&self.runtime);
+        runtime.expanded = false;
+        // A failed expansion never reports an authoritative size to wait for.
+        runtime.hover = None;
     }
 
     fn revert_collapse(&self) {
@@ -175,6 +259,8 @@ impl DockManager {
         runtime.dragging = false;
         runtime.pointer_inside = false;
         runtime.timer_generation = runtime.timer_generation.wrapping_add(1);
+        // The drag ends the pill's hover session and arms the next one.
+        runtime.hover = None;
         if let Some(edge) = edge {
             runtime.state = DockState::Docked(edge);
             runtime.expanded = false;
@@ -241,6 +327,7 @@ impl DockManager {
             return None;
         };
         runtime.expanded = false;
+        runtime.hover = None;
         Some(edge)
     }
 
@@ -463,18 +550,22 @@ pub fn mouse_enter(app: &AppHandle, state: &Arc<AppState>) {
         return;
     };
     if state.dock.enter_pill() {
+        // Capture the pill rectangle and the centre the expanded session is
+        // anchored to *before* the provisional resize: they anchor the
+        // transition rectangle, the authoritative write-back and every later
+        // reposition of this session (spec §3.4). Resizing first would make
+        // `window_center` report the enlarged window's centre instead.
+        let anchor_center = state
+            .dock
+            .anchor_center()
+            .unwrap_or_else(|| window_center(&window));
+        if let Some(pill) = window_rect(&window) {
+            state.dock.begin_hover(pill, anchor_center);
+        }
         let state_clone = state.clone();
         let app_clone = app.clone();
         tauri::async_runtime::spawn(async move {
             let settings = state_clone.settings.lock().await.clone();
-            // Capture the pill centre before the provisional resize: it is the
-            // anchor the transition rectangle stays aligned with along the
-            // non-docked axis (spec §3.4). Resizing first would make
-            // `window_center` report the enlarged window's centre instead.
-            let anchor_center = state_clone
-                .dock
-                .anchor_center()
-                .unwrap_or_else(|| window_center(&window));
             if let Err(error) = set_full_size(&window, &settings)
                 .and_then(|_| place_full_for_transition(&window, &state_clone.dock, anchor_center))
             {
@@ -600,14 +691,16 @@ pub async fn keep_docked_in_work_area(app: &AppHandle, state: &Arc<AppState>) {
     };
     let info = state.dock.info();
     // Never fight the user: a background usage refresh must not reposition the
-    // window while it is being dragged or its menu is open (spec §3.1 T6/§3.7).
-    if info.hidden || state.dock.is_interacting() {
+    // window while it is being dragged or its menu is open (spec §3.1 T6/§3.7),
+    // nor while the hover expand's authoritative size write-back is still
+    // outstanding (spec §3.4).
+    if info.hidden || state.dock.is_awaiting_resize() || state.dock.is_interacting() {
         return;
     }
     let settings = state.settings.lock().await.clone();
     if let Some(edge) = info.edge.filter(|_| info.docked) {
         if info.expanded {
-            if let Err(error) = place_full_at_anchor(&window, &state.dock) {
+            if let Err(error) = place_docked_expanded(&window, &state.dock) {
                 eprintln!("Could not reposition expanded overlay: {error}");
             }
         } else {
@@ -636,12 +729,22 @@ pub fn window_resized(app: &AppHandle, state: &Arc<AppState>) {
     let state = state.clone();
     tauri::async_runtime::spawn(async move {
         if !state.dock.info().docked || !state.dock.info().expanded {
+            state.dock.drop_hover();
             return;
         }
         let Some(window) = app.get_webview_window("main") else {
             return;
         };
-        let _ = place_full_at_anchor(&window, &state.dock);
+        // The frontend has just written the authoritative capsule size while
+        // the window is still pinned to the pill's edge. Re-place it so the
+        // cursor stays inside the final rectangle: the capsule can be shorter
+        // than the pill, so centring on the saved anchor alone would leave the
+        // cursor in the pill's outer bands outside the window (spec §3.4).
+        let result = place_docked_expanded(&window, &state.dock);
+        state.dock.finish_hover_resize();
+        if let Err(error) = result {
+            eprintln!("Could not reposition docked overlay: {error}");
+        }
     });
 }
 
@@ -762,8 +865,8 @@ fn place_full_at_anchor(window: &WebviewWindow, manager: &DockManager) -> Result
 /// the other axis. That way the rectangle written by `mouse_enter` covers the
 /// cursor's current hit area, so the overlay cannot collapse the instant it
 /// expands (spec §3.4). Once the frontend reports the authoritative capsule
-/// size, `window_resized` re-clamps the saved anchor through
-/// `place_full_at_anchor`.
+/// size, `window_resized` replaces this rectangle through
+/// `place_docked_expanded`.
 fn place_full_for_transition(
     window: &WebviewWindow,
     manager: &DockManager,
@@ -820,6 +923,139 @@ fn transition_rect(
         width: size.width,
         height: size.height,
     }
+}
+
+/// Places the expanded window while it is docked. The docked axis hugs the
+/// same work-area edge as the pill; the free axis is centred on the session's
+/// anchor and then kept covering the cursor (spec §3.4). Every reposition of an
+/// expanded docked window goes through here — the authoritative size write-back
+/// and background refreshes alike — so the two can never disagree about where
+/// the window belongs.
+fn place_docked_expanded(window: &WebviewWindow, manager: &DockManager) -> Result<(), String> {
+    let Some(edge) = manager.docked_edge() else {
+        return place_full_at_anchor(window, manager);
+    };
+    let size = window.outer_size().map_err(|error| error.to_string())?;
+    let anchor_center = manager
+        .expanded_anchor_center()
+        .unwrap_or_else(|| window_center(window));
+    let (work, _scale) = work_area_for_point(
+        window,
+        Some((anchor_center.0 as f64, anchor_center.1 as f64)),
+    )
+    .ok_or_else(|| "Monitor work area unavailable".to_string())?;
+    // The cursor may rest on the pill's outer bands, which the shorter capsule
+    // cannot all cover; the reference tells whether it is still on the hit area
+    // (a pointer that already left must not drag the window along with it).
+    let reference = manager
+        .hover()
+        .map(|hover| hover.pill)
+        .or_else(|| window_rect(window));
+    let cursor = reference.and_then(|reference| cursor_within(window, reference));
+    let rect = docked_expanded_final_rect(edge, work, size, anchor_center, cursor);
+    window
+        .set_position(Position::Physical(PhysicalPosition::new(rect.x, rect.y)))
+        .map_err(|error| error.to_string())
+}
+
+/// Geometry of the expanded rectangle once the capsule size is authoritative.
+/// Along the docked axis the rectangle hugs the work-area edge the pill is
+/// pinned to. Along the free axis it is centred on `anchor_center` (the pill's
+/// centre) and then nudged to keep `cursor` inside, before being clamped into
+/// the work area.
+///
+/// Centring alone is not enough: the capsule is always shorter than the pill
+/// along the free axis (a left/right pill is `PILL_HEIGHT_LOGICAL` = 100
+/// logical px, 1.45x the capsule's 69 CSS px — at 175% that is 306 physical px
+/// against 211), so the pill's outer bands would stay outside the window and a
+/// cursor resting there would receive `mouseleave` the moment the authoritative
+/// size lands. The contract for this phase is therefore to cover the cursor's
+/// position rather than the whole pill (spec §3.4).
+fn docked_expanded_final_rect(
+    edge: Edge,
+    work: PhysicalRect,
+    size: PhysicalSize<u32>,
+    anchor_center: (i32, i32),
+    cursor: Option<(i32, i32)>,
+) -> PhysicalRect {
+    let work_left = work.x as i64;
+    let work_top = work.y as i64;
+    let work_right = work_left + work.width as i64;
+    let work_bottom = work_top + work.height as i64;
+    let width = size.width as i64;
+    let height = size.height as i64;
+    let max_x = (work_right - width).max(work_left);
+    let max_y = (work_bottom - height).max(work_top);
+    let x = match edge {
+        Edge::Left => work_left,
+        Edge::Right => max_x,
+        Edge::Top | Edge::Bottom => cover_cursor(
+            anchor_center.0 as i64 - width / 2,
+            cursor.map(|(x, _)| x as i64),
+            width,
+            work_left,
+            max_x,
+        ),
+    };
+    let y = match edge {
+        Edge::Top => work_top,
+        Edge::Bottom => max_y,
+        Edge::Left | Edge::Right => cover_cursor(
+            anchor_center.1 as i64 - height / 2,
+            cursor.map(|(_, y)| y as i64),
+            height,
+            work_top,
+            max_y,
+        ),
+    };
+    PhysicalRect {
+        x: x as i32,
+        y: y as i32,
+        width: size.width,
+        height: size.height,
+    }
+}
+
+/// Moves a `size`-long span by as little as needed so `cursor` stays inside it
+/// with `CURSOR_COVER_MARGIN` to spare, then clamps the span into `[min, max]`.
+///
+/// The cursor lies inside the work area and the span fits there, so a covering
+/// position always exists within the clamp bounds and clamping afterwards
+/// cannot push the cursor back out.
+fn cover_cursor(coord: i64, cursor: Option<i64>, size: i64, min: i64, max: i64) -> i64 {
+    let coord = match cursor {
+        Some(cursor) => {
+            // Never let the margin invert the clamp bounds on tiny windows.
+            let margin = CURSOR_COVER_MARGIN.min(size / 2);
+            coord.clamp(cursor - size + margin, cursor - margin)
+        }
+        None => coord,
+    };
+    coord.clamp(min, max)
+}
+
+fn window_rect(window: &WebviewWindow) -> Option<PhysicalRect> {
+    let position = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    Some(PhysicalRect {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    })
+}
+
+/// The cursor position while it still lies inside `reference` (the pill during
+/// a hover session, the window itself otherwise), else `None`.
+fn cursor_within(window: &WebviewWindow, reference: PhysicalRect) -> Option<(i32, i32)> {
+    let cursor = window.cursor_position().ok()?;
+    let left = reference.x as f64;
+    let top = reference.y as f64;
+    let inside = cursor.x >= left
+        && cursor.y >= top
+        && cursor.x < left + reference.width as f64
+        && cursor.y < top + reference.height as f64;
+    inside.then(|| (cursor.x.round() as i32, cursor.y.round() as i32))
 }
 
 fn window_center(window: &WebviewWindow) -> (i32, i32) {
@@ -1165,6 +1401,182 @@ mod tests {
         }
     }
 
+    /// Physical capsule size the frontend reports for the v1.1.0 capsule at
+    /// 175% (284.31 x 69 CSS px untransformed), as measured in rounds 1-3.
+    fn capsule() -> PhysicalSize<u32> {
+        PhysicalSize::new(871, 211)
+    }
+
+    fn physical_work_area() -> PhysicalRect {
+        PhysicalRect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        }
+    }
+
+    fn pill_on(edge: Edge, anchor_center: (i32, i32)) -> PhysicalRect {
+        pill_geometry(edge, physical_work_area(), 1.75, 175, anchor_center)
+    }
+
+    /// A cursor counts as inside while it lies within the inclusive bounds.
+    fn contains_point(rect: PhysicalRect, x: i32, y: i32) -> bool {
+        let left = rect.x as i64;
+        let top = rect.y as i64;
+        x as i64 >= left
+            && x as i64 <= left + rect.width as i64
+            && y as i64 >= top
+            && y as i64 <= top + rect.height as i64
+    }
+
+    /// R3-1: the authoritative size write-back must leave the window covering
+    /// the cursor no matter where on the pill it entered. The capsule (211
+    /// physical px tall at 175%) is shorter than a left/right pill (306), so
+    /// "cover the whole pill" is unreachable once the real size lands — this
+    /// asserts the reachable contract of §3.4: cover the cursor's position.
+    #[test]
+    fn docked_expanded_final_rect_keeps_the_cursor_inside_on_every_edge() {
+        let wa = physical_work_area();
+        for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
+            // Offsets span the middle of the edge and both sides of it, i.e.
+            // every snap position a user can legitimately release at.
+            for offset in [-400, -120, -28, 0, 28, 120, 400] {
+                let anchor = match edge {
+                    Edge::Left | Edge::Right => (1280, 720 + offset),
+                    Edge::Top | Edge::Bottom => (1280 + offset, 720),
+                };
+                let pill = pill_on(edge, anchor);
+                // Any point of the pill can hold the cursor at write-back time.
+                for x in pill.x..=pill.x + pill.width as i32 {
+                    for y in pill.y..=pill.y + pill.height as i32 {
+                        let rect = docked_expanded_final_rect(edge, wa, capsule(), anchor, Some((x, y)));
+                        assert!(
+                            contains_point(rect, x, y),
+                            "{edge:?} at offset {offset}: final {rect:?} must contain cursor ({x}, {y}) of pill {pill:?}"
+                        );
+                        let flush = match edge {
+                            Edge::Left => rect.x == wa.x,
+                            Edge::Right => rect.x + rect.width as i32 == wa.x + wa.width as i32,
+                            Edge::Top => rect.y == wa.y,
+                            Edge::Bottom => rect.y + rect.height as i32 == wa.y + wa.height as i32,
+                        };
+                        assert!(
+                            flush && contains(wa, rect),
+                            "{edge:?} at offset {offset}: final {rect:?} must hug the edge inside {wa:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The exact geometry of round 3's counterexample: the cursor rests in the
+    /// pill's outer bands, which the anchor-centred rectangle misses.
+    #[test]
+    fn docked_expanded_final_rect_covers_round_three_counterexample() {
+        let wa = physical_work_area();
+        let anchor_center = (2124, 505);
+        let pill = pill_on(Edge::Right, anchor_center);
+        assert_eq!(
+            pill,
+            PhysicalRect {
+                x: 2415,
+                y: 352,
+                width: 141,
+                height: 306
+            }
+        );
+        // The pre-fix placement centred the capsule on the anchor, i.e. y in
+        // [400, 611]; y = 360 (pill y in [352, 658]) fell outside.
+        let top_band = docked_expanded_final_rect(Edge::Right, wa, capsule(), anchor_center, Some((2480, 360)));
+        assert!(contains_point(top_band, 2480, 360), "{top_band:?}");
+        let bottom_band = docked_expanded_final_rect(Edge::Right, wa, capsule(), anchor_center, Some((2480, 650)));
+        assert!(contains_point(bottom_band, 2480, 650), "{bottom_band:?}");
+    }
+
+    #[test]
+    fn docked_expanded_final_rect_centres_on_the_anchor_without_a_cursor() {
+        let rect = docked_expanded_final_rect(
+            Edge::Right,
+            physical_work_area(),
+            capsule(),
+            (2124, 505),
+            None,
+        );
+        assert_eq!((rect.x, rect.y, rect.width, rect.height), (1689, 400, 871, 211));
+    }
+
+    #[test]
+    fn hover_guard_stands_down_until_the_write_back_or_the_lease_expires() {
+        let manager = manager_with(DockState::Docked(Edge::Right), true);
+        let pill = PhysicalRect {
+            x: 2415,
+            y: 352,
+            width: 141,
+            height: 306,
+        };
+        assert!(!manager.is_awaiting_resize());
+        assert_eq!(manager.expanded_anchor_center(), None);
+
+        manager.begin_hover(pill, (2124, 505));
+        assert!(manager.is_awaiting_resize());
+        assert_eq!(manager.hover().map(|hover| hover.pill), Some(pill));
+        assert_eq!(manager.expanded_anchor_center(), Some((2124, 505)));
+
+        // The authoritative write-back releases the guard but keeps the pill,
+        // so later repositions of the same session stay centred on it.
+        manager.finish_hover_resize();
+        assert!(!manager.is_awaiting_resize());
+        assert_eq!(manager.hover().map(|hover| hover.pill), Some(pill));
+        assert_eq!(manager.expanded_anchor_center(), Some((2124, 505)));
+
+        // A lost `dock_window_resized` cannot latch the guard on.
+        manager.begin_hover(pill, (2124, 505));
+        let hover = manager.hover().unwrap();
+        lock(&manager.runtime).hover = Some(Hover {
+            resize_deadline: Some(Instant::now() - Duration::from_millis(1)),
+            ..hover
+        });
+        assert!(!manager.is_awaiting_resize());
+    }
+
+    #[test]
+    fn collapse_and_a_failed_expansion_drop_the_hover_session() {
+        let manager = manager_with(DockState::Docked(Edge::Right), true);
+        manager.begin_hover(
+            PhysicalRect {
+                x: 2415,
+                y: 352,
+                width: 141,
+                height: 306,
+            },
+            (2124, 505),
+        );
+        assert!(manager.is_awaiting_resize());
+        let timer = manager.leave_window().unwrap();
+        assert!(manager.collapse_if_current(timer).is_some());
+        assert!(manager.hover().is_none());
+        assert!(!manager.is_awaiting_resize());
+
+        let manager = manager_with(DockState::Docked(Edge::Left), false);
+        assert!(manager.enter_pill());
+        manager.begin_hover(
+            PhysicalRect {
+                x: 4,
+                y: 100,
+                width: 141,
+                height: 306,
+            },
+            (74, 253),
+        );
+        assert!(manager.is_awaiting_resize());
+        manager.revert_expansion();
+        assert!(!manager.info().expanded);
+        assert!(!manager.is_awaiting_resize());
+        assert!(manager.hover().is_none());
+    }
+
     fn manager_with(state: DockState, expanded: bool) -> DockManager {
         let config = ConfigManager::new();
         let persisted = match state {
@@ -1189,6 +1601,7 @@ mod tests {
                 pointer_inside: false,
                 timer_generation: 0,
                 anchor_center: None,
+                hover: None,
             })),
         }
     }
