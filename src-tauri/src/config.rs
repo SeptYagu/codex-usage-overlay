@@ -28,6 +28,8 @@ pub struct OverlaySettings {
     pub language: String,
     #[serde(default = "default_true")]
     pub auto_start: bool,
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
 }
 
 fn default_scale() -> u32 { 175 }
@@ -46,6 +48,7 @@ impl Default for OverlaySettings {
             refresh_interval_seconds: default_refresh_interval(),
             language: default_language(),
             auto_start: default_true(),
+            auto_check_updates: default_true(),
         }
     }
 }
@@ -173,6 +176,7 @@ mod tests {
         assert_eq!(settings.refresh_interval_seconds, 300);
         assert_eq!(settings.language, "zh-CN");
         assert!(!settings.auto_start);
+        assert!(settings.auto_check_updates);
     }
 
     #[test]
@@ -188,6 +192,7 @@ mod tests {
         for (wire, layout) in [("grouped", OverlayLayout::Grouped), ("stacks", OverlayLayout::Stacks)] {
             let mut value = legacy_settings();
             value["overlayLayout"] = json!(wire);
+            value["autoCheckUpdates"] = json!(true);
             let settings: OverlaySettings = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(settings.overlay_layout, layout);
             assert_preferences(&settings);
@@ -236,5 +241,22 @@ pub fn is_installed_environment() -> bool {
     }
 
     false
+}
+
+pub fn updater_target() -> &'static str {
+    if !is_installed_environment() {
+        return "windows-x86_64-portable";
+    }
+
+    let is_nsis = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("uninstall.exe")))
+        .is_some_and(|uninstaller| uninstaller.exists());
+
+    if is_nsis {
+        "windows-x86_64-nsis"
+    } else {
+        "windows-x86_64-msi"
+    }
 }
 

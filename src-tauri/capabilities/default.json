@@ -4,7 +4,8 @@
   "description": "enables the default permissions for main overlay and settings",
   "windows": [
     "main",
-    "settings"
+    "settings",
+    "tray-menu"
   ],
   "permissions": [
     "core:default",
@@ -15,6 +16,8 @@
     "core:window:allow-set-focus",
     "core:window:allow-set-size",
     "core:window:allow-set-title",
-    "autostart:default"
+    "autostart:default",
+    "updater:default",
+    "notification:default"
   ]
 }

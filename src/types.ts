@@ -17,6 +17,7 @@ export interface OverlaySettings {
   refreshIntervalSeconds: number;
   language: string;
   autoStart: boolean;
+  autoCheckUpdates: boolean;
 }
 
 export const DEFAULT_SETTINGS: OverlaySettings = {
@@ -27,6 +28,7 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   refreshIntervalSeconds: 60,
   language: 'auto',
   autoStart: true,
+  autoCheckUpdates: true,
 };
 
 export interface UsageStatus {

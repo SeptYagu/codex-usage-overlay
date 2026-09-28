@@ -65,6 +65,26 @@ html, body, #root {
 .overlay-stacks .overlay-reading { flex-direction: column; align-items: flex-start; gap: 5px; }
 .overlay-loading { position: absolute; top: 4px; right: 4px; width: 3px; height: 3px; border-radius: 50%; background: var(--overlay-healthy); }
 
+.tray-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  padding: 7px 10px;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.25;
+  cursor: default;
+}
+.tray-menu-item:hover:not(:disabled) { background: rgba(148, 163, 184, .18); }
+.tray-menu-item:focus-visible { outline: 2px solid #0891b2; outline-offset: -2px; }
+.tray-menu-item:disabled { color: #94a3b8; }
+.tray-menu-separator { height: 1px; margin: 5px 4px; background: rgba(148, 163, 184, .32); }
+
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(128, 128, 128, .3); border-radius: 3px; }

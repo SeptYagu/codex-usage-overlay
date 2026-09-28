@@ -39,6 +39,7 @@ const savedSettings: OverlaySettings = {
   language: 'en-US',
   overlayLayout: 'stacks',
   autoStart: false,
+  autoCheckUpdates: true,
 };
 
 function deferred<T>() {

@@ -1,130 +1,27 @@
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, Wry,
+    AppHandle, Emitter, Manager, PhysicalPosition, Position, Size, WebviewUrl,
+    WebviewWindowBuilder, Wry,
 };
 
 pub const TRAY_ID: &str = "main-tray";
 
-pub fn build_tray_menu(
-    app: &AppHandle,
-    language_setting: &str,
-    autostart_enabled: bool,
-    is_installed: bool,
-) -> Result<Menu<Wry>, tauri::Error> {
-    let locale = crate::commands::resolve_locale(language_setting);
-    let (toggle_str, refresh_str, settings_str, autostart_str, exit_str) = match locale {
-        "zh-CN" => (
-            "显示/隐藏悬浮窗",
-            "立即刷新用量",
-            "浮窗设置…",
-            "开机时自动启动",
-            "退出悬浮窗",
-        ),
-        "zh-Hant" => (
-            "顯示/隱藏懸浮窗",
-            "立即重新整理用量",
-            "浮窗設定…",
-            "開機時自動啟動",
-            "結束懸浮窗",
-        ),
-        _ => (
-            "Show/Hide Overlay",
-            "Refresh Usage Now",
-            "Settings…",
-            "Start automatically on boot",
-            "Exit Overlay",
-        ),
-    };
-
-    let toggle_i = MenuItem::with_id(app, "toggle_overlay", toggle_str, true, None::<&str>)?;
-    let refresh_i = MenuItem::with_id(app, "refresh_usage", refresh_str, true, None::<&str>)?;
-    let settings_i = MenuItem::with_id(app, "open_settings", settings_str, true, None::<&str>)?;
-    let sep1 = PredefinedMenuItem::separator(app)?;
-    let sep2 = PredefinedMenuItem::separator(app)?;
-    let exit_i = MenuItem::with_id(app, "exit_app", exit_str, true, None::<&str>)?;
-
-    if is_installed {
-        let sep3 = PredefinedMenuItem::separator(app)?;
-        let autostart_i = CheckMenuItem::with_id(
-            app,
-            "toggle_autostart",
-            autostart_str,
-            true,
-            autostart_enabled,
-            None::<&str>,
-        )?;
-        Menu::with_items(
-            app,
-            &[
-                &toggle_i,
-                &refresh_i,
-                &sep1,
-                &settings_i,
-                &sep2,
-                &autostart_i,
-                &sep3,
-                &exit_i,
-            ],
-        )
-    } else {
-        Menu::with_items(
-            app,
-            &[
-                &toggle_i,
-                &refresh_i,
-                &sep1,
-                &settings_i,
-                &sep2,
-                &exit_i,
-            ],
-        )
-    }
-}
-
-pub fn update_tray_menu(
-    app: &AppHandle,
-    language_setting: &str,
-    autostart_enabled: bool,
-    is_installed: bool,
-) -> Result<(), tauri::Error> {
-    if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let menu = build_tray_menu(app, language_setting, autostart_enabled, is_installed)?;
-        tray.set_menu(Some(menu))?;
-    }
-    Ok(())
-}
-
-pub fn setup_tray(
-    app: &AppHandle,
-    language_setting: &str,
-    autostart_enabled: bool,
-    is_installed: bool,
-) -> Result<TrayIcon<Wry>, tauri::Error> {
-    let menu = build_tray_menu(app, language_setting, autostart_enabled, is_installed)?;
-
+pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon<Wry>, tauri::Error> {
     // Initial dual-ring gauge icon
     let initial_icon = generate_dual_ring_icon(None, None);
-    let tooltip = match crate::commands::resolve_locale(language_setting) {
-        "zh-CN" => "Codex 用量悬浮窗",
-        "zh-Hant" => "Codex 用量懸浮窗",
-        _ => "Codex Usage Overlay",
-    };
 
     let tray = TrayIconBuilder::with_id(TRAY_ID)
-        .tooltip(tooltip)
+        .tooltip("Codex Usage Overlay")
         .icon(initial_icon)
-        .menu(&menu)
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
+            if let TrayIconEvent::Click { button, button_state: MouseButtonState::Up, .. } = event {
                 let app = tray.app_handle();
-                toggle_main_window(app);
+                match button {
+                    MouseButton::Left => toggle_main_window(app),
+                    MouseButton::Right => open_tray_menu_window(app),
+                    _ => {}
+                }
             }
         })
         .build(app)?;
@@ -146,36 +43,93 @@ pub fn handle_menu_action(app: &AppHandle, id: &str) {
         "open_settings" => {
             open_settings_window(app);
         }
-        "toggle_autostart" => {
-            if !crate::config::is_installed_environment() {
-                return;
-            }
-            let app_clone = app.clone();
-            tauri::async_runtime::spawn(async move {
-                use tauri_plugin_autostart::ManagerExt;
-                let autostart_mgr = app_clone.autolaunch();
-                if let Ok(is_enabled) = autostart_mgr.is_enabled() {
-                    let new_state = !is_enabled;
-                    if new_state {
-                        let _ = autostart_mgr.enable();
-                    } else {
-                        let _ = autostart_mgr.disable();
-                    }
-                    if let Some(state) = app_clone.try_state::<std::sync::Arc<crate::commands::AppState>>() {
-                        let mut settings = state.settings.lock().await;
-                        settings.auto_start = new_state;
-                        state.config_manager.save_settings(&settings);
-                        let _ = app_clone.emit("settings_updated", &*settings);
-                        let _ = update_tray_menu(&app_clone, &settings.language, new_state, true);
-                    }
-                }
-            });
-        }
         "exit_app" => {
             app.exit(0);
         }
         _ => {}
     }
+}
+
+pub fn open_tray_menu_window(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
+    let rect = tray.rect().ok().flatten();
+    let window = if let Some(window) = app.get_webview_window("tray-menu") {
+        window
+    } else {
+        match WebviewWindowBuilder::new(
+            app,
+            "tray-menu",
+            WebviewUrl::App("index.html#tray-menu".into()),
+        )
+        .title("Tray Menu")
+        .inner_size(300.0, 500.0)
+        .resizable(false)
+        .maximizable(false)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .shadow(true)
+        .build()
+        {
+            Ok(window) => window,
+            Err(_) => return,
+        }
+    };
+
+    let (x, y) = if let Some(rect) = rect {
+        let (raw_x, raw_y, position_is_physical) = match rect.position {
+            Position::Physical(position) => (position.x as f64, position.y as f64, true),
+            Position::Logical(position) => (position.x, position.y, false),
+        };
+        let (raw_width, raw_height, size_is_physical) = match rect.size {
+            Size::Physical(size) => (size.width as f64, size.height as f64, true),
+            Size::Logical(size) => (size.width, size.height, false),
+        };
+        let monitor = app.available_monitors().ok().and_then(|monitors| {
+            monitors.into_iter().find(|monitor| {
+                let position = monitor.position();
+                let size = monitor.size();
+                let x = raw_x.round() as i32;
+                let y = raw_y.round() as i32;
+                x >= position.x
+                    && x < position.x + size.width as i32
+                    && y >= position.y
+                    && y < position.y + size.height as i32
+            })
+        });
+        let scale = monitor.as_ref().map(tauri::Monitor::scale_factor).unwrap_or(1.0);
+        let icon_x = if position_is_physical { raw_x } else { raw_x * scale }.round() as i32;
+        let icon_y = if position_is_physical { raw_y } else { raw_y * scale }.round() as i32;
+        let icon_width = if size_is_physical { raw_width } else { raw_width * scale }.round() as i32;
+        let icon_height = if size_is_physical { raw_height } else { raw_height * scale }.round() as i32;
+        if let Some(monitor) = monitor {
+            let work = monitor.work_area();
+            let popup_width = (300.0 * scale).round() as i32;
+            let popup_height = (500.0 * scale).round() as i32;
+            let left = work.position.x;
+            let top = work.position.y;
+            let right = left + work.size.width as i32;
+            let bottom = top + work.size.height as i32;
+            let popup_x = (icon_x + icon_width - popup_width)
+                .clamp(left, (right - popup_width).max(left));
+            let popup_y = if icon_y > top + (bottom - top) / 2 {
+                icon_y - popup_height
+            } else {
+                icon_y + icon_height
+            }
+            .clamp(top, (bottom - popup_height).max(top));
+            (popup_x, popup_y)
+        } else {
+            (icon_x, icon_y - 500)
+        }
+    } else {
+        (20, 20)
+    };
+
+    let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
+    let _ = window.show();
+    let _ = window.set_focus();
 }
 
 pub fn toggle_main_window(app: &AppHandle) {
@@ -203,7 +157,7 @@ pub fn open_settings_window(app: &AppHandle) {
             "settings",
             WebviewUrl::App("index.html#settings".into()),
         )
-        .title("Overlay Settings")
+        .title("Settings")
         .inner_size(380.0, 560.0)
         .min_inner_size(380.0, 350.0)
         .max_inner_size(380.0, 900.0)

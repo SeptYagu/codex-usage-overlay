@@ -14,20 +14,28 @@ $version = $config.version
 if (($Tag -replace '^v', '' -replace '-.*$', '') -ne $version) { throw 'Tag and app versions must match.' }
 
 $binary = Join-Path $repositoryRoot 'src-tauri\target\release\codex-usage-overlay.exe'
+$updaterHelper = Join-Path $repositoryRoot 'src-tauri\target\release\codex-usage-updater.exe'
 $installerName = "codex-usage-overlay_${version}_x64-setup.exe"
 $msiName = "codex-usage-overlay_${version}_x64_en-US.msi"
 $installer = Join-Path $repositoryRoot "src-tauri\target\release\bundle\nsis\$installerName"
 $msi = Join-Path $repositoryRoot "src-tauri\target\release\bundle\msi\$msiName"
-foreach ($source in @($binary, $installer, $msi)) {
+$installerSignature = "$installer.sig"
+$msiSignature = "$msi.sig"
+foreach ($source in @($binary, $updaterHelper, $installer, $msi, $installerSignature, $msiSignature)) {
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing release build: $source" }
 }
 New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
 Copy-Item -LiteralPath $installer -Destination (Join-Path $outputPath $installerName) -Force
 Copy-Item -LiteralPath $msi -Destination (Join-Path $outputPath $msiName) -Force
+$installerSignatureName = "$installerName.sig"
+$msiSignatureName = "$msiName.sig"
+Copy-Item -LiteralPath $installerSignature -Destination (Join-Path $outputPath $installerSignatureName) -Force
+Copy-Item -LiteralPath $msiSignature -Destination (Join-Path $outputPath $msiSignatureName) -Force
 $zipName = "CodexUsageOverlay-$Tag-Windows-x64.zip"
 $zipPath = Join-Path $outputPath $zipName
 $archiveSources = [ordered]@{
     'CodexUsageOverlay.exe' = $binary
+    'CodexUsageUpdater.exe' = $updaterHelper
     'README.md' = (Join-Path $repositoryRoot 'README.md')
     'README.en.md' = (Join-Path $repositoryRoot 'README.en.md')
 }
@@ -55,6 +63,36 @@ try {
         } finally { $sha.Dispose(); $stream.Dispose() }
     }
 } finally { $archive.Dispose() }
+
+$tauriCli = Join-Path $repositoryRoot 'node_modules\.bin\tauri.cmd'
+$signatureOutput = & $tauriCli signer sign $zipPath --app-version $version
+if ($LASTEXITCODE -ne 0) { throw 'Failed to sign the portable updater archive.' }
+$portableSignature = ($signatureOutput | Select-Object -Last 1).ToString().Trim()
+if (-not $portableSignature) { throw 'The portable updater signature is empty.' }
+
+$releaseBaseUrl = "https://github.com/SeptYagu/codex-usage-overlay/releases/download/$Tag"
+$manifest = [ordered]@{
+    version = $version
+    notes = "Codex Usage Overlay $version"
+    pub_date = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    platforms = [ordered]@{
+        'windows-x86_64-nsis' = @{
+            url = "$releaseBaseUrl/$installerName"
+            signature = (Get-Content -LiteralPath $installerSignature -Raw).Trim()
+        }
+        'windows-x86_64-msi' = @{
+            url = "$releaseBaseUrl/$msiName"
+            signature = (Get-Content -LiteralPath $msiSignature -Raw).Trim()
+        }
+        'windows-x86_64-portable' = @{
+            url = "$releaseBaseUrl/$zipName"
+            signature = $portableSignature
+        }
+    }
+}
+$manifestPath = Join-Path $outputPath 'latest.json'
+$manifestJson = $manifest | ConvertTo-Json -Depth 8
+[IO.File]::WriteAllText($manifestPath, $manifestJson, [Text.UTF8Encoding]::new($false))
 
 $checksumLines = foreach ($assetName in @($installerName, $msiName, $zipName)) {
     $hash = (Get-FileHash -LiteralPath (Join-Path $outputPath $assetName) -Algorithm SHA256).Hash.ToLowerInvariant()

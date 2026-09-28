@@ -1,6 +1,6 @@
 [package]
 name = "codex-usage-overlay"
-version = "1.0.0"
+version = "1.0.1"
 description = "A lightweight Windows overlay for OpenAI Codex usage"
 authors = ["Justin"]
 edition = "2021"
@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
@@ -24,6 +25,13 @@ dirs = "6.0"
 windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Foundation",
-    "Win32_Graphics_Gdi"
+    "Win32_Graphics_Gdi",
+    "Win32_System_Threading"
 ] }
 sys-locale = "0.3.2"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+tauri-plugin-notification = "2"
+
+[[bin]]
+name = "codex-usage-updater"
+path = "src/bin/portable_updater.rs"

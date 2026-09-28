@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
@@ -12,6 +13,25 @@ pub struct AppState {
     pub config_manager: ConfigManager,
     pub last_usage: Mutex<Option<CodexUsage>>,
     pub settings: Mutex<OverlaySettings>,
+    pub update_check: Mutex<()>,
+    pub pending_update: Mutex<Option<tauri_plugin_updater::Update>>,
+    pub available_update: Mutex<Option<AvailableUpdate>>,
+    pub last_auto_notified_version: Mutex<Option<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableUpdate {
+    pub version: String,
+    pub current_version: String,
+    pub notes: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProgress {
+    downloaded: u64,
+    total: Option<u64>,
 }
 
 pub fn match_supported_locale(system_locale: &str) -> &'static str {
@@ -95,8 +115,13 @@ pub async fn save_settings(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    state.config_manager.save_settings(&new_settings);
-    *state.settings.lock().await = new_settings.clone();
+    let auto_check_just_enabled = {
+        let mut settings = state.settings.lock().await;
+        let was_enabled = settings.auto_check_updates;
+        *settings = new_settings.clone();
+        state.config_manager.save_settings(&settings);
+        !was_enabled && new_settings.auto_check_updates
+    };
 
     // Update tray tooltip if we have last usage
     if let Some(usage) = state.last_usage.lock().await.as_ref() {
@@ -126,20 +151,22 @@ pub async fn save_settings(
     // Update settings window title
     if let Some(settings_win) = app.get_webview_window("settings") {
         let title = match resolve_locale(&new_settings.language) {
-            "zh-CN" => "浮窗设置",
-            "zh-Hant" => "浮窗設定",
-            _ => "Overlay Settings",
+            "zh-CN" => "设置",
+            "zh-Hant" => "設定",
+            _ => "Settings",
         };
         let _ = settings_win.set_title(title);
     }
 
-    // Update system tray context menu
-    let is_installed = crate::config::is_installed_environment();
-    let autostart_enabled = is_installed && new_settings.auto_start;
-    let _ = crate::tray::update_tray_menu(&app, &new_settings.language, autostart_enabled, is_installed);
-
     // Broadcast updated settings to all windows
     let _ = app.emit("settings_updated", &new_settings);
+    if auto_check_just_enabled {
+        let app_for_check = app.clone();
+        let state_for_check = state.inner().clone();
+        tauri::async_runtime::spawn(async move {
+            check_and_notify_auto_update(&app_for_check, &state_for_check).await;
+        });
+    }
     Ok(())
 }
 
@@ -154,17 +181,29 @@ pub fn is_installed_version() -> bool {
 }
 
 #[tauri::command]
-pub async fn set_autostart(enable: bool, app: AppHandle) -> Result<(), String> {
+pub async fn set_autostart(
+    enable: bool,
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
     if !crate::config::is_installed_environment() {
         return Err("Autostart is only supported in installer versions".to_string());
     }
     use tauri_plugin_autostart::ManagerExt;
     let autostart_mgr = app.autolaunch();
     if enable {
-        let _ = autostart_mgr.enable();
+        autostart_mgr.enable().map_err(|e| e.to_string())?;
     } else {
-        let _ = autostart_mgr.disable();
+        autostart_mgr.disable().map_err(|e| e.to_string())?;
     }
+
+    let updated = {
+        let mut settings = state.settings.lock().await;
+        settings.auto_start = enable;
+        state.config_manager.save_settings(&settings);
+        settings.clone()
+    };
+    let _ = app.emit("settings_updated", &updated);
     Ok(())
 }
 
@@ -189,8 +228,8 @@ pub async fn show_overlay_menu(
     let locale = resolve_locale(&current_settings.language);
 
     let (refresh_str, settings_str, hide_str, exit_str) = match locale {
-        "zh-CN" => ("立即刷新用量", "浮窗设置…", "隐藏悬浮窗", "退出悬浮窗"),
-        "zh-Hant" => ("立即重新整理用量", "浮窗設定…", "隱藏懸浮窗", "結束懸浮窗"),
+        "zh-CN" => ("立即刷新用量", "设置…", "隐藏悬浮窗", "退出悬浮窗"),
+        "zh-Hant" => ("立即重新整理用量", "設定…", "隱藏懸浮窗", "結束懸浮窗"),
         _ => ("Refresh Now", "Settings…", "Hide", "Exit"),
     };
 
@@ -212,6 +251,151 @@ pub async fn show_overlay_menu(
     .map_err(|e| e.to_string())?;
 
     window.popup_menu(&menu).map_err(|e: tauri::Error| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn toggle_overlay_window(app: AppHandle) {
+    crate::tray::toggle_main_window(&app);
+}
+
+#[tauri::command]
+pub async fn check_for_updates(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<AvailableUpdate>, String> {
+    check_and_store_update(&app, &state).await
+}
+
+#[tauri::command]
+pub async fn get_available_update(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<AvailableUpdate>, String> {
+    Ok(state.available_update.lock().await.clone())
+}
+
+pub(crate) async fn check_and_store_update(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<Option<AvailableUpdate>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let _check_guard = state.update_check.lock().await;
+    let updater = app
+        .updater_builder()
+        .target(crate::config::updater_target())
+        .build()
+        .map_err(|error| error.to_string())?;
+    let update = updater.check().await.map_err(|error| error.to_string())?;
+    let info = update.as_ref().map(|update| AvailableUpdate {
+        version: update.version.clone(),
+        current_version: update.current_version.clone(),
+        notes: update.body.clone(),
+    });
+    *state.pending_update.lock().await = update;
+    *state.available_update.lock().await = info.clone();
+    Ok(info)
+}
+
+pub(crate) async fn check_and_notify_auto_update(app: &AppHandle, state: &AppState) {
+    if let Ok(Some(update)) = check_and_store_update(app, state).await {
+        let should_notify = {
+            let mut last = state.last_auto_notified_version.lock().await;
+            if last.as_deref() == Some(update.version.as_str()) {
+                false
+            } else {
+                *last = Some(update.version.clone());
+                true
+            }
+        };
+        if should_notify {
+            let _ = app.emit("update_available", &update);
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn install_update(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let update = state
+        .pending_update
+        .lock()
+        .await
+        .take()
+        .ok_or_else(|| "No checked update is available".to_string())?;
+
+    if crate::config::is_installed_environment() {
+        let progress_app = app.clone();
+        let mut downloaded = 0_u64;
+        update
+            .download_and_install(
+                move |chunk, total| {
+                    downloaded += chunk as u64;
+                    let _ = progress_app.emit(
+                        "update_progress",
+                        UpdateProgress { downloaded, total },
+                    );
+                },
+                || {},
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let progress_app = app.clone();
+    let mut downloaded = 0_u64;
+    let bytes = update
+        .download(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                let _ = progress_app.emit(
+                    "update_progress",
+                    UpdateProgress { downloaded, total },
+                );
+            },
+            || {},
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+    use std::io::Cursor;
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| format!("Invalid portable update archive: {error}"))?;
+    let mut executable = archive
+        .by_name("CodexUsageOverlay.exe")
+        .map_err(|error| format!("Portable update is missing the application: {error}"))?;
+    if executable.size() > 256 * 1024 * 1024 {
+        return Err("Portable update executable is too large".to_string());
+    }
+
+    let current_exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let directory = current_exe
+        .parent()
+        .ok_or_else(|| "Could not locate the portable application directory".to_string())?;
+    let staged_exe = directory.join("CodexUsageOverlay.exe.staged");
+    let helper = directory.join("CodexUsageUpdater.exe");
+    let mut staged_file = std::fs::File::create(&staged_exe).map_err(|error| error.to_string())?;
+    std::io::copy(&mut executable, &mut staged_file).map_err(|error| error.to_string())?;
+
+    if !helper.is_file() {
+        let _ = std::fs::remove_file(&staged_exe);
+        return Err("Portable update helper is missing".to_string());
+    }
+
+    let mut command = std::process::Command::new(helper);
+    command
+        .arg(std::process::id().to_string())
+        .arg(&current_exe)
+        .arg(&staged_exe)
+        .args(std::env::args_os().skip(1));
+    command.spawn().map_err(|error| {
+        let _ = std::fs::remove_file(&staged_exe);
+        error.to_string()
+    })?;
+    app.exit(0);
     Ok(())
 }
 

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to build and publish (e.g. v1.0.0)'
+        description: 'Tag to build and publish (e.g. v1.0.1)'
         required: true
 
 permissions:
@@ -39,6 +39,9 @@ jobs:
 
       - name: Test and build Tauri app
         shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           npm ci
           if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
@@ -48,9 +51,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
           npm run tauri -- build --ci --bundles nsis,msi
           if ($LASTEXITCODE -ne 0) { throw 'Tauri release build failed.' }
+          cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin codex-usage-updater
+          if ($LASTEXITCODE -ne 0) { throw 'Portable updater helper build failed.' }
 
       - name: Package and verify Tauri release
         shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           $releaseTag = "${{ github.event.inputs.tag }}"
           if (-not $releaseTag) { $releaseTag = $env:GITHUB_REF_NAME }

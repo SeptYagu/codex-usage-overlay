@@ -23,18 +23,26 @@ pub fn run() {
         config_manager: config_manager.clone(),
         last_usage: Mutex::new(None),
         settings: Mutex::new(initial_settings.clone()),
+        update_check: Mutex::new(()),
+        pending_update: Mutex::new(None),
+        available_update: Mutex::new(None),
+        last_auto_notified_version: Mutex::new(None),
     });
 
     let app_state_clone = app_state.clone();
 
     tauri::Builder::default()
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "settings" {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. }
+                if window.label() == "settings" || window.label() == "tray-menu" =>
+            {
+                api.prevent_close();
+                let _ = window.hide();
             }
+            tauri::WindowEvent::Focused(false) if window.label() == "tray-menu" => {
+                let _ = window.hide();
+            }
+            _ => {}
         })
         .on_menu_event(|app, event| {
             tray::handle_menu_action(app, event.id().as_ref());
@@ -49,6 +57,8 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::fetch_usage,
@@ -60,19 +70,21 @@ pub fn run() {
             commands::start_dragging,
             commands::exit_app,
             commands::show_overlay_menu,
+            commands::toggle_overlay_window,
+            commands::check_for_updates,
+            commands::get_available_update,
+            commands::install_update,
         ])
         .setup(move |app| {
             // Setup system tray
-            let is_installed = config::is_installed_environment();
-            let autostart_enabled = is_installed && initial_settings.auto_start;
-            let _ = setup_tray(app.handle(), &initial_settings.language, autostart_enabled, is_installed);
+            let _ = setup_tray(app.handle());
 
             // Set initial settings window title based on language
             if let Some(settings_win) = app.get_webview_window("settings") {
                 let title = match commands::resolve_locale(&initial_settings.language) {
-                    "zh-CN" => "浮窗设置",
-                    "zh-Hant" => "浮窗設定",
-                    _ => "Overlay Settings",
+                    "zh-CN" => "设置",
+                    "zh-Hant" => "設定",
+                    _ => "Settings",
                 };
                 let _ = settings_win.set_title(title);
             }
@@ -153,6 +165,20 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let _ = fetch_usage_background(&h, &s).await;
                 });
+            });
+
+            // Check for stable updates periodically when automatic checks are enabled.
+            let update_handle = app.handle().clone();
+            let update_state = app_state_clone.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                loop {
+                    let auto_check = update_state.settings.lock().await.auto_check_updates;
+                    if auto_check {
+                        commands::check_and_notify_auto_update(&update_handle, &update_state).await;
+                    }
+                    tokio::time::sleep(Duration::from_secs(12 * 60 * 60)).await;
+                }
             });
 
             Ok(())

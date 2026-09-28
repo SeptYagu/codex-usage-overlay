@@ -2,11 +2,13 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { useTranslation } from 'react-i18next';
-import { updateLanguage } from './i18n';
+import i18n, { updateLanguage } from './i18n';
 import { CodexUsage, OverlaySettings, DEFAULT_SETTINGS } from './types';
 import { OverlayView } from './components/OverlayView';
 import { SettingsView } from './components/SettingsView';
+import { TrayMenuView } from './components/TrayMenuView';
 
 export const App: React.FC = () => {
   const { t } = useTranslation();
@@ -51,15 +53,32 @@ export const App: React.FC = () => {
       setIsLoading(false);
     });
 
+    const unlistenUpdate = listen<{ version: string }>('update_available', async (event) => {
+      if (windowLabel !== 'main') return;
+      try {
+        let granted = await isPermissionGranted();
+        if (!granted) granted = (await requestPermission()) === 'granted';
+        if (granted) {
+          sendNotification({
+            title: i18n.t('updateNotificationTitle'),
+            body: i18n.t('updateAvailable', { version: event.payload.version }),
+          });
+        }
+      } catch (error) {
+        console.error('Could not show update notification:', error);
+      }
+    });
+
     // Initial usage fetch
-    handleRefresh();
+    if (windowLabel === 'main') handleRefresh();
 
     return () => {
       settingsRevision.current++;
       unlistenSettings.then((f) => f());
       unlistenUsage.then((f) => f());
+      unlistenUpdate.then((f) => f());
     };
-  }, [loadSettings]);
+  }, [loadSettings, windowLabel]);
 
   const handleRefresh = async () => {
     setIsLoading(true);
@@ -77,6 +96,7 @@ export const App: React.FC = () => {
 
   const handleUpdateSettings = async (newSettings: OverlaySettings) => {
     setSettings(newSettings);
+    updateLanguage(newSettings.language);
     try {
       await invoke('save_settings', { newSettings });
     } catch (err) {
@@ -108,6 +128,11 @@ export const App: React.FC = () => {
         onUpdateSettings={handleUpdateSettings}
       />
     );
+  }
+
+  if (windowLabel === 'tray-menu' || window.location.hash === '#tray-menu') {
+    if (settingsLoadState !== 'ready') return null;
+    return <TrayMenuView settings={settings} onUpdateSettings={handleUpdateSettings} />;
   }
 
   return (

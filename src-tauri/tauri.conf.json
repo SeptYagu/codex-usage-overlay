@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "codex-usage-overlay",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "identifier": "com.codex.usage.overlay",
   "build": {
     "frontendDist": "../dist",
@@ -27,7 +27,7 @@
       },
       {
         "label": "settings",
-        "title": "Overlay Settings",
+        "title": "Settings",
         "url": "index.html#settings",
         "width": 380,
         "height": 560,
@@ -51,6 +51,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -62,6 +63,15 @@
       "nsis": {
         "installerIcon": "icons/icon.ico"
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDBDRkEzOEYxNDVDM0ZBRjgKUldUNCtzTkY4VGo2RE93emx2Yy9kU290SnozUWNYL3YweURWSVNVbVBzVUdiNHhBcC80WEZycnQK",
+      "requireSignedVersion": true,
+      "endpoints": [
+        "https://github.com/SeptYagu/codex-usage-overlay/releases/latest/download/latest.json"
+      ]
     }
   }
 }

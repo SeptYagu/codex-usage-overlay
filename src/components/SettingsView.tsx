@@ -3,7 +3,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { OverlaySettings } from '../types';
 import { useTranslation } from 'react-i18next';
-import { updateLanguage } from '../i18n';
 
 interface SettingsViewProps {
   settings: OverlaySettings;
@@ -30,9 +29,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const updateField = <K extends keyof OverlaySettings>(key: K, value: OverlaySettings[K]) => {
     const next = { ...settings, [key]: value };
     onUpdateSettings(next);
-    if (key === 'language') {
-      updateLanguage(value as string);
-    }
   };
 
   return (
@@ -131,7 +127,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 checked={settings.autoStart}
                 onChange={(e) => {
                   const checked = e.target.checked;
-                  updateField('autoStart', checked);
                   invoke('set_autostart', { enable: checked }).catch(console.error);
                 }}
                 className="w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 accent-cyan-500 cursor-pointer"
@@ -139,21 +134,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </label>
           )}
 
-          {/* Language Selection */}
-          <div className="flex items-center justify-between p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/60">
-            <span className="text-sm font-medium">{t('language')}</span>
-            <select
-              aria-label={t('language')}
-              value={settings.language}
-              onChange={(e) => updateField('language', e.target.value)}
-              className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500"
-            >
-              <option value="auto">{t('autoSystem')}</option>
-              <option value="en-US">English (en-US)</option>
-              <option value="zh-CN">简体中文 (zh-CN)</option>
-              <option value="zh-Hant">繁體中文 (zh-Hant)</option>
-            </select>
-          </div>
+          <label className="flex items-center justify-between p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/60 hover:bg-slate-200/60 dark:hover:bg-slate-800 cursor-pointer transition-colors">
+            <span className="text-sm font-medium">{t('autoCheckUpdates')}</span>
+            <input
+              type="checkbox"
+              checked={settings.autoCheckUpdates}
+              onChange={(e) => updateField('autoCheckUpdates', e.target.checked)}
+              className="w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 accent-cyan-500 cursor-pointer"
+            />
+          </label>
 
           {/* Refresh Interval */}
           <div className="flex items-center justify-between p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/60">
