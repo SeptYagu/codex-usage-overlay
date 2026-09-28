@@ -124,6 +124,13 @@ impl DockManager {
         lock(&self.runtime).anchor_center
     }
 
+    /// True while the user is dragging the window or its context menu is open.
+    /// Programmatic repositioning must stand down during these interactions.
+    pub fn is_interacting(&self) -> bool {
+        let runtime = lock(&self.runtime);
+        runtime.dragging || runtime.menu_open
+    }
+
     pub fn cancel_drag(&self) {
         let mut runtime = lock(&self.runtime);
         runtime.dragging = false;
@@ -576,11 +583,13 @@ pub async fn keep_docked_in_work_area(app: &AppHandle, state: &Arc<AppState>) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    if state.dock.info().hidden {
+    let info = state.dock.info();
+    // Never fight the user: a background usage refresh must not reposition the
+    // window while it is being dragged or its menu is open (spec §3.1 T6/§3.7).
+    if info.hidden || state.dock.is_interacting() {
         return;
     }
     let settings = state.settings.lock().await.clone();
-    let info = state.dock.info();
     if let Some(edge) = info.edge.filter(|_| info.docked) {
         if info.expanded {
             if let Err(error) = place_full_at_anchor(&window, &state.dock) {
@@ -632,7 +641,8 @@ fn apply_pill(
     anchor_center: (i32, i32),
 ) -> Result<(), String> {
     let (work, scale) =
-        work_area(window).ok_or_else(|| "Monitor work area unavailable".to_string())?;
+        work_area_for_point(window, Some((anchor_center.0 as f64, anchor_center.1 as f64)))
+            .ok_or_else(|| "Monitor work area unavailable".to_string())?;
     let rect = pill_geometry(edge, work, scale, settings.scale_percent, anchor_center);
     window
         .set_size(Size::Physical(PhysicalSize::new(rect.width, rect.height)))
@@ -642,34 +652,67 @@ fn apply_pill(
         .map_err(|error| error.to_string())
 }
 
+/// Provisional full-window size written before the frontend measures the real
+/// capsule. The estimate only has to keep the window under the cursor until
+/// `fitCapsuleSize` reports the authoritative content size, so it must never
+/// shrink below the current window: expanding from an edge pill (which can be
+/// taller than the capsule) would otherwise move the cursor outside the window
+/// and trigger an immediate `mouseleave`.
 fn set_full_size(window: &WebviewWindow, settings: &OverlaySettings) -> Result<(), String> {
-    let scale = settings.scale_percent as f64 / 100.0;
-    let width = if settings.show_credits { 220.0 } else { 160.0 } * scale;
-    let height = 50.0 * scale;
+    let monitor_scale = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| monitor.scale_factor())
+        .unwrap_or(1.0);
+    let scale = settings.scale_percent as f64 / 100.0 * monitor_scale;
+    let estimated_width = ((if settings.show_credits { 220.0 } else { 160.0 }) * scale)
+        .round()
+        .max(1.0) as u32;
+    let estimated_height = (50.0 * scale).round().max(1.0) as u32;
+    let current = window.outer_size().ok();
+    let size = PhysicalSize::new(
+        estimated_width.max(current.map(|size| size.width).unwrap_or(0)),
+        estimated_height.max(current.map(|size| size.height).unwrap_or(0)),
+    );
     window
-        .set_size(Size::Logical(tauri::LogicalSize::new(width, height)))
-        .map_err(|error| error.to_string())
+        .set_size(Size::Physical(size))
+        .map_err(|error| error.to_string())?;
+    emit_size_invalidated(window);
+    Ok(())
+}
+
+/// Tells the frontend that the window was resized programmatically and that its
+/// cached content measurement is stale, so it re-measures and writes the real
+/// capsule size (spec §3.4).
+fn emit_size_invalidated(window: &WebviewWindow) {
+    let _ = window.app_handle().emit("overlay_size_invalidated", ());
 }
 
 fn place_full_at_anchor(window: &WebviewWindow, manager: &DockManager) -> Result<(), String> {
-    let (work, scale) =
-        work_area(window).ok_or_else(|| "Monitor work area unavailable".to_string())?;
     let size = window.outer_size().map_err(|error| error.to_string())?;
-    let mut anchor = manager.config.load_position().map(|position| {
+    let saved = manager.config.load_position().map(|position| {
         PhysicalPosition::new(position.left.round() as i32, position.top.round() as i32)
     });
-    if anchor.is_none() {
+    // Resolve the work area from the monitor that owns the saved anchor, not the
+    // one the window currently sits on: at startup the window is still on the
+    // primary monitor, so clamping against it would discard a secondary anchor.
+    let (work, scale) = match saved {
+        Some(anchor) => work_area_for_point(window, Some((anchor.x as f64, anchor.y as f64))),
+        None => work_area(window),
+    }
+    .ok_or_else(|| "Monitor work area unavailable".to_string())?;
+    let anchor = saved.unwrap_or_else(|| {
         let margin = (20.0 * scale).round() as i32;
         let top = (40.0 * scale).round() as i32;
-        anchor = Some(PhysicalPosition::new(
+        PhysicalPosition::new(
             work.x
                 .saturating_add(work.width.min(i32::MAX as u32) as i32)
                 .saturating_sub(size.width.min(i32::MAX as u32) as i32)
                 .saturating_sub(margin),
             work.y.saturating_add(top),
-        ));
-    }
-    let anchor = anchor.unwrap_or(PhysicalPosition::new(work.x, work.y));
+        )
+    });
     let clamped = clamp_position(anchor, size, work);
     manager.set_anchor_center((
         clamped
@@ -745,20 +788,9 @@ fn clamp_position(
     )
 }
 
-fn work_area(window: &WebviewWindow) -> Option<(PhysicalRect, f64)> {
-    let monitor = window
-        .outer_position()
-        .ok()
-        .zip(window.outer_size().ok())
-        .and_then(|(position, size)| {
-            let center_x = position.x as f64 + size.width as f64 / 2.0;
-            let center_y = position.y as f64 + size.height as f64 / 2.0;
-            window.monitor_from_point(center_x, center_y).ok().flatten()
-        })
-        .or_else(|| window.current_monitor().ok().flatten())
-        .or_else(|| window.primary_monitor().ok().flatten())?;
+fn monitor_bounds(monitor: &tauri::Monitor) -> (PhysicalRect, f64) {
     let area = monitor.work_area();
-    Some((
+    (
         PhysicalRect {
             x: area.position.x,
             y: area.position.y,
@@ -766,7 +798,73 @@ fn work_area(window: &WebviewWindow) -> Option<(PhysicalRect, f64)> {
             height: area.size.height,
         },
         monitor.scale_factor(),
-    ))
+    )
+}
+
+fn monitor_contains(rect: PhysicalRect, x: f64, y: f64) -> bool {
+    let left = rect.x as f64;
+    let top = rect.y as f64;
+    x >= left && x < left + rect.width as f64 && y >= top && y < top + rect.height as f64
+}
+
+/// Picks the work area that owns `point`. When the point lies outside every
+/// monitor (e.g. a saved anchor on a display that is no longer attached) it
+/// falls back to the monitor under the window and then the first available one,
+/// so the window is always clamped into a usable area.
+fn select_work_area(
+    monitors: &[(PhysicalRect, f64)],
+    fallback: usize,
+    point: Option<(f64, f64)>,
+) -> Option<(PhysicalRect, f64)> {
+    if let Some((x, y)) = point {
+        if let Some(found) = monitors
+            .iter()
+            .find(|(rect, _)| monitor_contains(*rect, x, y))
+        {
+            return Some(*found);
+        }
+    }
+    monitors
+        .get(fallback)
+        .or_else(|| monitors.first())
+        .copied()
+}
+
+fn work_area_for_point(
+    window: &WebviewWindow,
+    point: Option<(f64, f64)>,
+) -> Option<(PhysicalRect, f64)> {
+    let monitors: Vec<(PhysicalRect, f64)> = window
+        .available_monitors()
+        .ok()?
+        .iter()
+        .map(monitor_bounds)
+        .collect();
+    if monitors.is_empty() {
+        return None;
+    }
+    let fallback = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|current| monitor_bounds(&current))
+        .and_then(|current| monitors.iter().position(|candidate| *candidate == current))
+        .unwrap_or(0);
+    select_work_area(&monitors, fallback, point)
+}
+
+fn work_area(window: &WebviewWindow) -> Option<(PhysicalRect, f64)> {
+    let point = window
+        .outer_position()
+        .ok()
+        .zip(window.outer_size().ok())
+        .map(|(position, size)| {
+            (
+                position.x as f64 + size.width as f64 / 2.0,
+                position.y as f64 + size.height as f64 / 2.0,
+            )
+        });
+    work_area_for_point(window, point)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -921,26 +1019,38 @@ mod tests {
         assert_eq!(top, work);
     }
 
-    #[test]
-    fn dock_timer_cannot_collapse_during_drag_or_after_pointer_reenters() {
+    fn manager_with(state: DockState, expanded: bool) -> DockManager {
         let config = ConfigManager::new();
-        let manager = DockManager {
-            config,
-            persisted: Arc::new(Mutex::new(DockPersistence {
+        let persisted = match state {
+            DockState::Docked(edge) => DockPersistence {
                 docked: true,
-                edge: Some(Edge::Right),
-            })),
+                edge: Some(edge),
+            },
+            _ => DockPersistence {
+                docked: false,
+                edge: None,
+            },
+        };
+        DockManager {
+            config,
+            persisted: Arc::new(Mutex::new(persisted)),
             runtime: Arc::new(Mutex::new(Runtime {
-                state: DockState::Docked(Edge::Right),
-                expanded: true,
+                state,
+                expanded,
                 manual_hidden: false,
                 dragging: false,
                 menu_open: false,
                 pointer_inside: false,
-                timer_generation: 4,
+                timer_generation: 0,
                 anchor_center: None,
             })),
-        };
+        }
+    }
+
+    #[test]
+    fn dock_timer_cannot_collapse_during_drag_or_after_pointer_reenters() {
+        let manager = manager_with(DockState::Docked(Edge::Right), true);
+        lock(&manager.runtime).timer_generation = 4;
         assert!(manager.collapse_if_current(3).is_none());
         manager.begin_drag();
         assert!(manager.collapse_if_current(5).is_none());
@@ -950,5 +1060,60 @@ mod tests {
         let timer = manager.leave_window().unwrap();
         assert!(!manager.collapse_if_current(timer.wrapping_sub(1)).is_some());
         assert!(manager.collapse_if_current(timer).is_some());
+    }
+
+    #[test]
+    fn programmatic_reposition_is_blocked_while_dragging_or_menu_is_open() {
+        let manager = manager_with(DockState::Docked(Edge::Left), false);
+        assert!(!manager.is_interacting());
+        manager.begin_drag();
+        assert!(manager.is_interacting());
+        manager.cancel_drag();
+        assert!(!manager.is_interacting());
+        manager.begin_menu();
+        assert!(manager.is_interacting());
+        manager.menu_closed();
+        assert!(!manager.is_interacting());
+    }
+
+    #[test]
+    fn a_secondary_monitor_anchor_is_not_clamped_into_the_primary_monitor() {
+        let primary = (
+            PhysicalRect {
+                x: 0,
+                y: 0,
+                width: 2560,
+                height: 1440,
+            },
+            1.5,
+        );
+        let secondary = (
+            PhysicalRect {
+                x: -1920,
+                y: 0,
+                width: 1920,
+                height: 1040,
+            },
+            1.0,
+        );
+        let monitors = [primary, secondary];
+
+        // The window sits on the primary monitor (fallback index 0) while the
+        // saved anchor belongs to the secondary one.
+        let selected = select_work_area(&monitors, 0, Some((-1500.0, 300.0))).unwrap();
+        assert_eq!(selected.0, secondary.0);
+
+        let secondary_work = selected.0;
+        let clamped = clamp_position(
+            PhysicalPosition::new(-1500, 300),
+            PhysicalSize::new(385, 88),
+            secondary_work,
+        );
+        assert_eq!((clamped.x, clamped.y), (-1500, 300));
+
+        // An anchor outside every monitor (display unplugged) falls back to the
+        // monitor under the window so the window stays on screen.
+        let selected = select_work_area(&monitors, 0, Some((-9999.0, 300.0))).unwrap();
+        assert_eq!(selected.0, primary.0);
     }
 }

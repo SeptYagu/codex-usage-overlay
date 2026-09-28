@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { CodexUsage, DockStateInfo, OverlaySettings } from '../types';
 import { useTranslation } from 'react-i18next';
@@ -32,6 +33,11 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
   const [, setTick] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const lastSizeRef = useRef({ width: 0, height: 0 });
+  // Tracks the dock state and backend size invalidations already accounted for,
+  // so a programmatic resize drops the cached measurement exactly once.
+  const lastDockStateRef = useRef(dockState);
+  const lastInvalidationRef = useRef(0);
+  const [sizeInvalidation, setSizeInvalidation] = useState(0);
   const [dprComp, setDprComp] = useState(1);
   const scale = settings.scalePercent / 100;
   const layout = settings.overlayLayout === 'stacks' ? 'stacks' : 'grouped';
@@ -67,6 +73,20 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
     return () => clearInterval(timer);
   }, []);
 
+  // The backend resizes the window programmatically (provisional expand size,
+  // show/hide). The cached content measurement is stale afterwards, so force a
+  // fresh measurement instead of trusting the value cached before the resize.
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    listen('overlay_size_invalidated', () => {
+      setSizeInvalidation((token) => token + 1);
+    })
+      .then((fn) => { if (active) unlisten = fn; else fn(); })
+      .catch(() => {});
+    return () => { active = false; if (unlisten) unlisten(); };
+  }, []);
+
   const rawCredit = usage?.creditsDisplay ?? '—';
   const numericCredit = Number(rawCredit);
   const formattedCredit = rawCredit.trim() !== '' && Number.isFinite(numericCredit)
@@ -94,8 +114,16 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
   }, [collapsed, dockState?.docked, dockState?.expanded, dprComp]);
 
   useLayoutEffect(() => {
+    // Collapse/expand, show/hide and backend invalidations all change the window
+    // size programmatically: drop the cached measurement so the real capsule is
+    // re-measured and its size written back (spec §3.4/§3.5).
+    if (lastDockStateRef.current !== dockState || lastInvalidationRef.current !== sizeInvalidation) {
+      lastDockStateRef.current = dockState;
+      lastInvalidationRef.current = sizeInvalidation;
+      lastSizeRef.current = { width: 0, height: 0 };
+    }
     void fitCapsuleSize();
-  }, [scale, layout, settings.showCredits, settings.language, usage, fitCapsuleSize, dprComp]);
+  }, [scale, layout, settings.showCredits, settings.language, usage, fitCapsuleSize, dprComp, dockState, sizeInvalidation]);
 
   useEffect(() => {
     const el = rootRef.current;

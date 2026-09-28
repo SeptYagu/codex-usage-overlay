@@ -14,9 +14,10 @@ pub enum OverlayLayout {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SoundMode {
-    #[default]
-    Windows,
     Custom,
+    #[default]
+    #[serde(other)]
+    Windows,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +276,17 @@ mod tests {
         value["overlayLayout"] = json!("future-layout");
         let settings: OverlaySettings = serde_json::from_value(value).unwrap();
         assert_eq!(settings.overlay_layout, OverlayLayout::Grouped);
+        assert_preferences(&settings);
+    }
+
+    #[test]
+    fn unknown_sound_mode_defaults_without_resetting_preferences() {
+        let mut value = legacy_settings();
+        value["fiveHourSoundMode"] = json!("alarm");
+        value["weeklySoundMode"] = json!("future-mode");
+        let settings: OverlaySettings = serde_json::from_value(value).unwrap();
+        assert_eq!(settings.five_hour_sound_mode, SoundMode::Windows);
+        assert_eq!(settings.weekly_sound_mode, SoundMode::Windows);
         assert_preferences(&settings);
     }
 

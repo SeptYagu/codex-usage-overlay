@@ -35,6 +35,13 @@ pub struct ResetStateFile {
 }
 
 impl ResetStateFile {
+    fn slot(&self, kind: QuotaKind) -> &QuotaCycleState {
+        match kind {
+            QuotaKind::FiveHour => &self.five_hour,
+            QuotaKind::Week => &self.weekly,
+        }
+    }
+
     fn slot_mut(&mut self, kind: QuotaKind) -> &mut QuotaCycleState {
         match kind {
             QuotaKind::FiveHour => &mut self.five_hour,
@@ -212,9 +219,13 @@ async fn maybe_notify_cycle(
         save_reset_state(&state.config_manager, &next)?;
         *current = next;
     }
+    // Only the boundary accepted into (and persisted with) the cycle state may
+    // arm the post-reset timer. Feeding the raw response here would let a stale
+    // or clock-regressed timestamp abort the timer of the current cycle.
+    let accepted_boundary = current.slot(kind).last_seen_resets_at;
     drop(current);
 
-    schedule_post_reset_fetch(app, state, kind, new_resets_at).await;
+    schedule_post_reset_fetch(app, state, kind, accepted_boundary).await;
     if enabled {
         if let Some(boundary) = transition.notify_boundary {
             show_quota_reset(app, state, kind, sound_mode, sound_path, language)?;
@@ -388,34 +399,42 @@ fn notification_status_impl(app_id: &str) -> NotificationStatus {
     }
 }
 
+/// Boundary the post-reset timer should be armed for: `Some(boundary)` to
+/// (re)schedule, `None` to leave any existing timer untouched. `accepted` must
+/// be a boundary already validated and stored by `advance_cycle`; a stale or
+/// clock-regressed response never reaches this point, so it can no longer abort
+/// the timer of the current cycle.
+fn post_reset_fetch_target(existing: Option<i64>, accepted: Option<i64>, now: i64) -> Option<i64> {
+    let boundary = accepted?;
+    if boundary.saturating_add(POST_RESET_GRACE_SECS) <= now {
+        return None;
+    }
+    if existing == Some(boundary) {
+        return None;
+    }
+    Some(boundary)
+}
+
 async fn schedule_post_reset_fetch(
     app: &AppHandle,
     state: &Arc<AppState>,
     kind: QuotaKind,
-    boundary: i64,
+    accepted_boundary: Option<i64>,
 ) {
-    let deadline = boundary.saturating_add(POST_RESET_GRACE_SECS);
     let now = unix_now();
     let mut pending = state.pending_reset_fetches.lock().await;
     let slot = pending.slot_mut(kind);
-    if deadline <= now {
-        if let Some(previous) = slot.take() {
-            previous.task.abort();
-        }
+    let existing = slot.as_ref().map(|current| current.boundary);
+    let Some(boundary) = post_reset_fetch_target(existing, accepted_boundary, now) else {
         return;
-    }
-    if slot
-        .as_ref()
-        .is_some_and(|current| current.boundary == boundary)
-    {
-        return;
-    }
+    };
     if let Some(previous) = slot.take() {
         previous.task.abort();
     }
 
     let app = app.clone();
     let state = state.clone();
+    let deadline = boundary.saturating_add(POST_RESET_GRACE_SECS);
     let wait = Duration::from_secs((deadline - now) as u64);
     let task = tauri::async_runtime::spawn(async move {
         tokio::time::sleep(wait).await;
@@ -504,6 +523,44 @@ mod tests {
         let transition = advance_cycle(&mut cycle, Some(4_000), 2_000);
         assert_eq!(transition.notify_boundary, None);
         assert_eq!(cycle.last_seen_resets_at, Some(4_000));
+    }
+
+    #[test]
+    fn a_stale_regressed_response_does_not_abort_the_scheduled_future_fetch() {
+        let now = 1_000_000;
+        let future = now + 600;
+        let mut cycle = QuotaCycleState::default();
+
+        // A valid observation arms the post-reset timer for the future boundary.
+        assert!(advance_cycle(&mut cycle, Some(future), now).changed);
+        assert_eq!(
+            post_reset_fetch_target(None, cycle.last_seen_resets_at, now),
+            Some(future)
+        );
+
+        // A stale response regresses the timestamp; advance_cycle rejects it and
+        // the accepted boundary (and therefore the pending timer) is preserved.
+        let regressed = now - 600;
+        let transition = advance_cycle(&mut cycle, Some(regressed), now);
+        assert!(!transition.changed);
+        assert_eq!(cycle.last_seen_resets_at, Some(future));
+        assert_eq!(
+            post_reset_fetch_target(Some(future), cycle.last_seen_resets_at, now),
+            None
+        );
+
+        // Feeding the raw expired value would have cleared the timer under the
+        // old logic; the planner now leaves the armed timer untouched instead.
+        assert_eq!(
+            post_reset_fetch_target(Some(future), Some(regressed), now),
+            None
+        );
+
+        // A genuinely newer accepted boundary replaces the armed timer.
+        assert_eq!(
+            post_reset_fetch_target(Some(future), Some(future + 600), now),
+            Some(future + 600)
+        );
     }
 
     #[test]

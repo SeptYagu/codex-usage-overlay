@@ -7,6 +7,7 @@ import i18n from '../i18n';
 const tauri = vi.hoisted(() => ({
   invoke: vi.fn(async () => {}),
   setSize: vi.fn(async () => {}),
+  listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: tauri.invoke }));
 vi.mock('@tauri-apps/api/window', () => ({
@@ -16,6 +17,12 @@ vi.mock('@tauri-apps/api/window', () => ({
     onScaleChanged: async () => () => {},
   }),
   LogicalSize: class { constructor(public width: number, public height: number) {} },
+}));
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: async (name: string, callback: (event: { payload: unknown }) => void) => {
+    tauri.listeners.set(name, callback);
+    return () => { tauri.listeners.delete(name); };
+  },
 }));
 
 const now = 1_800_000_000;
@@ -29,6 +36,7 @@ let originalFonts: PropertyDescriptor | undefined;
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  tauri.listeners.clear();
   await i18n.changeLanguage('en-US');
   vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
@@ -190,6 +198,48 @@ it('represents unknown quota data with empty neutral bars', () => {
     .toEqual(['Unknown', 'Unknown']);
   expect(container.querySelectorAll('.overlay-pill-fill')).toHaveLength(0);
   expect(container.querySelector('.overlay-pill-bars')?.classList.contains('overlay-pill-rotated')).toBe(true);
+});
+
+it('re-measures the capsule after a docked collapse and expand cycle', async () => {
+  const collapsed = { docked: true, edge: 'left' as const, expanded: false, hidden: false };
+  const expanded = { ...collapsed, expanded: true };
+  // The real capsule is wider/taller than the backend's provisional size; the
+  // measured content size must be written back on every expand.
+  vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockImplementation(() => ({
+    width: 498, height: 121,
+  } as DOMRect));
+
+  const { rerender } = render(
+    <OverlayView settings={DEFAULT_SETTINGS} usage={usage} isLoading={false} dockState={expanded} />,
+  );
+  await waitFor(() => expect(tauri.setSize).toHaveBeenLastCalledWith(
+    expect.objectContaining({ width: 498, height: 121 })));
+  const callsAfterExpand = tauri.setSize.mock.calls.length;
+
+  // Collapsed pill: no content measurement, no window resize.
+  rerender(<OverlayView settings={DEFAULT_SETTINGS} usage={usage} isLoading={false} dockState={collapsed} />);
+  expect(tauri.setSize.mock.calls.length).toBe(callsAfterExpand);
+
+  // Re-expanding with an identical content size must still re-apply the size:
+  // the cached measurement was invalidated by the collapse.
+  rerender(<OverlayView settings={DEFAULT_SETTINGS} usage={usage} isLoading={false} dockState={expanded} />);
+  await waitFor(() => expect(tauri.setSize.mock.calls.length).toBeGreaterThan(callsAfterExpand));
+  expect(tauri.setSize).toHaveBeenLastCalledWith(expect.objectContaining({ width: 498, height: 121 }));
+  expect(tauri.invoke).toHaveBeenCalledWith('dock_window_resized');
+});
+
+it('re-measures the capsule when the backend invalidates the window size', async () => {
+  vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockImplementation(() => ({
+    width: 320, height: 96,
+  } as DOMRect));
+  render(<OverlayView settings={DEFAULT_SETTINGS} usage={usage} isLoading={false} />);
+  await waitFor(() => expect(tauri.setSize).toHaveBeenCalledTimes(1));
+
+  await act(async () => {
+    tauri.listeners.get('overlay_size_invalidated')?.({ payload: null });
+  });
+  await waitFor(() => expect(tauri.setSize).toHaveBeenCalledTimes(2));
+  expect(tauri.setSize).toHaveBeenLastCalledWith(expect.objectContaining({ width: 320, height: 96 }));
 });
 
 it('starts a native drag from the expanded capsule', async () => {
