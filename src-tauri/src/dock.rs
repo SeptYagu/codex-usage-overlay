@@ -124,6 +124,13 @@ impl DockManager {
         lock(&self.runtime).anchor_center
     }
 
+    fn docked_edge(&self) -> Option<Edge> {
+        match lock(&self.runtime).state {
+            DockState::Docked(edge) => Some(edge),
+            _ => None,
+        }
+    }
+
     /// True while the user is dragging the window or its context menu is open.
     /// Programmatic repositioning must stand down during these interactions.
     pub fn is_interacting(&self) -> bool {
@@ -460,8 +467,16 @@ pub fn mouse_enter(app: &AppHandle, state: &Arc<AppState>) {
         let app_clone = app.clone();
         tauri::async_runtime::spawn(async move {
             let settings = state_clone.settings.lock().await.clone();
+            // Capture the pill centre before the provisional resize: it is the
+            // anchor the transition rectangle stays aligned with along the
+            // non-docked axis (spec §3.4). Resizing first would make
+            // `window_center` report the enlarged window's centre instead.
+            let anchor_center = state_clone
+                .dock
+                .anchor_center()
+                .unwrap_or_else(|| window_center(&window));
             if let Err(error) = set_full_size(&window, &settings)
-                .and_then(|_| place_full_at_anchor(&window, &state_clone.dock))
+                .and_then(|_| place_full_for_transition(&window, &state_clone.dock, anchor_center))
             {
                 eprintln!("Could not expand docked overlay: {error}");
                 state_clone.dock.revert_expansion();
@@ -666,20 +681,34 @@ fn set_full_size(window: &WebviewWindow, settings: &OverlaySettings) -> Result<(
         .map(|monitor| monitor.scale_factor())
         .unwrap_or(1.0);
     let scale = settings.scale_percent as f64 / 100.0 * monitor_scale;
-    let estimated_width = ((if settings.show_credits { 220.0 } else { 160.0 }) * scale)
-        .round()
-        .max(1.0) as u32;
-    let estimated_height = (50.0 * scale).round().max(1.0) as u32;
-    let current = window.outer_size().ok();
-    let size = PhysicalSize::new(
-        estimated_width.max(current.map(|size| size.width).unwrap_or(0)),
-        estimated_height.max(current.map(|size| size.height).unwrap_or(0)),
-    );
+    let current = window
+        .outer_size()
+        .unwrap_or_else(|_| PhysicalSize::new(0, 0));
+    let size = provisional_size(current, scale, settings.show_credits);
     window
         .set_size(Size::Physical(size))
         .map_err(|error| error.to_string())?;
     emit_size_invalidated(window);
     Ok(())
+}
+
+/// Provisional full-window size written before the frontend measures the real
+/// capsule. The estimate never shrinks below the current window, so a docked
+/// pill (which can be taller than the capsule) stays covered while the
+/// authoritative size is on its way.
+fn provisional_size(
+    current: PhysicalSize<u32>,
+    scale: f64,
+    show_credits: bool,
+) -> PhysicalSize<u32> {
+    let estimated_width = ((if show_credits { 220.0 } else { 160.0 }) * scale)
+        .round()
+        .max(1.0) as u32;
+    let estimated_height = (50.0 * scale).round().max(1.0) as u32;
+    PhysicalSize::new(
+        estimated_width.max(current.width),
+        estimated_height.max(current.height),
+    )
 }
 
 /// Tells the frontend that the window was resized programmatically and that its
@@ -725,6 +754,72 @@ fn place_full_at_anchor(window: &WebviewWindow, manager: &DockManager) -> Result
     window
         .set_position(Position::Physical(clamped))
         .map_err(|error| error.to_string())
+}
+
+/// Places the expanded window for the hover-expand transition while the window
+/// is still docked. The pill is pinned to a work-area edge, so the provisional
+/// rectangle is kept flush against that same edge and centred on the pill along
+/// the other axis. That way the rectangle written by `mouse_enter` covers the
+/// cursor's current hit area, so the overlay cannot collapse the instant it
+/// expands (spec §3.4). Once the frontend reports the authoritative capsule
+/// size, `window_resized` re-clamps the saved anchor through
+/// `place_full_at_anchor`.
+fn place_full_for_transition(
+    window: &WebviewWindow,
+    manager: &DockManager,
+    anchor_center: (i32, i32),
+) -> Result<(), String> {
+    let Some(edge) = manager.docked_edge() else {
+        // Not docked: fall back to the regular anchor placement.
+        return place_full_at_anchor(window, manager);
+    };
+    let size = window.outer_size().map_err(|error| error.to_string())?;
+    let (work, _scale) = work_area_for_point(
+        window,
+        Some((anchor_center.0 as f64, anchor_center.1 as f64)),
+    )
+    .ok_or_else(|| "Monitor work area unavailable".to_string())?;
+    let rect = transition_rect(edge, work, size, anchor_center);
+    window
+        .set_position(Position::Physical(PhysicalPosition::new(rect.x, rect.y)))
+        .map_err(|error| error.to_string())
+}
+
+/// Geometry of the provisional expand rectangle. Along the docked axis the
+/// rectangle hugs the work-area edge the pill is pinned to; along the other
+/// axis it is centred on `anchor_center` (the pill's centre) and clamped into
+/// the work area. Because `size` is at least the pill's size on both axes, the
+/// result always contains the pill rectangle.
+fn transition_rect(
+    edge: Edge,
+    work: PhysicalRect,
+    size: PhysicalSize<u32>,
+    anchor_center: (i32, i32),
+) -> PhysicalRect {
+    let work_left = work.x as i64;
+    let work_top = work.y as i64;
+    let work_right = work_left + work.width as i64;
+    let work_bottom = work_top + work.height as i64;
+    let width = size.width as i64;
+    let height = size.height as i64;
+    let max_x = (work_right - width).max(work_left);
+    let max_y = (work_bottom - height).max(work_top);
+    let x = match edge {
+        Edge::Left => work_left,
+        Edge::Right => max_x,
+        Edge::Top | Edge::Bottom => (anchor_center.0 as i64 - width / 2).clamp(work_left, max_x),
+    };
+    let y = match edge {
+        Edge::Top => work_top,
+        Edge::Bottom => max_y,
+        Edge::Left | Edge::Right => (anchor_center.1 as i64 - height / 2).clamp(work_top, max_y),
+    };
+    PhysicalRect {
+        x: x as i32,
+        y: y as i32,
+        width: size.width,
+        height: size.height,
+    }
 }
 
 fn window_center(window: &WebviewWindow) -> (i32, i32) {
@@ -1017,6 +1112,57 @@ mod tests {
         let top = pill_geometry(Edge::Top, work, 1.0, 250, (0, 30));
         assert_eq!(left, work);
         assert_eq!(top, work);
+    }
+
+    fn contains(outer: PhysicalRect, inner: PhysicalRect) -> bool {
+        let outer_left = outer.x as i64;
+        let outer_top = outer.y as i64;
+        let outer_right = outer_left + outer.width as i64;
+        let outer_bottom = outer_top + outer.height as i64;
+        let inner_left = inner.x as i64;
+        let inner_top = inner.y as i64;
+        let inner_right = inner_left + inner.width as i64;
+        let inner_bottom = inner_top + inner.height as i64;
+        inner_left >= outer_left
+            && inner_top >= outer_top
+            && inner_right <= outer_right
+            && inner_bottom <= outer_bottom
+    }
+
+    #[test]
+    fn transition_rect_covers_pill_rect_on_all_edges() {
+        let wa = PhysicalRect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+        let monitor_scale = 1.75;
+        let scale_percent = 175;
+        let content_scale = monitor_scale * scale_percent as f64 / 100.0;
+        for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
+            // Offsets span the middle of the edge and both sides of it, i.e.
+            // every snap position a user can legitimately release at.
+            for offset in [-400, -120, -28, 0, 28, 120, 400] {
+                let anchor = match edge {
+                    Edge::Left | Edge::Right => (1280, 720 + offset),
+                    Edge::Top | Edge::Bottom => (1280 + offset, 720),
+                };
+                let pill = pill_geometry(edge, wa, monitor_scale, scale_percent, anchor);
+                // The provisional size written by `set_full_size` never shrinks
+                // below the current window (the pill), mirroring the runtime.
+                let size = provisional_size(
+                    PhysicalSize::new(pill.width, pill.height),
+                    content_scale,
+                    true,
+                );
+                let rect = transition_rect(edge, wa, size, anchor);
+                assert!(
+                    contains(rect, pill),
+                    "{edge:?} at offset {offset}: transition {rect:?} must cover pill {pill:?}"
+                );
+            }
+        }
     }
 
     fn manager_with(state: DockState, expanded: bool) -> DockManager {
