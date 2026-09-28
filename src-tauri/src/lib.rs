@@ -1,6 +1,7 @@
 mod codex;
 mod commands;
 mod config;
+mod notify;
 mod tray;
 
 use std::sync::Arc;
@@ -30,6 +31,8 @@ pub fn run() {
         pending_update: Mutex::new(None),
         available_update: Mutex::new(None),
         last_auto_notified_version: Mutex::new(None),
+        reset_state: Mutex::new(notify::load_reset_state(&config_manager)),
+        pending_reset_fetches: Mutex::new(notify::PendingResetFetches::default()),
     });
 
     let app_state_clone = app_state.clone();
@@ -71,6 +74,7 @@ pub fn run() {
             commands::is_installed_version,
             commands::get_tray_menu_generation,
             commands::layout_tray_menu,
+            notify::get_notification_status,
             commands::set_autostart,
             commands::start_dragging,
             commands::exit_app,
@@ -192,33 +196,14 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-async fn fetch_usage_background(handle: &AppHandle, state: &Arc<AppState>) {
-    use tauri::Emitter;
-
+pub(crate) async fn fetch_usage_background(handle: &AppHandle, state: &Arc<AppState>) {
     let mut client = state.client.lock().await;
     state.config_manager.write_status("reading", None);
 
     match client.fetch_usage(Duration::from_secs(20)).await {
         Ok(usage) => {
             state.config_manager.write_status("ok", None);
-            *state.last_usage.lock().await = Some(usage.clone());
-
-            let current_settings = state.settings.lock().await.clone();
-            let five = usage.five_hour_remaining_percent.map(|p| p.to_string()).unwrap_or_else(|| "--".to_string());
-            let week = usage.week_remaining_percent.map(|p| p.to_string()).unwrap_or_else(|| "--".to_string());
-            let tooltip = if current_settings.show_credits {
-                format!("5H {}% | WK {}% | CR {}", five, week, usage.credits_display)
-            } else {
-                format!("5H {}% | WK {}%", five, week)
-            };
-            tray::update_tray_tooltip(handle, &tooltip);
-            tray::update_tray_icon(
-                handle,
-                usage.five_hour_remaining_percent.map(|p| p as f64),
-                usage.week_remaining_percent.map(|p| p as f64),
-            );
-
-            let _ = handle.emit("usage_updated", &usage);
+            notify::process_usage_success(handle, state, &usage).await;
         }
         Err(e) => {
             let err_msg = e.to_string();

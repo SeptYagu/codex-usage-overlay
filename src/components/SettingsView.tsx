@@ -15,11 +15,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 }) => {
   const { t } = useTranslation();
   const [isInstalled, setIsInstalled] = useState<boolean>(false);
+  const [notificationStatus, setNotificationStatus] = useState<'enabled' | 'disabled' | 'unavailable' | 'loading'>('loading');
 
   useEffect(() => {
     invoke<boolean>('is_installed_version')
       .then((installed) => setIsInstalled(installed))
       .catch(() => setIsInstalled(false));
+    invoke<'enabled' | 'disabled' | 'unavailable'>('get_notification_status')
+      .then(setNotificationStatus)
+      .catch(() => setNotificationStatus('unavailable'));
   }, []);
 
   useEffect(() => {
@@ -172,6 +176,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         <section aria-labelledby="reset-notifications-title" className="space-y-3 pt-2">
           <h3 id="reset-notifications-title" className="text-sm font-semibold">{t('notificationSection')}</h3>
+          {notificationStatus === 'disabled' && (
+            <p role="status" className="text-xs text-amber-700 dark:text-amber-300">{t('notifyPermissionDenied')}</p>
+          )}
+          {notificationStatus === 'unavailable' && (
+            <p role="status" className="text-xs text-slate-500 dark:text-slate-400">{t('notificationStatusUnavailable')}</p>
+          )}
           {([
             { title: 'fiveHourResetNotify', enabled: 'fiveHourResetNotification', mode: 'fiveHourSoundMode', path: 'fiveHourSoundPath' },
             { title: 'weeklyResetNotify', enabled: 'weeklyResetNotification', mode: 'weeklySoundMode', path: 'weeklySoundPath' },

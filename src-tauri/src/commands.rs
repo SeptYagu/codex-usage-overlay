@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::codex::{CodexClient, CodexUsage};
 use crate::config::{ConfigManager, OverlaySettings};
+use crate::notify::{PendingResetFetches, ResetStateFile};
 use crate::tray::{open_settings_window as show_settings_win, update_tray_icon, update_tray_tooltip};
 
 pub struct AppState {
@@ -21,6 +22,8 @@ pub struct AppState {
     pub pending_update: Mutex<Option<tauri_plugin_updater::Update>>,
     pub available_update: Mutex<Option<AvailableUpdate>>,
     pub last_auto_notified_version: Mutex<Option<String>>,
+    pub reset_state: Mutex<ResetStateFile>,
+    pub pending_reset_fetches: Mutex<PendingResetFetches>,
 }
 
 #[derive(Clone, Serialize)]
@@ -74,26 +77,7 @@ pub async fn fetch_usage(state: State<'_, Arc<AppState>>, app: AppHandle) -> Res
     match client.fetch_usage(Duration::from_secs(20)).await {
         Ok(usage) => {
             state.config_manager.write_status("ok", None);
-            *state.last_usage.lock().await = Some(usage.clone());
-
-            // Update tray tooltip
-            let current_settings = state.settings.lock().await.clone();
-            let five = usage.five_hour_remaining_percent.map(|p| p.to_string()).unwrap_or_else(|| "--".to_string());
-            let week = usage.week_remaining_percent.map(|p| p.to_string()).unwrap_or_else(|| "--".to_string());
-            let tooltip = if current_settings.show_credits {
-                format!("5H {}% | WK {}% | CR {}", five, week, usage.credits_display)
-            } else {
-                format!("5H {}% | WK {}%", five, week)
-            };
-            update_tray_tooltip(&app, &tooltip);
-            update_tray_icon(
-                &app,
-                usage.five_hour_remaining_percent.map(|p| p as f64),
-                usage.week_remaining_percent.map(|p| p as f64),
-            );
-
-            // Broadcast to all windows
-            let _ = app.emit("usage_updated", &usage);
+            crate::notify::process_usage_success(&app, state.inner(), &usage).await;
             Ok(usage)
         }
         Err(e) => {

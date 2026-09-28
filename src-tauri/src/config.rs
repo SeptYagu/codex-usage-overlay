@@ -114,6 +114,10 @@ impl ConfigManager {
         self.runtime_dir.join("usage-status.json")
     }
 
+    pub fn reset_state_path(&self) -> PathBuf {
+        self.runtime_dir.join("reset-state.json")
+    }
+
     pub fn load_settings(&self) -> OverlaySettings {
         let path = self.settings_path();
         if path.is_file() {

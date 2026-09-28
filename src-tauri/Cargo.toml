@@ -27,11 +27,17 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
-    "Win32_System_Threading"
+    "Win32_System_Threading",
+    "Win32_System_WinRT",
+    "UI_Notifications",
+    "Data_Xml_Dom"
 ] }
 sys-locale = "0.3.2"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 tauri-plugin-notification = "2"
+
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "=0.8.1"
 
 [[bin]]
 name = "codex-usage-updater"
