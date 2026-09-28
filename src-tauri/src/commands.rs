@@ -1,4 +1,6 @@
 use std::sync::Arc;
+#[cfg(windows)]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use serde::Serialize;
@@ -24,6 +26,8 @@ pub struct AppState {
     pub last_auto_notified_version: Mutex<Option<String>>,
     pub reset_state: Mutex<ResetStateFile>,
     pub pending_reset_fetches: Mutex<PendingResetFetches>,
+    #[cfg(windows)]
+    pub audio: OnceLock<crate::audio::AudioHandle>,
 }
 
 #[derive(Clone, Serialize)]
@@ -260,6 +264,78 @@ pub fn layout_tray_menu(app: AppHandle, generation: u64, revision: u64, height_l
 }
 
 #[tauri::command]
+pub async fn pick_sound_file(kind: crate::notify::QuotaKind, app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .add_filter("Audio files (MP3/AAC/WAV)", &["mp3", "aac", "m4a", "wav"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    let Some(picked) = picked else { return Ok(None) };
+    let path = picked.into_path().map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    {
+        crate::audio::probe_audio(&path).map_err(|error| error.to_string())?;
+        let _ = kind;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (kind, path);
+        Err("sound_audio_busy".into())
+    }
+}
+
+#[tauri::command]
+pub async fn preview_sound(kind: crate::notify::QuotaKind, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let settings = state.settings.lock().await;
+        let path = match kind {
+            crate::notify::QuotaKind::FiveHour => settings.five_hour_sound_path.clone(),
+            crate::notify::QuotaKind::Week => settings.weekly_sound_path.clone(),
+        }
+        .ok_or_else(|| "sound_path_missing".to_string())?;
+        drop(settings);
+        let audio = state.audio.get().ok_or_else(|| "sound_audio_busy".to_string())?.clone();
+        tauri::async_runtime::spawn_blocking(move || audio.preview(path.into(), kind))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (kind, state);
+        Err("sound_audio_busy".into())
+    }
+}
+
+#[tauri::command]
+pub fn stop_preview_sound(state: State<'_, Arc<AppState>>) {
+    #[cfg(windows)]
+    if let Some(audio) = state.audio.get() {
+        audio.stop_preview();
+    }
+    #[cfg(not(windows))]
+    let _ = state;
+}
+
+pub fn shutdown_audio(app: &AppHandle) {
+    #[cfg(windows)]
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        if let Some(audio) = state.audio.get() {
+            audio.shutdown();
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = app;
+}
+
+#[tauri::command]
 pub async fn set_autostart(
     enable: bool,
     app: AppHandle,
@@ -295,6 +371,7 @@ pub fn start_dragging(window: tauri::WebviewWindow) -> Result<(), String> {
 
 #[tauri::command]
 pub fn exit_app(app: AppHandle) {
+    shutdown_audio(&app);
     app.exit(0);
 }
 

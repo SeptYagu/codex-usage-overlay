@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { OverlaySettings } from '../types';
 import { useTranslation } from 'react-i18next';
+import { SoundPicker } from './SoundPicker';
 
 interface SettingsViewProps {
   settings: OverlaySettings;
@@ -212,9 +213,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </select>
               </label>
               {settings[mode] === 'custom' && settings[enabled] && (
-                <p className="break-all text-xs text-slate-500 dark:text-slate-400" role="status">
-                  {settings[path] || t('chooseSoundFile')}
-                </p>
+                <SoundPicker
+                  kind={enabled === 'fiveHourResetNotification' ? 'fiveHour' : 'week'}
+                  path={settings[path]}
+                  disabled={!settings[enabled]}
+                  onChangePath={(value) => updateField(path, value)}
+                />
               )}
             </div>
           ))}

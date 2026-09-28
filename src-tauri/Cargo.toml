@@ -35,9 +35,18 @@ windows = { version = "0.62", features = [
 sys-locale = "0.3.2"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "=0.8.1"
+rodio = { version = "=0.22.2", default-features = false, features = [
+    "playback",
+    "symphonia-aac",
+    "symphonia-mp3",
+    "symphonia-isomp4",
+    "symphonia-wav",
+    "symphonia-pcm"
+] }
 
 [[bin]]
 name = "codex-usage-updater"

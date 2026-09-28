@@ -62,6 +62,7 @@ beforeEach(async () => {
       serverSettings = { ...serverSettings, ...args?.patch };
       return { revision: ++serverRevision, settings: { ...serverSettings } };
     }
+    if (command === 'pick_sound_file') return 'C:\\sounds\\alert.wav';
     if (command === 'is_installed_version') return true;
     return null;
   });
@@ -112,6 +113,28 @@ describe('settings synchronization', () => {
     fireEvent.click(toggle);
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
       patch: { autoEdgeHide: true },
+    }));
+  });
+
+  it('selects, previews, stops, and clears a custom sound path', async () => {
+    render(<App />);
+    const mode = await screen.findByRole('combobox', { name: 'Weekly quota reset notification Alert sound' });
+    fireEvent.change(mode, { target: { value: 'custom' } });
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
+      patch: { weeklySoundMode: 'custom' },
+    }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Choose file…' }));
+    expect(await screen.findByText('C:\\sounds\\alert.wav')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await screen.findByRole('button', { name: 'Stop preview' });
+    expect(tauri.invoke).toHaveBeenCalledWith('preview_sound', { kind: 'week' });
+    fireEvent.click(screen.getByRole('button', { name: 'Stop preview' }));
+    expect(tauri.invoke).toHaveBeenCalledWith('stop_preview_sound');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
+      patch: { weeklySoundPath: null },
     }));
   });
 

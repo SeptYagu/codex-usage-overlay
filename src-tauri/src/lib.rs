@@ -3,6 +3,8 @@ mod commands;
 mod config;
 mod notify;
 mod tray;
+#[cfg(windows)]
+mod audio;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -33,6 +35,8 @@ pub fn run() {
         last_auto_notified_version: Mutex::new(None),
         reset_state: Mutex::new(notify::load_reset_state(&config_manager)),
         pending_reset_fetches: Mutex::new(notify::PendingResetFetches::default()),
+        #[cfg(windows)]
+        audio: std::sync::OnceLock::new(),
     });
 
     let app_state_clone = app_state.clone();
@@ -65,6 +69,7 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::fetch_usage,
@@ -75,6 +80,9 @@ pub fn run() {
             commands::get_tray_menu_generation,
             commands::layout_tray_menu,
             notify::get_notification_status,
+            commands::pick_sound_file,
+            commands::preview_sound,
+            commands::stop_preview_sound,
             commands::set_autostart,
             commands::start_dragging,
             commands::exit_app,
@@ -87,6 +95,12 @@ pub fn run() {
         .setup(move |app| {
             // Setup system tray
             let _ = setup_tray(app.handle());
+
+            #[cfg(windows)]
+            match audio::spawn_worker(app.handle().clone()) {
+                Ok(audio) => { let _ = app_state_clone.audio.set(audio); }
+                Err(error) => eprintln!("Could not start audio worker: {error}"),
+            }
 
             // Set initial settings window title based on language
             if let Some(settings_win) = app.get_webview_window("settings") {
@@ -192,8 +206,13 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                commands::shutdown_audio(app);
+            }
+        });
 }
 
 pub(crate) async fn fetch_usage_background(handle: &AppHandle, state: &Arc<AppState>) {

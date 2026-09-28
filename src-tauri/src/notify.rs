@@ -167,6 +167,7 @@ pub async fn process_usage_success(app: &AppHandle, state: &Arc<AppState>, usage
         usage.five_hour_resets_at,
         settings.five_hour_reset_notification,
         settings.five_hour_sound_mode,
+        settings.five_hour_sound_path.clone(),
         &settings.language,
     )
     .await
@@ -180,6 +181,7 @@ pub async fn process_usage_success(app: &AppHandle, state: &Arc<AppState>, usage
         usage.week_resets_at,
         settings.weekly_reset_notification,
         settings.weekly_sound_mode,
+        settings.weekly_sound_path.clone(),
         &settings.language,
     )
     .await
@@ -195,6 +197,7 @@ async fn maybe_notify_cycle(
     new_resets_at: Option<i64>,
     enabled: bool,
     sound_mode: SoundMode,
+    sound_path: Option<String>,
     language: &str,
 ) -> Result<(), String> {
     let Some(new_resets_at) = new_resets_at.filter(|timestamp| *timestamp > 0) else {
@@ -213,7 +216,7 @@ async fn maybe_notify_cycle(
     schedule_post_reset_fetch(app, state, kind, new_resets_at).await;
     if enabled {
         if let Some(boundary) = transition.notify_boundary {
-            show_quota_reset(app, kind, sound_mode, language)?;
+            show_quota_reset(app, state, kind, sound_mode, sound_path, language)?;
             let mut reset_state = state.reset_state.lock().await;
             reset_state.last_notify_error = None;
             let _ = save_reset_state(&state.config_manager, &reset_state);
@@ -248,23 +251,39 @@ async fn record_notify_error(
 
 fn show_quota_reset(
     app: &AppHandle,
+    state: &Arc<AppState>,
     kind: QuotaKind,
     sound_mode: SoundMode,
+    sound_path: Option<String>,
     language: &str,
 ) -> Result<(), String> {
     let (title, body) = notification_copy(kind, language);
     match sound_mode {
-        SoundMode::Windows => {
-            use tauri_plugin_notification::NotificationExt;
-            app.notification()
-                .builder()
-                .title(title)
-                .body(body)
-                .show()
-                .map_err(|error| error.to_string())
+        SoundMode::Windows => show_default_notification(app, title, body),
+        SoundMode::Custom => {
+            #[cfg(windows)]
+            if let (Some(path), Some(audio)) = (sound_path.filter(|path| !path.is_empty()), state.audio.get()) {
+                let toast_result = show_toast(title, body, None, &app.config().identifier);
+                audio.enqueue_notification(path.into(), kind);
+                return toast_result;
+            }
+            #[cfg(not(windows))]
+            let _ = (state, sound_path);
+            // No selected file or an unavailable worker: keep an audible Windows
+            // notification instead of silently suppressing every sound.
+            show_default_notification(app, title, body)
         }
-        SoundMode::Custom => show_toast(title, body, None, &app.config().identifier),
     }
+}
+
+fn show_default_notification(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|error| error.to_string())
 }
 
 fn notification_copy(kind: QuotaKind, language: &str) -> (&'static str, &'static str) {

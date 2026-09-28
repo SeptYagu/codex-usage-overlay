@@ -49,6 +49,7 @@ pub fn handle_menu_action(app: &AppHandle, id: &str) {
             open_settings_window(app);
         }
         "exit_app" => {
+            crate::commands::shutdown_audio(app);
             app.exit(0);
         }
         _ => {}

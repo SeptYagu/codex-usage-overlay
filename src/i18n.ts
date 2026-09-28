@@ -81,6 +81,9 @@ const resources = {
       soundErrUndecodable: "This file cannot be decoded. Please choose another.",
       soundErrDevice: "No audio output device available.",
       soundErrPathMissing: "Sound file is missing. Please choose again.",
+      soundErrBusy: "Audio preview is unavailable right now.",
+      soundErrGeneric: "Unable to play this sound.",
+      stopPreview: "Stop preview",
     }
   },
   'zh-CN': {
@@ -162,6 +165,9 @@ const resources = {
       soundErrUndecodable: "该文件无法解码，请重新选择。",
       soundErrDevice: "没有可用的音频输出设备。",
       soundErrPathMissing: "音效文件不存在，请重新选择。",
+      soundErrBusy: "当前无法试听音效。",
+      soundErrGeneric: "无法播放此音效。",
+      stopPreview: "停止试听",
     }
   },
   'zh-Hant': {
@@ -243,6 +249,9 @@ const resources = {
       soundErrUndecodable: "該檔案無法解碼，請重新選擇。",
       soundErrDevice: "沒有可用的音訊輸出裝置。",
       soundErrPathMissing: "音效檔案不存在，請重新選擇。",
+      soundErrBusy: "目前無法試聽音效。",
+      soundErrGeneric: "無法播放此音效。",
+      stopPreview: "停止試聽",
     }
   }
 };

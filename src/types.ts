@@ -32,6 +32,8 @@ export interface SettingsEnvelope {
   settings: OverlaySettings;
 }
 
+export type QuotaKind = 'fiveHour' | 'week';
+
 export const DEFAULT_SETTINGS: OverlaySettings = {
   overlayLayout: 'grouped',
   scalePercent: 175,
