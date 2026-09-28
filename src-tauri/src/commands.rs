@@ -16,6 +16,7 @@ use crate::tray::{open_settings_window as show_settings_win, update_tray_icon, u
 pub struct AppState {
     pub client: Mutex<CodexClient>,
     pub config_manager: ConfigManager,
+    pub dock: crate::dock::DockManager,
     pub last_usage: Mutex<Option<CodexUsage>>,
     pub settings: Mutex<OverlaySettings>,
     pub settings_revision: AtomicU64,
@@ -180,8 +181,16 @@ async fn apply_settings_patch(
     allow_auto_start: bool,
 ) -> Result<SettingsEnvelope, String> {
     let changes = validate_settings_patch(&patch, allow_auto_start)?;
-    let (envelope, auto_check_just_enabled) = {
+    let (
+        envelope,
+        auto_check_just_enabled,
+        auto_edge_hide_changed,
+        previous_auto_edge_hide,
+        geometry_changed,
+    ) = {
         let mut settings = state.settings.lock().await;
+        let was_auto_edge_hide = settings.auto_edge_hide;
+        let previous_settings = settings.clone();
         let mut merged = serde_json::to_value(&*settings).map_err(|e| e.to_string())?;
         let fields = merged.as_object_mut().ok_or("Settings are not an object")?;
         for (key, value) in changes {
@@ -192,8 +201,50 @@ async fn apply_settings_patch(
         let auto_check_just_enabled = !settings.auto_check_updates && next.auto_check_updates;
         *settings = next.clone();
         let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
-        (SettingsEnvelope { revision, settings: next }, auto_check_just_enabled)
+        (
+            SettingsEnvelope { revision, settings: next.clone() },
+            auto_check_just_enabled,
+            was_auto_edge_hide != next.auto_edge_hide,
+            was_auto_edge_hide,
+            previous_settings.scale_percent != next.scale_percent
+                || previous_settings.show_credits != next.show_credits
+                || previous_settings.overlay_layout != next.overlay_layout
+                || previous_settings.language != next.language,
+        )
     };
+
+    if auto_edge_hide_changed {
+        if let Err(error) = crate::dock::auto_hide_changed(
+            app,
+            state,
+            envelope.settings.auto_edge_hide,
+        )
+        .await
+        {
+            let rollback = {
+                let mut settings = state.settings.lock().await;
+                let mut reverted = settings.clone();
+                reverted.auto_edge_hide = previous_auto_edge_hide;
+                let persistence_error = state
+                    .config_manager
+                    .save_settings_checked(&reverted)
+                    .err();
+                *settings = reverted.clone();
+                let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
+                (SettingsEnvelope { revision, settings: reverted }, persistence_error)
+            };
+            let _ = app.emit("settings_updated", &rollback.0);
+            return Err(match rollback.1 {
+                Some(write_error) => format!(
+                    "Could not update docked overlay: {error}; could not persist rollback: {write_error}"
+                ),
+                None => format!("Could not update docked overlay: {error}"),
+            });
+        }
+    }
+    if geometry_changed {
+        crate::dock::keep_docked_in_work_area(app, state).await;
+    }
     let new_settings = &envelope.settings;
 
     // Update tray tooltip if we have last usage
@@ -365,8 +416,36 @@ pub async fn set_autostart(
 }
 
 #[tauri::command]
-pub fn start_dragging(window: tauri::WebviewWindow) -> Result<(), String> {
-    window.start_dragging().map_err(|e| e.to_string())
+pub fn start_dragging(
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    state.dock.begin_drag();
+    if let Err(error) = window.start_dragging() {
+        state.dock.cancel_drag();
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_dock_state(state: State<'_, Arc<AppState>>) -> crate::dock::DockStateInfo {
+    state.dock.info()
+}
+
+#[tauri::command]
+pub fn dock_mouse_enter(app: AppHandle, state: State<'_, Arc<AppState>>) {
+    crate::dock::mouse_enter(&app, state.inner());
+}
+
+#[tauri::command]
+pub fn dock_mouse_leave(app: AppHandle, state: State<'_, Arc<AppState>>) {
+    crate::dock::mouse_leave(&app, state.inner());
+}
+
+#[tauri::command]
+pub fn dock_window_resized(app: AppHandle, state: State<'_, Arc<AppState>>) {
+    crate::dock::window_resized(&app, state.inner());
 }
 
 #[tauri::command]
@@ -408,13 +487,19 @@ pub async fn show_overlay_menu(
     )
     .map_err(|e| e.to_string())?;
 
-    window.popup_menu(&menu).map_err(|e: tauri::Error| e.to_string())?;
+    state.dock.begin_menu();
+    let result = window.popup_menu(&menu).map_err(|e: tauri::Error| e.to_string());
+    crate::dock::menu_changed(&app, state.inner(), false);
+    result?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn toggle_overlay_window(app: AppHandle) {
-    crate::tray::toggle_main_window(&app);
+pub fn toggle_overlay_window(app: AppHandle, state: State<'_, Arc<AppState>>) {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        crate::dock::toggle_overlay_window(&app, &state).await;
+    });
 }
 
 #[tauri::command]

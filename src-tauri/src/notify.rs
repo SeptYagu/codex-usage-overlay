@@ -159,6 +159,7 @@ pub async fn process_usage_success(app: &AppHandle, state: &Arc<AppState>, usage
         usage.week_remaining_percent.map(|percent| percent as f64),
     );
     let _ = app.emit("usage_updated", usage);
+    crate::dock::keep_docked_in_work_area(app, state).await;
 
     if let Err(error) = maybe_notify_cycle(
         app,

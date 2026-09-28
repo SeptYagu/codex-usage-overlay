@@ -167,14 +167,18 @@ pub fn layout_tray_menu(app: &AppHandle, generation: u64, revision: u64, height_
 }
 
 pub fn toggle_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        if let Ok(is_visible) = window.is_visible() {
-            if is_visible {
-                let _ = window.hide();
-            } else {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+    if let Some(state) = app.try_state::<std::sync::Arc<crate::commands::AppState>>() {
+        let state = state.inner().clone();
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::dock::toggle_overlay_window(&app, &state).await;
+        });
+    } else if let Some(window) = app.get_webview_window("main") {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.hide();
+        } else {
+            let _ = window.show();
+            let _ = window.set_focus();
         }
     }
 }

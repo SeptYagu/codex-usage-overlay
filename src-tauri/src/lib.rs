@@ -1,6 +1,7 @@
 mod codex;
 mod commands;
 mod config;
+mod dock;
 mod notify;
 mod tray;
 #[cfg(windows)]
@@ -9,12 +10,12 @@ mod audio;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
-use tauri::{AppHandle, Listener, Manager, PhysicalPosition, Position};
+use tauri::{AppHandle, Listener, Manager};
 use tokio::sync::Mutex;
 
 use codex::CodexClient;
 use commands::AppState;
-use config::{ConfigManager, WindowPosition};
+use config::ConfigManager;
 use tray::setup_tray;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -25,6 +26,7 @@ pub fn run() {
     let app_state = Arc::new(AppState {
         client: Mutex::new(CodexClient::new()),
         config_manager: config_manager.clone(),
+        dock: dock::DockManager::new(config_manager.clone()),
         last_usage: Mutex::new(None),
         settings: Mutex::new(initial_settings.clone()),
         settings_revision: AtomicU64::new(0),
@@ -40,19 +42,30 @@ pub fn run() {
     });
 
     let app_state_clone = app_state.clone();
+    let window_state = app_state.clone();
 
     tauri::Builder::default()
-        .on_window_event(|window, event| match event {
-            tauri::WindowEvent::CloseRequested { api, .. }
-                if window.label() == "settings" || window.label() == "tray-menu" =>
-            {
-                api.prevent_close();
-                let _ = window.hide();
+        .on_window_event(move |window, event| {
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. }
+                    if window.label() == "settings" || window.label() == "tray-menu" =>
+                {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                tauri::WindowEvent::Focused(false) if window.label() == "tray-menu" => {
+                    let _ = window.hide();
+                }
+                tauri::WindowEvent::ScaleFactorChanged { .. } if window.label() == "main" => {
+                    let app = window.app_handle().clone();
+                    let state = window_state.clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(80)).await;
+                        dock::keep_docked_in_work_area(&app, &state).await;
+                    });
+                }
+                _ => {}
             }
-            tauri::WindowEvent::Focused(false) if window.label() == "tray-menu" => {
-                let _ = window.hide();
-            }
-            _ => {}
         })
         .on_menu_event(|app, event| {
             tray::handle_menu_action(app, event.id().as_ref());
@@ -85,6 +98,10 @@ pub fn run() {
             commands::stop_preview_sound,
             commands::set_autostart,
             commands::start_dragging,
+            commands::get_dock_state,
+            commands::dock_mouse_enter,
+            commands::dock_mouse_leave,
+            commands::dock_window_resized,
             commands::exit_app,
             commands::show_overlay_menu,
             commands::toggle_overlay_window,
@@ -114,47 +131,29 @@ pub fn run() {
 
             // Setup main overlay window position and initial size
             if let Some(main_win) = app.get_webview_window("main") {
-                // Compute initial size based on saved/default settings
-                let scale = initial_settings.scale_percent as f64 / 100.0;
-                let base_w = if initial_settings.show_credits { 220.0 } else { 160.0 };
-                let base_h = 50.0;
-                let init_w = ((base_w * scale).ceil() as u32).max(180);
-                let init_h = ((base_h * scale).ceil() as u32).max(50);
-                let _ = main_win.set_size(tauri::Size::Logical(tauri::LogicalSize {
-                    width: init_w as f64,
-                    height: init_h as f64,
-                }));
-
-                // Restore position
-                if let Some(pos) = config_manager.load_position() {
-                    let _ = main_win.set_position(Position::Physical(PhysicalPosition {
-                        x: pos.left.round() as i32,
-                        y: pos.top.round() as i32,
-                    }));
-                } else if let Ok(Some(monitor)) = main_win.primary_monitor() {
-                    // Default to top-right corner
-                    let screen_size = monitor.size();
-                    let target_x = (screen_size.width as i32).saturating_sub(init_w as i32 + 20);
-                    let target_y = 40;
-                    let _ = main_win.set_position(Position::Physical(PhysicalPosition {
-                        x: target_x,
-                        y: target_y,
-                    }));
+                dock::restore_startup(&main_win, &app_state_clone.dock, &initial_settings);
+                if let Err(error) = dock::install_native_window_hook(&main_win, app.handle()) {
+                    eprintln!("Could not install the main window event hook: {error}");
                 }
-
-                // Listen to window move events to persist position (guard against (0, 0) snap)
-                let cm = config_manager.clone();
-                main_win.on_window_event(move |event| {
-                    if let tauri::WindowEvent::Moved(pos) = event {
-                        if pos.x > 0 || pos.y > 0 {
-                            cm.save_position(&WindowPosition {
-                                left: pos.x as f64,
-                                top: pos.y as f64,
-                            });
-                        }
-                    }
-                });
             }
+
+            // Capture the actual end of a native drag, plus native menu open/close locks.
+            let drag_state = app_state_clone.clone();
+            app.listen("window_drag_started", move |_| drag_state.dock.begin_drag());
+            let drag_state = app_state_clone.clone();
+            let drag_app = app.handle().clone();
+            app.listen("window_drag_ended", move |_| {
+                let state = drag_state.clone();
+                let app = drag_app.clone();
+                tauri::async_runtime::spawn(async move { dock::drag_ended(&app, &state).await; });
+            });
+            let menu_state = app_state_clone.clone();
+            app.listen("overlay_menu_opened", move |_| menu_state.dock.begin_menu());
+            let menu_state = app_state_clone.clone();
+            let menu_app = app.handle().clone();
+            app.listen("overlay_menu_closed", move |_| {
+                dock::menu_changed(&menu_app, &menu_state, false);
+            });
 
             // Background polling loop
             let handle = app.handle().clone();

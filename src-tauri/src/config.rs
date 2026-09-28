@@ -88,6 +88,12 @@ pub struct WindowPosition {
     pub top: f64,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DockPersistence {
+    pub docked: bool,
+    pub edge: Option<crate::dock::Edge>,
+}
+
 #[derive(Clone)]
 pub struct ConfigManager {
     runtime_dir: PathBuf,
@@ -108,6 +114,10 @@ impl ConfigManager {
 
     pub fn position_path(&self) -> PathBuf {
         self.runtime_dir.join("window-position.json")
+    }
+
+    pub fn dock_state_path(&self) -> PathBuf {
+        self.runtime_dir.join("dock-state.json")
     }
 
     pub fn status_path(&self) -> PathBuf {
@@ -154,6 +164,21 @@ impl ConfigManager {
         let path = self.position_path();
         let tmp = path.with_extension("json.tmp");
         if let Ok(json) = serde_json::to_string(pos) {
+            if fs::write(&tmp, json).is_ok() {
+                let _ = fs::rename(tmp, path);
+            }
+        }
+    }
+
+    pub fn load_dock_state(&self) -> Option<DockPersistence> {
+        let content = fs::read_to_string(self.dock_state_path()).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    pub fn save_dock_state(&self, state: &DockPersistence) {
+        let path = self.dock_state_path();
+        let tmp = path.with_extension("json.tmp");
+        if let Ok(json) = serde_json::to_string_pretty(state) {
             if fs::write(&tmp, json).is_ok() {
                 let _ = fs::rename(tmp, path);
             }
