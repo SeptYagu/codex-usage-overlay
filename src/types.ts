@@ -33,6 +33,14 @@ export interface SettingsEnvelope {
 }
 
 export type QuotaKind = 'fiveHour' | 'week';
+export type DockEdge = 'left' | 'right' | 'top' | 'bottom';
+
+export interface DockStateInfo {
+  docked: boolean;
+  edge: DockEdge | null;
+  expanded: boolean;
+  hidden: boolean;
+}
 
 export const DEFAULT_SETTINGS: OverlaySettings = {
   overlayLayout: 'grouped',

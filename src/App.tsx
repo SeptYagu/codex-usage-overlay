@@ -5,7 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { useTranslation } from 'react-i18next';
 import i18n, { updateLanguage } from './i18n';
-import { CodexUsage, OverlaySettings, SettingsEnvelope, DEFAULT_SETTINGS } from './types';
+import { CodexUsage, DockStateInfo, OverlaySettings, SettingsEnvelope, DEFAULT_SETTINGS } from './types';
 import { OverlayView } from './components/OverlayView';
 import { SettingsView } from './components/SettingsView';
 import { TrayMenuView } from './components/TrayMenuView';
@@ -23,6 +23,8 @@ export const App: React.FC = () => {
   const sliderTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [usage, setUsage] = useState<CodexUsage | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [dockState, setDockState] = useState<DockStateInfo | null>(null);
+  const dockStateRevision = useRef(0);
 
   const loadSettings = useCallback(async () => {
     const token = ++settingsLoadToken.current;
@@ -78,6 +80,20 @@ export const App: React.FC = () => {
       }
     });
 
+    const unlistenDockState = listen<DockStateInfo>('dock_state_changed', (event) => {
+      dockStateRevision.current++;
+      setDockState(event.payload);
+    });
+    if (windowLabel === 'main') {
+      const revision = dockStateRevision.current;
+      invoke<DockStateInfo>('get_dock_state').then((initial) => {
+        if (dockStateRevision.current === revision) setDockState(initial);
+      }).catch((error) => {
+        console.error('Failed to get dock state:', error);
+        setDockState({ docked: false, edge: null, expanded: true, hidden: false });
+      });
+    }
+
     // Initial usage fetch
     if (windowLabel === 'main') handleRefresh();
 
@@ -86,6 +102,7 @@ export const App: React.FC = () => {
       unlistenSettings.then((f) => f());
       unlistenUsage.then((f) => f());
       unlistenUpdate.then((f) => f());
+      unlistenDockState.then((f) => f());
     };
   }, [loadSettings, windowLabel]);
 
@@ -193,11 +210,14 @@ export const App: React.FC = () => {
     return <TrayMenuView settings={settings} onPatchSettings={handlePatchSettings} />;
   }
 
+  if (windowLabel === 'main' && (settingsLoadState === 'loading' || dockState === null)) return null;
+
   return (
     <OverlayView
       settings={settings}
       usage={usage}
       isLoading={isLoading}
+      dockState={dockState ?? undefined}
     />
   );
 };

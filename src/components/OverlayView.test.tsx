@@ -124,6 +124,80 @@ it('resizes after changing layout, scale, credits and translated labels', async 
   expect(tauri.setSize).toHaveBeenLastCalledWith(expect.objectContaining({ width: 300 }));
 });
 
+it('shows separate quota bars and expands a collapsed pill on hover', async () => {
+  const dockState = { docked: true, edge: 'left' as const, expanded: false, hidden: false };
+  const sample = { ...usage, fiveHourRemainingPercent: 19, weekRemainingPercent: 20 };
+  const { container, rerender } = render(
+    <OverlayView settings={DEFAULT_SETTINGS} usage={sample} isLoading={false} dockState={dockState} />,
+  );
+  const bars = screen.getAllByRole('progressbar');
+  expect(bars[0].getAttribute('aria-valuenow')).toBe('19');
+  expect(bars[1].getAttribute('aria-valuenow')).toBe('20');
+  expect(container.querySelector('.overlay-pill-fill.overlay-low')?.getAttribute('style')).toContain('19%');
+  expect(container.querySelector('.overlay-pill-fill.overlay-warning')?.getAttribute('style')).toContain('20%');
+  expect(tauri.setSize).not.toHaveBeenCalled();
+
+  const pill = container.querySelector('.overlay-pill-host')!;
+  fireEvent.mouseEnter(pill);
+  fireEvent.mouseLeave(pill);
+  fireEvent.mouseDown(pill, { button: 0 });
+  await waitFor(() => {
+    expect(tauri.invoke).toHaveBeenCalledWith('dock_mouse_enter');
+    expect(tauri.invoke).toHaveBeenCalledWith('dock_mouse_leave');
+  });
+  expect(tauri.invoke).not.toHaveBeenCalledWith('start_dragging');
+
+  rerender(
+    <OverlayView
+      settings={DEFAULT_SETTINGS}
+      usage={{ ...sample, fiveHourRemainingPercent: 50, weekRemainingPercent: 100 }}
+      isLoading={false}
+      dockState={{ ...dockState, edge: 'top' }}
+    />,
+  );
+  expect(container.querySelector('.overlay-pill-host')?.getAttribute('data-dock-edge')).toBe('top');
+  expect(container.querySelector('.overlay-pill-bars')?.classList.contains('overlay-pill-rotated')).toBe(true);
+  expect(container.querySelectorAll('.overlay-pill-fill.overlay-healthy').length).toBe(2);
+
+  for (const [percent, tone] of [
+    [0, 'low'], [19, 'low'], [20, 'warning'], [49, 'warning'], [50, 'healthy'], [100, 'healthy'],
+  ] as const) {
+    rerender(
+      <OverlayView
+        settings={DEFAULT_SETTINGS}
+        usage={{ ...sample, fiveHourRemainingPercent: percent, weekRemainingPercent: null }}
+        isLoading={false}
+        dockState={{ ...dockState, edge: 'right' }}
+      />,
+    );
+    const fiveHourBar = screen.getAllByRole('progressbar')[0];
+    expect(fiveHourBar.querySelector(`.overlay-pill-fill.overlay-${tone}`)?.getAttribute('style'))
+      .toContain(`${percent}%`);
+    expect(screen.getAllByRole('progressbar')[1].getAttribute('aria-valuenow')).toBeNull();
+  }
+});
+
+it('represents unknown quota data with empty neutral bars', () => {
+  const { container } = render(
+    <OverlayView
+      settings={DEFAULT_SETTINGS}
+      usage={null}
+      isLoading={false}
+      dockState={{ docked: true, edge: 'bottom', expanded: false, hidden: false }}
+    />,
+  );
+  expect(screen.getAllByRole('progressbar').map((bar) => bar.getAttribute('aria-valuetext')))
+    .toEqual(['Unknown', 'Unknown']);
+  expect(container.querySelectorAll('.overlay-pill-fill')).toHaveLength(0);
+  expect(container.querySelector('.overlay-pill-bars')?.classList.contains('overlay-pill-rotated')).toBe(true);
+});
+
+it('starts a native drag from the expanded capsule', async () => {
+  const { container } = render(<OverlayView settings={DEFAULT_SETTINGS} usage={usage} isLoading={false} />);
+  fireEvent.mouseDown(container.querySelector('.overlay-capsule')!, { button: 0 });
+  await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('start_dragging'));
+});
+
 it('retains threshold colors and treats unavailable quotas as unknown', () => {
   const { rerender } = render(<OverlayView settings={DEFAULT_SETTINGS}
     usage={{ ...usage, fiveHourRemainingPercent: 50, weekRemainingPercent: 20 }} isLoading={false} />);

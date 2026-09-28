@@ -1,13 +1,14 @@
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
-import { CodexUsage, OverlaySettings } from '../types';
+import { CodexUsage, DockStateInfo, OverlaySettings } from '../types';
 import { useTranslation } from 'react-i18next';
 
 interface OverlayViewProps {
   settings: OverlaySettings;
   usage: CodexUsage | null;
   isLoading: boolean;
+  dockState?: DockStateInfo;
 }
 
 function formatResetCountdown(resetsAt: number | null | undefined, weekly = false): string {
@@ -26,7 +27,7 @@ function usageTone(percent: number | null | undefined): string {
   return percent >= 50 ? 'healthy' : percent >= 20 ? 'warning' : 'low';
 }
 
-export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoading }) => {
+export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoading, dockState }) => {
   const { t } = useTranslation();
   const [, setTick] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -34,6 +35,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
   const [dprComp, setDprComp] = useState(1);
   const scale = settings.scalePercent / 100;
   const layout = settings.overlayLayout === 'stacks' ? 'stacks' : 'grouped';
+  const collapsed = Boolean(dockState?.docked && !dockState.expanded);
 
   // WebView2 renders content at devicePixelRatio = monitor DPI scale x system
   // text scaling (Windows "make text bigger"), while Tauri converts window
@@ -71,6 +73,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
     ? numericCredit.toFixed(2) : rawCredit;
 
   const fitCapsuleSize = useCallback(async () => {
+    if (collapsed) return;
     const el = rootRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -81,11 +84,14 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
     lastSizeRef.current = { width, height };
     try {
       await getCurrentWindow().setSize(new LogicalSize(width * dprComp, height * dprComp));
+      if (dockState?.docked && dockState.expanded) {
+        void invoke('dock_window_resized').catch((err) => console.error('Failed to reposition docked overlay:', err));
+      }
     } catch (err) {
       lastSizeRef.current = { width: 0, height: 0 };
       console.error('Failed to fit overlay size:', err);
     }
-  }, [dprComp]);
+  }, [collapsed, dockState?.docked, dockState?.expanded, dprComp]);
 
   useLayoutEffect(() => {
     void fitCapsuleSize();
@@ -115,6 +121,20 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
     }
   };
 
+  const handleDragStart = (event: React.MouseEvent) => {
+    if (event.button !== 0 || collapsed) return;
+    event.preventDefault();
+    void invoke('start_dragging').catch((err) => console.error('Failed to start overlay drag:', err));
+  };
+
+  const handleMouseEnter = () => {
+    if (dockState?.docked) void invoke('dock_mouse_enter').catch((err) => console.error(err));
+  };
+
+  const handleMouseLeave = () => {
+    if (dockState?.docked) void invoke('dock_mouse_leave').catch((err) => console.error(err));
+  };
+
   const quotas = [
     { key: 'five', label: layout === 'stacks' ? t('fiveHourLabel') : '5H',
       percent: usage?.fiveHourRemainingPercent,
@@ -124,12 +144,62 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
       countdown: formatResetCountdown(usage?.weekResetsAt, true) },
   ];
 
+  if (collapsed) {
+    const edge = dockState?.edge ?? 'left';
+    return (
+      <div className="overlay-shell overlay-shell-pill">
+        <div
+          ref={rootRef}
+          className="overlay-surface overlay-pill-host"
+          data-dock-edge={edge}
+          role="group"
+          aria-label={`${t('fiveHourLabel')} and ${t('weeklyLabel')}`}
+          onMouseEnter={handleMouseEnter}
+          onMouseLeave={handleMouseLeave}
+          onContextMenu={handleContextMenu}
+          style={{
+            '--overlay-alpha': (100 - settings.backgroundTransparencyPercent) / 100,
+            transform: `scale(${scale / dprComp})`,
+          } as React.CSSProperties}
+        >
+          <div className={`overlay-pill-bars ${edge === 'top' || edge === 'bottom' ? 'overlay-pill-rotated' : ''}`}>
+            {quotas.map((quota) => {
+              const percent = quota.percent === null || quota.percent === undefined
+                ? null : Math.max(0, Math.min(100, quota.percent));
+              return (
+                <div
+                  key={quota.key}
+                  className="overlay-pill-track"
+                  role="progressbar"
+                  aria-label={quota.key === 'five' ? t('fiveHourLabel') : t('weeklyLabel')}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={percent ?? undefined}
+                  aria-valuetext={percent === null ? t('unknown') : `${percent}%`}
+                >
+                  {percent !== null && (
+                    <span
+                      className={`overlay-pill-fill overlay-${usageTone(percent)}`}
+                      style={{ height: `${percent}%` }}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="overlay-shell">
       <div
         ref={rootRef}
-        data-tauri-drag-region
         data-layout={layout}
+        onMouseDown={handleDragStart}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
         onDoubleClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
         onContextMenu={handleContextMenu}
         title={usage ? t('tooltipUpdated', { time: new Date(usage.fetchedAt * 1000).toLocaleTimeString() }) : t('loadingTooltip')}
@@ -138,7 +208,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
           transform: `scale(${scale / dprComp})`,
           transformOrigin: 'top left',
         } as React.CSSProperties}
-        className={`overlay-capsule overlay-${layout}`}
+        className={`overlay-surface overlay-capsule overlay-${layout}`}
       >
         {quotas.map((quota, index) => (
           <React.Fragment key={quota.key}>

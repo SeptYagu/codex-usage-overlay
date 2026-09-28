@@ -13,7 +13,7 @@ html, body, #root {
 
 .overlay-shell { width: max-content; user-select: none; }
 
-.overlay-capsule {
+.overlay-surface {
   --overlay-surface: 241, 243, 247;
   --overlay-text: #242a35;
   --overlay-secondary: #596475;
@@ -22,6 +22,9 @@ html, body, #root {
   --overlay-healthy: #16703a;
   --overlay-warning: #946000;
   --overlay-low: #bf3030;
+}
+
+.overlay-capsule {
   position: relative;
   display: flex;
   width: max-content;
@@ -37,7 +40,7 @@ html, body, #root {
 }
 
 @media (prefers-color-scheme: dark) {
-  .overlay-capsule {
+  .overlay-surface {
     --overlay-surface: 27, 29, 36;
     --overlay-text: #f4f7fc;
     --overlay-secondary: #b6c0d0;
@@ -64,6 +67,56 @@ html, body, #root {
 .overlay-divider { width: 1px; height: 33px; background: var(--overlay-rule); flex: 0 0 1px; opacity: .65; }
 .overlay-stacks .overlay-reading { flex-direction: column; align-items: flex-start; gap: 5px; }
 .overlay-loading { position: absolute; top: 4px; right: 4px; width: 3px; height: 3px; border-radius: 50%; background: var(--overlay-healthy); }
+
+.overlay-shell-pill { width: max-content; height: max-content; }
+.overlay-pill-host {
+  position: relative;
+  display: flex;
+  width: 46px;
+  height: 100px;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--overlay-border);
+  border-radius: 14px;
+  background: rgba(var(--overlay-surface), var(--overlay-alpha));
+  color: var(--overlay-text);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transform-origin: center center;
+}
+.overlay-pill-host[data-dock-edge="top"],
+.overlay-pill-host[data-dock-edge="bottom"] { width: 100px; height: 46px; }
+.overlay-pill-bars {
+  display: flex;
+  width: 24px;
+  height: 72px;
+  align-items: stretch;
+  gap: 6px;
+}
+.overlay-pill-bars.overlay-pill-rotated { transform: rotate(90deg); }
+.overlay-pill-track {
+  position: relative;
+  width: 9px;
+  height: 100%;
+  flex: 0 0 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(var(--overlay-rule), .58);
+}
+.overlay-pill-fill {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: inherit;
+  transition: height .18s ease-out;
+}
+.overlay-pill-fill.overlay-healthy { background: var(--overlay-healthy); }
+.overlay-pill-fill.overlay-warning { background: var(--overlay-warning); }
+.overlay-pill-fill.overlay-low { background: var(--overlay-low); }
 
 .tray-menu-item {
   display: flex;
