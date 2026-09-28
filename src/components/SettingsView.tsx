@@ -6,12 +6,12 @@ import { useTranslation } from 'react-i18next';
 
 interface SettingsViewProps {
   settings: OverlaySettings;
-  onUpdateSettings: (newSettings: OverlaySettings) => void;
+  onPatchSettings: (patch: Partial<OverlaySettings>, debounce?: boolean) => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   settings,
-  onUpdateSettings,
+  onPatchSettings,
 }) => {
   const { t } = useTranslation();
   const [isInstalled, setIsInstalled] = useState<boolean>(false);
@@ -27,8 +27,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   }, [t, settings.language]);
 
   const updateField = <K extends keyof OverlaySettings>(key: K, value: OverlaySettings[K]) => {
-    const next = { ...settings, [key]: value };
-    onUpdateSettings(next);
+    onPatchSettings({ [key]: value }, key === 'scalePercent' || key === 'backgroundTransparencyPercent');
   };
 
   return (
@@ -159,7 +158,57 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <option value="300">{t('min5')}</option>
             </select>
           </div>
+
+          <label className="flex items-center justify-between p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/60 hover:bg-slate-200/60 dark:hover:bg-slate-800 cursor-pointer transition-colors">
+            <span className="text-sm font-medium">{t('autoEdgeHide')}</span>
+            <input
+              type="checkbox"
+              checked={settings.autoEdgeHide}
+              onChange={(e) => updateField('autoEdgeHide', e.target.checked)}
+              className="w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 accent-cyan-500 cursor-pointer"
+            />
+          </label>
         </div>
+
+        <section aria-labelledby="reset-notifications-title" className="space-y-3 pt-2">
+          <h3 id="reset-notifications-title" className="text-sm font-semibold">{t('notificationSection')}</h3>
+          {([
+            { title: 'fiveHourResetNotify', enabled: 'fiveHourResetNotification', mode: 'fiveHourSoundMode', path: 'fiveHourSoundPath' },
+            { title: 'weeklyResetNotify', enabled: 'weeklyResetNotification', mode: 'weeklySoundMode', path: 'weeklySoundPath' },
+          ] as const).map(({ title, enabled, mode, path }) => (
+            <div key={enabled} className="space-y-2 rounded-lg border border-slate-200 dark:border-slate-700 p-3">
+              <h4 className="text-sm font-medium">{t(title)}</h4>
+              <label className="flex items-center justify-between gap-3 text-sm">
+                <span>{t('enableNotification')}</span>
+                <input
+                  type="checkbox"
+                  aria-label={`${t(title)} ${t('enableNotification')}`}
+                  checked={settings[enabled]}
+                  onChange={(e) => updateField(enabled, e.target.checked)}
+                  className="w-4 h-4 rounded text-cyan-600 accent-cyan-500 cursor-pointer"
+                />
+              </label>
+              <label className={`flex items-center justify-between gap-3 text-sm ${!settings[enabled] ? 'opacity-50' : ''}`}>
+                <span>{t('soundMode')}</span>
+                <select
+                  aria-label={`${t(title)} ${t('soundMode')}`}
+                  disabled={!settings[enabled]}
+                  value={settings[mode]}
+                  onChange={(e) => updateField(mode, e.target.value as 'windows' | 'custom')}
+                  className="max-w-36 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 disabled:cursor-not-allowed"
+                >
+                  <option value="windows">{t('soundModeWindows')}</option>
+                  <option value="custom">{t('soundModeCustom')}</option>
+                </select>
+              </label>
+              {settings[mode] === 'custom' && settings[enabled] && (
+                <p className="break-all text-xs text-slate-500 dark:text-slate-400" role="status">
+                  {settings[path] || t('chooseSoundFile')}
+                </p>
+              )}
+            </div>
+          ))}
+        </section>
 
         <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
           {t('hint')}

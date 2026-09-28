@@ -15,6 +15,9 @@ CodexUsageOverlay.exe
 # Tauri / Cargo build outputs
 src-tauri/target/
 src-tauri/gen/
+scripts/stage0-audio-probe/target/
+scripts/stage0-audio-probe/samples/
+scripts/stage0-audio-probe/Cargo.lock
 
 # Editor / OS files
 .vscode/

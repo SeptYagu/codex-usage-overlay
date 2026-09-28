@@ -18,6 +18,18 @@ export interface OverlaySettings {
   language: string;
   autoStart: boolean;
   autoCheckUpdates: boolean;
+  fiveHourResetNotification: boolean;
+  weeklyResetNotification: boolean;
+  fiveHourSoundMode: 'windows' | 'custom';
+  weeklySoundMode: 'windows' | 'custom';
+  fiveHourSoundPath: string | null;
+  weeklySoundPath: string | null;
+  autoEdgeHide: boolean;
+}
+
+export interface SettingsEnvelope {
+  revision: number;
+  settings: OverlaySettings;
 }
 
 export const DEFAULT_SETTINGS: OverlaySettings = {
@@ -29,6 +41,13 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   language: 'auto',
   autoStart: true,
   autoCheckUpdates: true,
+  fiveHourResetNotification: true,
+  weeklyResetNotification: true,
+  fiveHourSoundMode: 'windows',
+  weeklySoundMode: 'windows',
+  fiveHourSoundPath: null,
+  weeklySoundPath: null,
+  autoEdgeHide: false,
 };
 
 export interface UsageStatus {

@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use serde::Serialize;
+use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
@@ -13,10 +15,19 @@ pub struct AppState {
     pub config_manager: ConfigManager,
     pub last_usage: Mutex<Option<CodexUsage>>,
     pub settings: Mutex<OverlaySettings>,
+    pub settings_revision: AtomicU64,
+    pub autostart_update: Mutex<()>,
     pub update_check: Mutex<()>,
     pub pending_update: Mutex<Option<tauri_plugin_updater::Update>>,
     pub available_update: Mutex<Option<AvailableUpdate>>,
     pub last_auto_notified_version: Mutex<Option<String>>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsEnvelope {
+    pub revision: u64,
+    pub settings: OverlaySettings,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,24 +115,98 @@ pub async fn fetch_usage(state: State<'_, Arc<AppState>>, app: AppHandle) -> Res
 }
 
 #[tauri::command]
-pub async fn get_settings(state: State<'_, Arc<AppState>>) -> Result<OverlaySettings, String> {
-    let settings = state.settings.lock().await.clone();
-    Ok(settings)
+pub async fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsEnvelope, String> {
+    let guard = state.settings.lock().await;
+    let settings = guard.clone();
+    let revision = state.settings_revision.load(Ordering::SeqCst);
+    Ok(SettingsEnvelope {
+        revision,
+        settings,
+    })
 }
 
 #[tauri::command]
-pub async fn save_settings(
-    new_settings: OverlaySettings,
+pub async fn patch_settings(
+    patch: Value,
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
-) -> Result<(), String> {
-    let auto_check_just_enabled = {
+) -> Result<SettingsEnvelope, String> {
+    apply_settings_patch(&app, state.inner(), patch, false).await
+}
+
+fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map<String, Value>, String> {
+    let changes = patch.as_object().ok_or("Settings patch must be an object")?;
+    if changes.is_empty() {
+        return Err("Settings patch is empty".into());
+    }
+    for (key, value) in changes {
+        let valid = match key.as_str() {
+            "overlayLayout" => matches!(value.as_str(), Some("grouped" | "stacks")),
+            "scalePercent" => value.as_u64().is_some_and(|n| (100..=250).contains(&n) && n % 5 == 0),
+            "backgroundTransparencyPercent" => value.as_u64().is_some_and(|n| n <= 80 && n % 5 == 0),
+            "showCredits" | "autoCheckUpdates" | "fiveHourResetNotification"
+            | "weeklyResetNotification" | "autoEdgeHide" => value.is_boolean(),
+            "autoStart" => allow_auto_start && value.is_boolean(),
+            "refreshIntervalSeconds" => value.as_u64().is_some_and(|n| (15..=3600).contains(&n)),
+            "language" => matches!(value.as_str(), Some("auto" | "en-US" | "zh-CN" | "zh-Hant")),
+            "fiveHourSoundMode" | "weeklySoundMode" => matches!(value.as_str(), Some("windows" | "custom")),
+            "fiveHourSoundPath" | "weeklySoundPath" => value.is_null() || value.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 4096),
+            _ => false,
+        };
+        if !valid {
+            return Err(format!("Invalid settings field: {key}"));
+        }
+    }
+    Ok(changes)
+}
+
+#[cfg(test)]
+mod settings_patch_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_entire_patch_when_one_field_is_invalid() {
+        let patch = serde_json::json!({"showCredits": false, "scalePercent": 999});
+        assert!(validate_settings_patch(&patch, false).is_err());
+        assert!(validate_settings_patch(&serde_json::json!({"language": "unknown"}), false).is_err());
+        assert!(validate_settings_patch(&serde_json::json!({"autoStart": false}), false).is_err());
+        assert!(validate_settings_patch(&serde_json::json!({"futureField": true}), false).is_err());
+    }
+
+    #[test]
+    fn accepts_independent_notification_fields() {
+        let patch = serde_json::json!({
+            "fiveHourResetNotification": false,
+            "weeklySoundMode": "custom",
+            "weeklySoundPath": "C:\\sound.m4a",
+            "autoEdgeHide": true
+        });
+        assert_eq!(validate_settings_patch(&patch, false).unwrap().len(), 4);
+    }
+}
+
+async fn apply_settings_patch(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    patch: Value,
+    allow_auto_start: bool,
+) -> Result<SettingsEnvelope, String> {
+    let changes = validate_settings_patch(&patch, allow_auto_start)?;
+    let (envelope, auto_check_just_enabled) = {
         let mut settings = state.settings.lock().await;
-        let was_enabled = settings.auto_check_updates;
-        *settings = new_settings.clone();
-        state.config_manager.save_settings(&settings);
-        !was_enabled && new_settings.auto_check_updates
+        let mut merged = serde_json::to_value(&*settings).map_err(|e| e.to_string())?;
+        let fields = merged.as_object_mut().ok_or("Settings are not an object")?;
+        for (key, value) in changes {
+            fields.insert(key.clone(), value.clone());
+        }
+        let next: OverlaySettings = serde_json::from_value(merged).map_err(|e| e.to_string())?;
+        state.config_manager.save_settings_checked(&next)?;
+        let auto_check_just_enabled = !settings.auto_check_updates && next.auto_check_updates;
+        *settings = next.clone();
+        let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
+        (SettingsEnvelope { revision, settings: next }, auto_check_just_enabled)
     };
+    let new_settings = &envelope.settings;
 
     // Update tray tooltip if we have last usage
     if let Some(usage) = state.last_usage.lock().await.as_ref() {
@@ -132,9 +217,9 @@ pub async fn save_settings(
         } else {
             format!("5H {}% | WK {}%", five, week)
         };
-        update_tray_tooltip(&app, &tooltip);
+        update_tray_tooltip(app, &tooltip);
         update_tray_icon(
-            &app,
+            app,
             usage.five_hour_remaining_percent.map(|p| p as f64),
             usage.week_remaining_percent.map(|p| p as f64),
         );
@@ -145,7 +230,7 @@ pub async fn save_settings(
             "zh-Hant" => "Codex 用量讀取失敗",
             _ => "Failed to read Codex usage",
         };
-        update_tray_tooltip(&app, error_text);
+        update_tray_tooltip(app, error_text);
     }
 
     // Update settings window title
@@ -159,15 +244,15 @@ pub async fn save_settings(
     }
 
     // Broadcast updated settings to all windows
-    let _ = app.emit("settings_updated", &new_settings);
+    let _ = app.emit("settings_updated", &envelope);
     if auto_check_just_enabled {
         let app_for_check = app.clone();
-        let state_for_check = state.inner().clone();
+        let state_for_check = state.clone();
         tauri::async_runtime::spawn(async move {
             check_and_notify_auto_update(&app_for_check, &state_for_check).await;
         });
     }
-    Ok(())
+    Ok(envelope)
 }
 
 #[tauri::command]
@@ -181,6 +266,16 @@ pub fn is_installed_version() -> bool {
 }
 
 #[tauri::command]
+pub fn get_tray_menu_generation() -> u64 {
+    crate::tray::tray_menu_generation()
+}
+
+#[tauri::command]
+pub fn layout_tray_menu(app: AppHandle, generation: u64, revision: u64, height_logical: f64) -> Result<f64, String> {
+    crate::tray::layout_tray_menu(&app, generation, revision, height_logical)
+}
+
+#[tauri::command]
 pub async fn set_autostart(
     enable: bool,
     app: AppHandle,
@@ -189,21 +284,23 @@ pub async fn set_autostart(
     if !crate::config::is_installed_environment() {
         return Err("Autostart is only supported in installer versions".to_string());
     }
+    let _autostart_guard = state.autostart_update.lock().await;
     use tauri_plugin_autostart::ManagerExt;
     let autostart_mgr = app.autolaunch();
+    let previous = state.settings.lock().await.auto_start;
     if enable {
         autostart_mgr.enable().map_err(|e| e.to_string())?;
     } else {
         autostart_mgr.disable().map_err(|e| e.to_string())?;
     }
 
-    let updated = {
-        let mut settings = state.settings.lock().await;
-        settings.auto_start = enable;
-        state.config_manager.save_settings(&settings);
-        settings.clone()
-    };
-    let _ = app.emit("settings_updated", &updated);
+    if let Err(error) = apply_settings_patch(&app, state.inner(), serde_json::json!({ "autoStart": enable }), true).await {
+        let rollback = if previous { autostart_mgr.enable() } else { autostart_mgr.disable() };
+        if let Err(rollback_error) = rollback {
+            return Err(format!("{error}; autostart rollback failed: {rollback_error}"));
+        }
+        return Err(error);
+    }
     Ok(())
 }
 

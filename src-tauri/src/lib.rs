@@ -4,6 +4,7 @@ mod config;
 mod tray;
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use tauri::{AppHandle, Listener, Manager, PhysicalPosition, Position};
 use tokio::sync::Mutex;
@@ -23,6 +24,8 @@ pub fn run() {
         config_manager: config_manager.clone(),
         last_usage: Mutex::new(None),
         settings: Mutex::new(initial_settings.clone()),
+        settings_revision: AtomicU64::new(0),
+        autostart_update: Mutex::new(()),
         update_check: Mutex::new(()),
         pending_update: Mutex::new(None),
         available_update: Mutex::new(None),
@@ -63,9 +66,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::fetch_usage,
             commands::get_settings,
-            commands::save_settings,
+            commands::patch_settings,
             commands::open_settings_window,
             commands::is_installed_version,
+            commands::get_tray_menu_generation,
+            commands::layout_tray_menu,
             commands::set_autostart,
             commands::start_dragging,
             commands::exit_app,

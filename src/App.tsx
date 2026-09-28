@@ -5,7 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { useTranslation } from 'react-i18next';
 import i18n, { updateLanguage } from './i18n';
-import { CodexUsage, OverlaySettings, DEFAULT_SETTINGS } from './types';
+import { CodexUsage, OverlaySettings, SettingsEnvelope, DEFAULT_SETTINGS } from './types';
 import { OverlayView } from './components/OverlayView';
 import { SettingsView } from './components/SettingsView';
 import { TrayMenuView } from './components/TrayMenuView';
@@ -15,21 +15,29 @@ export const App: React.FC = () => {
   const [windowLabel] = useState<string>(() => getCurrentWindow().label);
   const [settings, setSettings] = useState<OverlaySettings>(DEFAULT_SETTINGS);
   const [settingsLoadState, setSettingsLoadState] = useState<'loading' | 'ready' | 'error'>('loading');
-  const settingsRevision = useRef(0);
+  const settingsRevision = useRef(-1);
+  const settingsLoadToken = useRef(0);
+  const pendingPatches = useRef<Partial<OverlaySettings>[]>([]);
+  const patchQueue = useRef<Promise<void>>(Promise.resolve());
+  const sliderPatch = useRef<Partial<OverlaySettings>>({});
+  const sliderTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [usage, setUsage] = useState<CodexUsage | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
 
   const loadSettings = useCallback(async () => {
-    const revision = ++settingsRevision.current;
+    const token = ++settingsLoadToken.current;
     setSettingsLoadState('loading');
     try {
-      const cfg = await invoke<OverlaySettings>('get_settings');
-      if (revision !== settingsRevision.current) return;
-      setSettings(cfg);
-      updateLanguage(cfg.language);
+      const envelope = await invoke<SettingsEnvelope>('get_settings');
+      if (token !== settingsLoadToken.current || envelope.revision < settingsRevision.current) return;
+      settingsRevision.current = envelope.revision;
+      const merged = Object.assign({}, envelope.settings, ...pendingPatches.current, sliderPatch.current);
+      setSettings(merged);
+      updateLanguage(merged.language);
       setSettingsLoadState('ready');
     } catch (err) {
-      if (revision !== settingsRevision.current) return;
+      if (token !== settingsLoadToken.current) return;
+      if (settingsRevision.current >= 0) return;
       console.error('Failed to get settings:', err);
       setSettingsLoadState('error');
     }
@@ -39,11 +47,12 @@ export const App: React.FC = () => {
     loadSettings();
 
     // Listen to settings update from other windows or tray
-    const unlistenSettings = listen<OverlaySettings>('settings_updated', (event) => {
-      // A broadcast carries a complete snapshot and supersedes an older read.
-      settingsRevision.current++;
-      setSettings(event.payload);
-      updateLanguage(event.payload.language);
+    const unlistenSettings = listen<SettingsEnvelope>('settings_updated', (event) => {
+      if (event.payload.revision < settingsRevision.current) return;
+      settingsRevision.current = event.payload.revision;
+      const merged = Object.assign({}, event.payload.settings, ...pendingPatches.current, sliderPatch.current);
+      setSettings(merged);
+      updateLanguage(merged.language);
       setSettingsLoadState('ready');
     });
 
@@ -73,7 +82,7 @@ export const App: React.FC = () => {
     if (windowLabel === 'main') handleRefresh();
 
     return () => {
-      settingsRevision.current++;
+      settingsLoadToken.current++;
       unlistenSettings.then((f) => f());
       unlistenUsage.then((f) => f());
       unlistenUpdate.then((f) => f());
@@ -94,15 +103,64 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleUpdateSettings = async (newSettings: OverlaySettings) => {
-    setSettings(newSettings);
-    updateLanguage(newSettings.language);
-    try {
-      await invoke('save_settings', { newSettings });
-    } catch (err) {
-      console.error('Save settings error:', err);
+  const applySavedSettings = (envelope: SettingsEnvelope) => {
+    if (envelope.revision < settingsRevision.current) return;
+    settingsRevision.current = envelope.revision;
+    const merged = Object.assign({}, envelope.settings, ...pendingPatches.current, sliderPatch.current);
+    setSettings(merged);
+    updateLanguage(merged.language);
+  };
+
+  const enqueuePatch = (patch: Partial<OverlaySettings>, optimistic = true) => {
+    pendingPatches.current.push(patch);
+    if (optimistic) {
+      setSettings((current) => ({ ...current, ...patch }));
+      if (patch.language) updateLanguage(patch.language);
+    }
+    patchQueue.current = patchQueue.current.then(async () => {
+      try {
+        const envelope = await invoke<SettingsEnvelope>('patch_settings', { patch });
+        pendingPatches.current = pendingPatches.current.filter((item) => item !== patch);
+        applySavedSettings(envelope);
+      } catch (err) {
+        pendingPatches.current = pendingPatches.current.filter((item) => item !== patch);
+        console.error('Save settings error:', err);
+        try {
+          applySavedSettings(await invoke<SettingsEnvelope>('get_settings'));
+        } catch (reloadError) {
+          console.error('Failed to reload settings:', reloadError);
+        }
+      }
+    });
+  };
+
+  const flushSliderPatch = (optimistic = true) => {
+    if (sliderTimer.current) clearTimeout(sliderTimer.current);
+    sliderTimer.current = null;
+    const patch = sliderPatch.current;
+    sliderPatch.current = {};
+    if (Object.keys(patch).length) enqueuePatch(patch, optimistic);
+  };
+
+  const handlePatchSettings = (patch: Partial<OverlaySettings>, debounce = false) => {
+    if (debounce) {
+      sliderPatch.current = { ...sliderPatch.current, ...patch };
+      setSettings((current) => ({ ...current, ...patch }));
+      if (sliderTimer.current) clearTimeout(sliderTimer.current);
+      sliderTimer.current = setTimeout(flushSliderPatch, 250);
+    } else {
+      enqueuePatch(patch);
     }
   };
+
+  useEffect(() => {
+    const flush = () => flushSliderPatch();
+    window.addEventListener('pagehide', flush);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      flushSliderPatch(false);
+    };
+  }, []);
 
   if (windowLabel === 'settings' || window.location.hash === '#settings') {
     if (settingsLoadState !== 'ready') {
@@ -125,14 +183,14 @@ export const App: React.FC = () => {
     return (
       <SettingsView
         settings={settings}
-        onUpdateSettings={handleUpdateSettings}
+        onPatchSettings={handlePatchSettings}
       />
     );
   }
 
   if (windowLabel === 'tray-menu' || window.location.hash === '#tray-menu') {
     if (settingsLoadState !== 'ready') return null;
-    return <TrayMenuView settings={settings} onUpdateSettings={handleUpdateSettings} />;
+    return <TrayMenuView settings={settings} onPatchSettings={handlePatchSettings} />;
   }
 
   return (

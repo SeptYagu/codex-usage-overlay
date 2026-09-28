@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -18,7 +18,7 @@ interface UpdateProgress {
 
 interface TrayMenuViewProps {
   settings: OverlaySettings;
-  onUpdateSettings: (newSettings: OverlaySettings) => void;
+  onPatchSettings: (patch: Partial<OverlaySettings>) => void;
 }
 
 type UpdateState =
@@ -29,11 +29,91 @@ type UpdateState =
   | { kind: 'installing'; progress: UpdateProgress }
   | { kind: 'error' };
 
-export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onUpdateSettings }) => {
+export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSettings }) => {
   const { t } = useTranslation();
   const [isInstalled, setIsInstalled] = useState(false);
   const [languageOpen, setLanguageOpen] = useState(false);
   const [updateState, setUpdateState] = useState<UpdateState>({ kind: 'idle' });
+  const menuRef = useRef<HTMLDivElement>(null);
+  const generationRef = useRef(0);
+  const dprCompRef = useRef(1);
+  const scaleReadyRef = useRef(false);
+  const lastLayoutKey = useRef('');
+  const layoutRevision = useRef(0);
+  const [maxCssHeight, setMaxCssHeight] = useState<number | undefined>();
+
+  const measureMenu = useCallback(async () => {
+    const content = menuRef.current;
+    const generation = generationRef.current;
+    if (!content || !generation || !scaleReadyRef.current) return;
+    const height = Math.ceil(content.getBoundingClientRect().height + 20);
+    if (height <= 20) return;
+    const dprComp = dprCompRef.current;
+    const key = `${generation}:${height}:${dprComp}`;
+    if (lastLayoutKey.current === key) return;
+    lastLayoutKey.current = key;
+    const revision = ++layoutRevision.current;
+    try {
+      const actualLogicalHeight = await invoke<number>('layout_tray_menu', {
+        generation,
+        revision,
+        heightLogical: height * dprComp,
+      });
+      if (generation === generationRef.current && revision === layoutRevision.current) {
+        setMaxCssHeight(actualLogicalHeight / dprComp);
+      }
+    } catch (error) {
+      if (generation === generationRef.current && revision === layoutRevision.current) {
+        lastLayoutKey.current = '';
+        console.error('Tray menu layout failed:', error);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const currentWindow = getCurrentWindow();
+    let active = true;
+    let unlistenOpen: (() => void) | undefined;
+    let unlistenScale: (() => void) | undefined;
+    const updateScale = async () => {
+      try {
+        const scale = await currentWindow.scaleFactor();
+        dprCompRef.current = window.devicePixelRatio > 0 ? window.devicePixelRatio / scale : 1;
+      } catch {
+        dprCompRef.current = 1;
+      }
+      scaleReadyRef.current = true;
+      void measureMenu();
+    };
+    void invoke<number>('get_tray_menu_generation').then((generation) => {
+      if (!active) return;
+      generationRef.current = Math.max(generationRef.current, generation);
+      void measureMenu();
+    }).catch(console.error);
+    listen<number>('tray_menu_opened', (event) => {
+      generationRef.current = Math.max(generationRef.current, event.payload);
+      setMaxCssHeight(undefined);
+      void measureMenu();
+    }).then((fn) => { unlistenOpen = fn; }).catch(console.error);
+    currentWindow.onScaleChanged(() => { void updateScale(); })
+      .then((fn) => { unlistenScale = fn; }).catch(console.error);
+    void updateScale();
+    document.fonts?.ready.then(() => { if (active) void measureMenu(); });
+    return () => {
+      active = false;
+      unlistenOpen?.();
+      unlistenScale?.();
+    };
+  }, [measureMenu]);
+
+  useEffect(() => {
+    if (!menuRef.current || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => { void measureMenu(); });
+    observer.observe(menuRef.current);
+    return () => observer.disconnect();
+  }, [measureMenu]);
+
+  useLayoutEffect(() => { void measureMenu(); });
 
   useEffect(() => {
     invoke<boolean>('is_installed_version').then(setIsInstalled).catch(() => setIsInstalled(false));
@@ -96,7 +176,7 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onUpdateSe
   };
 
   const chooseLanguage = (language: string) => {
-    onUpdateSettings({ ...settings, language });
+    onPatchSettings({ language });
   };
 
   const progressText = (progress: UpdateProgress) => {
@@ -107,8 +187,8 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onUpdateSe
   };
 
   return (
-    <div className="h-screen overflow-y-auto bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 p-2.5 font-sans select-none">
-      <div role="menu" aria-label={t('menuSettings')} className="space-y-0.5">
+    <div className="overflow-y-auto bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 p-2.5 font-sans select-none" style={{ maxHeight: maxCssHeight }}>
+      <div ref={menuRef} role="menu" aria-label={t('menuSettings')} className="space-y-0.5">
         <button className="tray-menu-item" role="menuitem" onClick={() => runMenuAction(() => invoke('toggle_overlay_window'))}>
           {t('menuToggleOverlay')}
         </button>
@@ -164,6 +244,16 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onUpdateSe
             ))}
           </div>
         )}
+
+        <button
+          className="tray-menu-item justify-between"
+          role="menuitemcheckbox"
+          aria-checked={settings.autoEdgeHide}
+          onClick={() => onPatchSettings({ autoEdgeHide: !settings.autoEdgeHide })}
+        >
+          <span>{t('menuAutoEdgeHide')}</span>
+          <span aria-hidden="true">{settings.autoEdgeHide ? '✓' : ''}</span>
+        </button>
 
         {isInstalled && (
           <label className="tray-menu-item cursor-pointer justify-between">

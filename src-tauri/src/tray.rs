@@ -1,10 +1,15 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex as StdMutex;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, PhysicalPosition, Position, Size, WebviewUrl,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewUrl,
     WebviewWindowBuilder, Wry,
 };
 
 pub const TRAY_ID: &str = "main-tray";
+static TRAY_MENU_GENERATION: AtomicU64 = AtomicU64::new(0);
+static TRAY_MENU_LAYOUT_REVISION: AtomicU64 = AtomicU64::new(0);
+static TRAY_MENU_LAYOUT_LOCK: StdMutex<()> = StdMutex::new(());
 
 pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon<Wry>, tauri::Error> {
     // Initial dual-ring gauge icon
@@ -51,8 +56,10 @@ pub fn handle_menu_action(app: &AppHandle, id: &str) {
 }
 
 pub fn open_tray_menu_window(app: &AppHandle) {
-    let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
-    let rect = tray.rect().ok().flatten();
+    let Ok(_layout_guard) = TRAY_MENU_LAYOUT_LOCK.lock() else { return };
+    let generation = TRAY_MENU_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    TRAY_MENU_LAYOUT_REVISION.store(0, Ordering::SeqCst);
+    let Some(_tray) = app.tray_by_id(TRAY_ID) else { return };
     let window = if let Some(window) = app.get_webview_window("tray-menu") {
         window
     } else {
@@ -62,7 +69,7 @@ pub fn open_tray_menu_window(app: &AppHandle) {
             WebviewUrl::App("index.html#tray-menu".into()),
         )
         .title("Tray Menu")
-        .inner_size(300.0, 500.0)
+        .inner_size(300.0, 40.0)
         .resizable(false)
         .maximizable(false)
         .decorations(false)
@@ -76,60 +83,86 @@ pub fn open_tray_menu_window(app: &AppHandle) {
             Err(_) => return,
         }
     };
+    let _ = window.hide();
+    drop(_layout_guard);
+    let _ = window.emit("tray_menu_opened", generation);
+}
 
-    let (x, y) = if let Some(rect) = rect {
-        let (raw_x, raw_y, position_is_physical) = match rect.position {
-            Position::Physical(position) => (position.x as f64, position.y as f64, true),
-            Position::Logical(position) => (position.x, position.y, false),
+pub fn tray_menu_generation() -> u64 {
+    TRAY_MENU_GENERATION.load(Ordering::SeqCst)
+}
+
+pub fn layout_tray_menu(app: &AppHandle, generation: u64, revision: u64, height_logical: f64) -> Result<f64, String> {
+    let _layout_guard = TRAY_MENU_LAYOUT_LOCK.lock().map_err(|e| e.to_string())?;
+    if generation != tray_menu_generation()
+        || revision <= TRAY_MENU_LAYOUT_REVISION.load(Ordering::SeqCst)
+        || !height_logical.is_finite()
+        || height_logical <= 0.0 {
+        return Err("Stale or invalid tray menu layout request".into());
+    }
+    TRAY_MENU_LAYOUT_REVISION.store(revision, Ordering::SeqCst);
+    let window = app.get_webview_window("tray-menu").ok_or("Tray menu window unavailable")?;
+    let tray = app.tray_by_id(TRAY_ID).ok_or("Tray icon unavailable")?;
+    let rect = tray.rect().map_err(|e| e.to_string())?;
+    let fallback_monitor = window.current_monitor().ok().flatten().or_else(|| window.primary_monitor().ok().flatten());
+    let fallback_scale = fallback_monitor.as_ref().map(tauri::Monitor::scale_factor).unwrap_or(1.0);
+    let (icon_x, icon_y, icon_width, icon_height) = if let Some(rect) = rect {
+        let x = match rect.position {
+            Position::Physical(p) => p.x,
+            Position::Logical(p) => (p.x * fallback_scale).round() as i32,
         };
-        let (raw_width, raw_height, size_is_physical) = match rect.size {
-            Size::Physical(size) => (size.width as f64, size.height as f64, true),
-            Size::Logical(size) => (size.width, size.height, false),
+        let y = match rect.position {
+            Position::Physical(p) => p.y,
+            Position::Logical(p) => (p.y * fallback_scale).round() as i32,
         };
-        let monitor = app.available_monitors().ok().and_then(|monitors| {
-            monitors.into_iter().find(|monitor| {
-                let position = monitor.position();
-                let size = monitor.size();
-                let x = raw_x.round() as i32;
-                let y = raw_y.round() as i32;
-                x >= position.x
-                    && x < position.x + size.width as i32
-                    && y >= position.y
-                    && y < position.y + size.height as i32
-            })
-        });
-        let scale = monitor.as_ref().map(tauri::Monitor::scale_factor).unwrap_or(1.0);
-        let icon_x = if position_is_physical { raw_x } else { raw_x * scale }.round() as i32;
-        let icon_y = if position_is_physical { raw_y } else { raw_y * scale }.round() as i32;
-        let icon_width = if size_is_physical { raw_width } else { raw_width * scale }.round() as i32;
-        let icon_height = if size_is_physical { raw_height } else { raw_height * scale }.round() as i32;
-        if let Some(monitor) = monitor {
-            let work = monitor.work_area();
-            let popup_width = (300.0 * scale).round() as i32;
-            let popup_height = (500.0 * scale).round() as i32;
-            let left = work.position.x;
-            let top = work.position.y;
-            let right = left + work.size.width as i32;
-            let bottom = top + work.size.height as i32;
-            let popup_x = (icon_x + icon_width - popup_width)
-                .clamp(left, (right - popup_width).max(left));
-            let popup_y = if icon_y > top + (bottom - top) / 2 {
-                icon_y - popup_height
-            } else {
-                icon_y + icon_height
-            }
-            .clamp(top, (bottom - popup_height).max(top));
-            (popup_x, popup_y)
-        } else {
-            (icon_x, icon_y - 500)
-        }
+        let width = match rect.size {
+            Size::Physical(s) => s.width as i32,
+            Size::Logical(s) => (s.width * fallback_scale).round() as i32,
+        };
+        let height = match rect.size {
+            Size::Physical(s) => s.height as i32,
+            Size::Logical(s) => (s.height * fallback_scale).round() as i32,
+        };
+        (x, y, width, height)
     } else {
-        (20, 20)
+        let work = fallback_monitor.as_ref().ok_or("Tray monitor unavailable")?.work_area();
+        (work.position.x + work.size.width as i32, work.position.y + work.size.height as i32, 0, 0)
     };
-
-    let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
-    let _ = window.show();
-    let _ = window.set_focus();
+    let center_x = icon_x + icon_width / 2;
+    let center_y = icon_y + icon_height / 2;
+    let monitor = app.available_monitors().map_err(|e| e.to_string())?.into_iter().find(|monitor| {
+        let p = monitor.position();
+        let s = monitor.size();
+        center_x >= p.x && center_x < p.x + s.width as i32
+            && center_y >= p.y && center_y < p.y + s.height as i32
+    }).or(fallback_monitor).ok_or("Tray monitor unavailable")?;
+    let scale = monitor.scale_factor();
+    let work = monitor.work_area();
+    let margin = (8.0 * scale).ceil() as i32;
+    let width = (300.0 * scale).ceil() as i32;
+    let width = width.min(work.size.width as i32 - margin * 2).max(1);
+    let desired_height = (height_logical * scale).ceil() as i32;
+    let height = desired_height.min(work.size.height as i32 - margin * 2).max(1);
+    let left = work.position.x;
+    let top = work.position.y;
+    let right = left + work.size.width as i32;
+    let bottom = top + work.size.height as i32;
+    let (x, y) = if icon_x + icon_width <= left {
+        (left + margin, icon_y + icon_height - height)
+    } else if icon_x >= right {
+        (right - width - margin, icon_y + icon_height - height)
+    } else if icon_y + icon_height <= top {
+        (icon_x + icon_width - width, top + margin)
+    } else {
+        (icon_x + icon_width - width, icon_y - height - margin)
+    };
+    let x = x.clamp(left, (right - width).max(left));
+    let y = y.clamp(top, (bottom - height).max(top));
+    window.set_size(Size::Physical(PhysicalSize::new(width as u32, height as u32))).map_err(|e| e.to_string())?;
+    window.set_position(Position::Physical(PhysicalPosition::new(x, y))).map_err(|e| e.to_string())?;
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    Ok(height as f64 / scale)
 }
 
 pub fn toggle_main_window(app: &AppHandle) {

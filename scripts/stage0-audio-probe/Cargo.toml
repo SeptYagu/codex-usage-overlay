@@ -1,0 +1,10 @@
+[package]
+name = "codex-v110-stage0-audio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Decode and real-device playback verification for the chosen v1.1.0 stack.
+rodio = { version = "=0.22.2", default-features = false, features = [
+    "playback", "symphonia-aac", "symphonia-mp3", "symphonia-isomp4", "symphonia-wav", "symphonia-pcm"
+] }

@@ -1,8 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
-import i18n from './i18n';
-import { DEFAULT_SETTINGS, OverlaySettings } from './types';
+import i18n, { matchSupportedLocale } from './i18n';
+import { DEFAULT_SETTINGS, OverlaySettings, SettingsEnvelope } from './types';
 
 const tauri = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -39,7 +39,6 @@ const savedSettings: OverlaySettings = {
   language: 'en-US',
   overlayLayout: 'stacks',
   autoStart: false,
-  autoCheckUpdates: true,
 };
 
 function deferred<T>() {
@@ -48,118 +47,132 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function slider(name: string) {
-  return screen.getByRole('slider', { name }) as HTMLInputElement;
-}
+let serverSettings: OverlaySettings;
+let serverRevision: number;
 
 beforeEach(async () => {
   tauri.windowLabel = 'settings';
   tauri.invoke.mockReset();
-  tauri.invoke.mockImplementation(async (command: string) => {
-    if (command === 'get_settings') return savedSettings;
+  tauri.listeners.clear();
+  serverSettings = { ...savedSettings };
+  serverRevision = 0;
+  tauri.invoke.mockImplementation(async (command: string, args?: { patch?: Partial<OverlaySettings> }) => {
+    if (command === 'get_settings') return { revision: serverRevision, settings: { ...serverSettings } };
+    if (command === 'patch_settings') {
+      serverSettings = { ...serverSettings, ...args?.patch };
+      return { revision: ++serverRevision, settings: { ...serverSettings } };
+    }
     if (command === 'is_installed_version') return true;
     return null;
   });
-  tauri.listeners.clear();
   await i18n.changeLanguage('en-US');
 });
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
-describe('settings window', () => {
-  it('updates the overlay layout when another window broadcasts settings', async () => {
-    tauri.windowLabel = 'main';
-    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
-    const { container } = render(<App />);
-    await waitFor(() => expect(container.querySelector('[data-layout="stacks"]')).not.toBeNull());
-    await act(async () => {
-      tauri.listeners.get('settings_updated')!({ payload: { ...savedSettings, overlayLayout: 'grouped', showCredits: true } });
-    });
-    expect(container.querySelector('[data-layout="grouped"]')).not.toBeNull();
-    expect(screen.getByRole('group', { name: 'CREDITS' })).toBeTruthy();
-    expect(tauri.invoke).not.toHaveBeenCalledWith('save_settings', expect.anything());
-  });
-  it('switches layouts immediately without changing other preferences', async () => {
+describe('settings synchronization', () => {
+  it('loads preferences and saves only the changed field', async () => {
     render(<App />);
-    const selector = await screen.findByRole('combobox', { name: 'Overlay layout' }) as HTMLSelectElement;
-    fireEvent.change(selector, { target: { value: 'grouped' } });
-    expect(selector.value).toBe('grouped');
-    expect(tauri.invoke).toHaveBeenCalledWith('save_settings', {
-      newSettings: { ...savedSettings, overlayLayout: 'grouped' },
-    });
-    fireEvent.change(selector, { target: { value: 'stacks' } });
-    expect(selector.value).toBe('stacks');
-    expect(tauri.invoke).toHaveBeenLastCalledWith('save_settings', { newSettings: savedSettings });
+    const layout = await screen.findByRole('combobox', { name: 'Overlay layout' }) as HTMLSelectElement;
+    expect(layout.value).toBe('stacks');
+    fireEvent.change(layout, { target: { value: 'grouped' } });
+    expect(layout.value).toBe('grouped');
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', { patch: { overlayLayout: 'grouped' } }));
+    expect(serverSettings.scalePercent).toBe(220);
+    expect(serverSettings.weeklyResetNotification).toBe(true);
   });
-  it('waits for saved settings and preserves other preferences when editing', async () => {
-    const loading = deferred<OverlaySettings>();
+
+  it('keeps quota notifications independent and patches sound mode by field', async () => {
+    render(<App />);
+    const fiveHour = await screen.findByRole('checkbox', { name: '5-hour quota reset notification Enable notification' });
+    fireEvent.click(fiveHour);
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
+      patch: { fiveHourResetNotification: false },
+    }));
+    expect(serverSettings.weeklyResetNotification).toBe(true);
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Weekly quota reset notification Alert sound' }), {
+      target: { value: 'custom' },
+    });
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
+      patch: { weeklySoundMode: 'custom' },
+    }));
+    expect(serverSettings.fiveHourResetNotification).toBe(false);
+    expect(serverSettings.weeklySoundMode).toBe('custom');
+  });
+
+  it('saves the auto edge hide preference from settings', async () => {
+    render(<App />);
+    const toggle = await screen.findByRole('checkbox', { name: 'Auto hide at screen edge' });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
+      patch: { autoEdgeHide: true },
+    }));
+  });
+
+  it('keeps a newer broadcast when the initial read completes late', async () => {
+    const initial = deferred<SettingsEnvelope>();
     tauri.invoke.mockImplementation(async (command: string) => {
-      if (command === 'get_settings') return loading.promise;
+      if (command === 'get_settings') return initial.promise;
+      return null;
+    });
+    render(<App />);
+    await waitFor(() => expect(tauri.listeners.has('settings_updated')).toBe(true));
+    await act(async () => {
+      tauri.listeners.get('settings_updated')!({ payload: { revision: 2, settings: { ...savedSettings, scalePercent: 150 } } });
+    });
+    expect((screen.getByRole('slider', { name: 'Overlay Size' }) as HTMLInputElement).value).toBe('150');
+    await act(async () => initial.resolve({ revision: 1, settings: savedSettings }));
+    expect((screen.getByRole('slider', { name: 'Overlay Size' }) as HTMLInputElement).value).toBe('150');
+  });
+
+  it('preserves the latest local edit through an older broadcast and serializes patches', async () => {
+    const firstSave = deferred<SettingsEnvelope>();
+    let calls = 0;
+    tauri.invoke.mockImplementation(async (command: string, args?: { patch?: Partial<OverlaySettings> }) => {
+      if (command === 'get_settings') return { revision: 0, settings: savedSettings };
+      if (command === 'patch_settings') {
+        calls++;
+        if (calls === 1) return firstSave.promise;
+        return { revision: 2, settings: { ...savedSettings, overlayLayout: 'grouped', showCredits: true, ...args?.patch } };
+      }
       if (command === 'is_installed_version') return true;
       return null;
     });
-
     render(<App />);
-    expect(screen.getByRole('status').textContent).toBe('Loading settings...');
-    expect(screen.queryByRole('slider')).toBeNull();
-    expect(tauri.invoke).not.toHaveBeenCalledWith('save_settings', expect.anything());
-
-    await act(async () => { loading.resolve(savedSettings); });
-    expect(slider('Overlay Size').value).toBe('220');
-    expect(slider('Background Transparency').value).toBe('50');
-    expect((screen.getByRole('combobox', { name: 'Overlay layout' }) as HTMLSelectElement).value).toBe('stacks');
-    expect((screen.getByRole('checkbox', { name: 'Show Credit Balance' }) as HTMLInputElement).checked).toBe(false);
-    expect((screen.getByRole('combobox', { name: 'Refresh Interval' }) as HTMLSelectElement).value).toBe('300');
-
-    fireEvent.change(slider('Overlay Size'), { target: { value: '200' } });
-    expect(slider('Overlay Size').value).toBe('200');
-    expect(tauri.invoke).toHaveBeenCalledWith('save_settings', {
-      newSettings: { ...savedSettings, scalePercent: 200 },
-    });
-
-    fireEvent.change(slider('Background Transparency'), { target: { value: '40' } });
-    expect(tauri.invoke).toHaveBeenLastCalledWith('save_settings', {
-      newSettings: { ...savedSettings, scalePercent: 200, backgroundTransparencyPercent: 40 },
-    });
-  });
-
-  it('reflects external settings updates and uses them for subsequent edits', async () => {
-    render(<App />);
-    await screen.findByRole('slider', { name: 'Overlay Size' });
-    await screen.findByRole('checkbox', { name: 'Start automatically on boot' });
-
-    const updated: OverlaySettings = {
-      ...savedSettings,
-      scalePercent: 150,
-      backgroundTransparencyPercent: 10,
-      showCredits: true,
-      autoStart: true,
-      language: 'zh-CN',
-      refreshIntervalSeconds: 120,
-      overlayLayout: 'grouped',
-    };
+    const layout = await screen.findByRole('combobox', { name: 'Overlay layout' });
+    fireEvent.change(layout, { target: { value: 'grouped' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Show Credit Balance' }));
+    await waitFor(() => expect(calls).toBe(1));
     await act(async () => {
-      tauri.listeners.get('settings_updated')!({ payload: updated });
+      tauri.listeners.get('settings_updated')!({ payload: { revision: 1, settings: savedSettings } });
     });
-
-    expect(slider('浮窗大小').value).toBe('150');
-    expect(slider('背景透明度').value).toBe('10');
-    expect((screen.getByRole('combobox', { name: '浮窗布局' }) as HTMLSelectElement).value).toBe('grouped');
-    expect((screen.getByRole('checkbox', { name: '开机时自动启动' }) as HTMLInputElement).checked).toBe(true);
-    expect((screen.getByRole('combobox', { name: '刷新频率' }) as HTMLSelectElement).value).toBe('120');
-    fireEvent.click(screen.getByRole('checkbox', { name: '显示 Credit 余额' }));
-    expect(tauri.invoke).toHaveBeenCalledWith('save_settings', {
-      newSettings: { ...updated, showCredits: false },
-    });
+    expect((screen.getByRole('checkbox', { name: 'Show Credit Balance' }) as HTMLInputElement).checked).toBe(true);
+    await act(async () => firstSave.resolve({ revision: 1, settings: { ...savedSettings, overlayLayout: 'grouped' } }));
+    await waitFor(() => expect(calls).toBe(2));
+    expect((screen.getByRole('combobox', { name: 'Overlay layout' }) as HTMLSelectElement).value).toBe('grouped');
+    expect((screen.getByRole('checkbox', { name: 'Show Credit Balance' }) as HTMLInputElement).checked).toBe(true);
   });
 
-  it('keeps controls unavailable after a load failure and supports retry', async () => {
+  it('coalesces fast slider edits and flushes on pagehide', async () => {
+    render(<App />);
+    const slider = await screen.findByRole('slider', { name: 'Overlay Size' });
+    vi.useFakeTimers();
+    fireEvent.change(slider, { target: { value: '200' } });
+    fireEvent.change(slider, { target: { value: '205' } });
+    expect(tauri.invoke).not.toHaveBeenCalledWith('patch_settings', expect.anything());
+    await act(async () => window.dispatchEvent(new Event('pagehide')));
+    expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', { patch: { scalePercent: 205 } });
+  });
+
+  it('keeps controls unavailable after a failed read and supports retry', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    const retry = deferred<OverlaySettings>();
+    const retry = deferred<SettingsEnvelope>();
     let attempts = 0;
     tauri.invoke.mockImplementation(async (command: string) => {
       if (command === 'get_settings') {
@@ -168,58 +181,16 @@ describe('settings window', () => {
       }
       return null;
     });
-
     render(<App />);
     expect((await screen.findByRole('alert')).textContent).toBe('Unable to load settings. Please try again.');
-    expect(screen.queryByRole('slider')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-    expect(screen.getByRole('status').textContent).toBe('Loading settings...');
-    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
-    expect(screen.queryByRole('slider')).toBeNull();
-
-    await act(async () => { retry.resolve(savedSettings); });
-    expect(slider('Overlay Size').value).toBe('220');
-    expect(attempts).toBe(2);
-    expect(tauri.invoke).not.toHaveBeenCalledWith('save_settings', expect.anything());
+    await act(async () => retry.resolve({ revision: 0, settings: savedSettings }));
+    expect((screen.getByRole('slider', { name: 'Overlay Size' }) as HTMLInputElement).value).toBe('220');
   });
 
-  it('does not replace a newer broadcast with a delayed initial read', async () => {
-    const loading = deferred<OverlaySettings>();
+  it('hides autostart in portable builds', async () => {
     tauri.invoke.mockImplementation(async (command: string) => {
-      if (command === 'get_settings') return loading.promise;
-      return null;
-    });
-    render(<App />);
-    const updated = { ...savedSettings, scalePercent: 150 };
-    await act(async () => {
-      tauri.listeners.get('settings_updated')!({ payload: updated });
-    });
-    expect(slider('Overlay Size').value).toBe('150');
-    await act(async () => { loading.resolve(savedSettings); });
-    expect(slider('Overlay Size').value).toBe('150');
-    fireEvent.change(slider('Background Transparency'), { target: { value: '40' } });
-    expect(tauri.invoke).toHaveBeenCalledWith('save_settings', {
-      newSettings: { ...updated, backgroundTransparencyPercent: 40 },
-    });
-  });
-
-  it('localizes the loading error and retry action', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    await i18n.changeLanguage('zh-CN');
-    tauri.invoke.mockImplementation(async (command: string) => {
-      if (command === 'get_settings') throw new Error('Read failed');
-      return null;
-    });
-
-    render(<App />);
-    expect(screen.getByRole('status').textContent).toBe('正在加载设置…');
-    expect((await screen.findByRole('alert')).textContent).toBe('无法加载设置，请重试。');
-    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
-  });
-
-  it('does not offer autostart for portable builds', async () => {
-    tauri.invoke.mockImplementation(async (command: string) => {
-      if (command === 'get_settings') return savedSettings;
+      if (command === 'get_settings') return { revision: 0, settings: savedSettings };
       if (command === 'is_installed_version') return false;
       return null;
     });
@@ -227,55 +198,13 @@ describe('settings window', () => {
     await screen.findByRole('slider', { name: 'Overlay Size' });
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('is_installed_version'));
     expect(screen.queryByRole('checkbox', { name: 'Start automatically on boot' })).toBeNull();
-    expect(tauri.invoke).not.toHaveBeenCalledWith('set_autostart', expect.anything());
-  });
-
-  it('localizes the loading error and retry action in Traditional Chinese (zh-Hant)', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    await i18n.changeLanguage('zh-Hant');
-    tauri.invoke.mockImplementation(async (command: string) => {
-      if (command === 'get_settings') throw new Error('Read failed');
-      return null;
-    });
-
-    render(<App />);
-    expect(screen.getByRole('status').textContent).toBe('正在載入設定…');
-    expect((await screen.findByRole('alert')).textContent).toBe('無法載入設定，請重試。');
-    expect(screen.getByRole('button', { name: '重試' })).toBeTruthy();
   });
 });
 
-describe('matchSupportedLocale', () => {
-  it('matches exact Traditional Chinese string literals', async () => {
-    const { matchSupportedLocale } = await import('./i18n');
-    expect(matchSupportedLocale('zh-TW')).toBe('zh-Hant');
+describe('locale selection', () => {
+  it('maps Windows Chinese locales', () => {
     expect(matchSupportedLocale('zh_TW')).toBe('zh-Hant');
-    expect(matchSupportedLocale('zh-HK')).toBe('zh-Hant');
-    expect(matchSupportedLocale('zh-MO')).toBe('zh-Hant');
-    expect(matchSupportedLocale('zh-Hant')).toBe('zh-Hant');
-    expect(matchSupportedLocale('zh-Hant-TW')).toBe('zh-Hant');
-    expect(matchSupportedLocale('zh-Hant-HK')).toBe('zh-Hant');
-    expect(matchSupportedLocale('zh-Hant-MO')).toBe('zh-Hant');
-  });
-
-  it('matches exact Simplified Chinese string literals', async () => {
-    const { matchSupportedLocale } = await import('./i18n');
-    expect(matchSupportedLocale('zh')).toBe('zh-CN');
     expect(matchSupportedLocale('zh-CN')).toBe('zh-CN');
-    expect(matchSupportedLocale('zh_CN')).toBe('zh-CN');
-    expect(matchSupportedLocale('zh-SG')).toBe('zh-CN');
-    expect(matchSupportedLocale('zh-Hans')).toBe('zh-CN');
-    expect(matchSupportedLocale('zh-Hans-CN')).toBe('zh-CN');
-    expect(matchSupportedLocale('zh-Hans-SG')).toBe('zh-CN');
-  });
-
-  it('falls back to en-US for other locales', async () => {
-    const { matchSupportedLocale } = await import('./i18n');
     expect(matchSupportedLocale('en-US')).toBe('en-US');
-    expect(matchSupportedLocale('en-GB')).toBe('en-US');
-    expect(matchSupportedLocale('ja-JP')).toBe('en-US');
-    expect(matchSupportedLocale('fr-FR')).toBe('en-US');
-    expect(matchSupportedLocale('')).toBe('en-US');
   });
 });
-

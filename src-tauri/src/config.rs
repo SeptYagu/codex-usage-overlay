@@ -11,6 +11,14 @@ pub enum OverlayLayout {
     Grouped,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SoundMode {
+    #[default]
+    Windows,
+    Custom,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlaySettings {
@@ -30,6 +38,20 @@ pub struct OverlaySettings {
     pub auto_start: bool,
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
+    #[serde(default = "default_true")]
+    pub five_hour_reset_notification: bool,
+    #[serde(default = "default_true")]
+    pub weekly_reset_notification: bool,
+    #[serde(default)]
+    pub five_hour_sound_mode: SoundMode,
+    #[serde(default)]
+    pub weekly_sound_mode: SoundMode,
+    #[serde(default)]
+    pub five_hour_sound_path: Option<String>,
+    #[serde(default)]
+    pub weekly_sound_path: Option<String>,
+    #[serde(default)]
+    pub auto_edge_hide: bool,
 }
 
 fn default_scale() -> u32 { 175 }
@@ -49,6 +71,13 @@ impl Default for OverlaySettings {
             language: default_language(),
             auto_start: default_true(),
             auto_check_updates: default_true(),
+            five_hour_reset_notification: default_true(),
+            weekly_reset_notification: default_true(),
+            five_hour_sound_mode: SoundMode::default(),
+            weekly_sound_mode: SoundMode::default(),
+            five_hour_sound_path: None,
+            weekly_sound_path: None,
+            auto_edge_hide: false,
         }
     }
 }
@@ -97,14 +126,12 @@ impl ConfigManager {
         OverlaySettings::default()
     }
 
-    pub fn save_settings(&self, settings: &OverlaySettings) {
+    pub fn save_settings_checked(&self, settings: &OverlaySettings) -> Result<(), String> {
         let path = self.settings_path();
         let tmp = path.with_extension("json.tmp");
-        if let Ok(json) = serde_json::to_string_pretty(settings) {
-            if fs::write(&tmp, json).is_ok() {
-                let _ = fs::rename(tmp, path);
-            }
-        }
+        let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+        fs::write(&tmp, json).map_err(|e| e.to_string())?;
+        fs::rename(&tmp, &path).map_err(|e| e.to_string())
     }
 
     pub fn load_position(&self) -> Option<WindowPosition> {
@@ -185,6 +212,13 @@ mod tests {
         assert_eq!(settings.overlay_layout, OverlayLayout::Grouped);
         assert_preferences(&settings);
         assert_eq!(OverlaySettings::default().overlay_layout, OverlayLayout::Grouped);
+        assert!(settings.five_hour_reset_notification);
+        assert!(settings.weekly_reset_notification);
+        assert_eq!(settings.five_hour_sound_mode, SoundMode::Windows);
+        assert_eq!(settings.weekly_sound_mode, SoundMode::Windows);
+        assert_eq!(settings.five_hour_sound_path, None);
+        assert_eq!(settings.weekly_sound_path, None);
+        assert!(!settings.auto_edge_hide);
     }
 
     #[test]
@@ -196,7 +230,10 @@ mod tests {
             let settings: OverlaySettings = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(settings.overlay_layout, layout);
             assert_preferences(&settings);
-            assert_eq!(serde_json::to_value(&settings).unwrap(), value);
+            let serialized = serde_json::to_value(&settings).unwrap();
+            for key in value.as_object().unwrap().keys() {
+                assert_eq!(serialized.get(key), value.get(key));
+            }
             let restored: OverlaySettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
             assert_eq!(restored.overlay_layout, layout);
             assert_preferences(&restored);
@@ -210,6 +247,23 @@ mod tests {
         let settings: OverlaySettings = serde_json::from_value(value).unwrap();
         assert_eq!(settings.overlay_layout, OverlayLayout::Grouped);
         assert_preferences(&settings);
+    }
+
+    #[test]
+    fn independent_reset_settings_round_trip() {
+        let mut settings = OverlaySettings::default();
+        settings.five_hour_reset_notification = false;
+        settings.weekly_sound_mode = SoundMode::Custom;
+        settings.weekly_sound_path = Some("C:\\sound.m4a".into());
+        settings.auto_edge_hide = true;
+        let restored: OverlaySettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(!restored.five_hour_reset_notification);
+        assert!(restored.weekly_reset_notification);
+        assert_eq!(restored.five_hour_sound_mode, SoundMode::Windows);
+        assert_eq!(restored.weekly_sound_mode, SoundMode::Custom);
+        assert_eq!(restored.five_hour_sound_path, None);
+        assert_eq!(restored.weekly_sound_path, Some("C:\\sound.m4a".into()));
+        assert!(restored.auto_edge_hide);
     }
 }
 
