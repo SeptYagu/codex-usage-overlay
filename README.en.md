@@ -21,12 +21,13 @@ Install a setup package, or extract the portable ZIP and run `CodexUsageOverlay.
 - **Grouped capsule** is the default layout: readings with reset times underneath and inline credits. **Metric stacks** puts labels above values and captions below. Switch layouts in **Settings**.
 - Both layouts follow the Windows light/dark theme. Settings provide scale (100%–250%), background transparency (0%–80%), credits visibility, refresh interval (30/60/120/300 seconds), and English, Simplified Chinese, or Traditional Chinese.
 - Settings apply immediately and synchronize between windows. Existing settings files retain their preferences and default to Grouped capsule.
-- Drag with the left mouse button. Right-click the overlay for Refresh, Settings, Hide, and Exit. A single left click on the tray icon shows or hides the overlay.
+- Each quota can send its own reset notification, once per confirmed new cycle. Use the Windows default sound or choose and preview an MP3, AAC, M4A, or WAV file; custom playback is capped at 10 seconds and the app stores only the original file path.
+- Drag with the left mouse button. Enable **Auto hide at screen edge**, then drag the overlay to a work-area edge to collapse it into two quota bars; hover to expand it. Right-click for Refresh, Settings, Hide, and Exit. Click the tray icon to show or hide the overlay.
 - Autostart controls are available only for installed copies. Launching a portable or development copy leaves the installed copy's startup entry untouched.
 - Use the tray menu to change languages, check for and install updates. Automatic update checks can be disabled in Settings. Updates are signature-verified; the portable build replaces its executable after it exits, then restarts.
 - Codex executable discovery follows the existing override/PATH/CLI/Store order. If the executable moves or disappears, later polls can rediscover it. Set `CODEX_CLI_PATH` for a custom location.
 
-Preferences, window position, and usage status are stored under `%LOCALAPPDATA%\CodexUsageOverlay\` in `settings.json`, `window-position.json`, and `usage-status.json`.
+Preferences, expanded position, dock state, and usage status are stored under `%LOCALAPPDATA%\CodexUsageOverlay\` in `settings.json`, `window-position.json`, `dock-state.json`, and `usage-status.json`. Custom sound files stay at the location you selected.
 
 ## Development
 
@@ -45,10 +46,11 @@ Build and package a release:
 ```powershell
 npm run tauri -- build --ci --bundles nsis,msi
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin codex-usage-updater
-.\scripts\Build-TauriRelease.ps1 -Tag v1.0.1
+.\scripts\Build-TauriRelease.ps1 -Tag v1.1.0-preview
 ```
 
 Set the Tauri updater signing key in the build environment before packaging a release. The tag workflow publishes NSIS, MSI, portable ZIP, signatures, and `latest.json`; the portable updater helper is included in the ZIP.
+See the [preview notes](docs/v1.1.0-preview-notes.md) for automated results and Windows checks still to be completed.
 
 ## License
 

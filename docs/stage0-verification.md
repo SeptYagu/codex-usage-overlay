@@ -1,6 +1,6 @@
 # v1.1.0 阶段 0 验证记录
 
-状态：**进行中，技术闸门尚未通过**。记录日期：2026-09-27，Windows 10 家庭版本机。验证依据：[多阶段方案](v1.1.0-multistage-plan.md)和[技术规格](v1.1.0-technical-spec.md)。本文件只记录实际观察；未测项目不视为通过。
+状态：**进行中，技术闸门尚未通过**。记录日期：2026-09-28，Windows 10 家庭版本机。验证依据：[多阶段方案](v1.1.0-multistage-plan.md)和[技术规格](v1.1.0-technical-spec.md)。本文件只记录实际观察；未测项目不视为通过。
 
 ## 交互与实现约定
 
@@ -37,6 +37,6 @@ Rust 侧状态机区分用户拖动锚点与程序移动。源码核对确认 Ta
 & "$env:USERPROFILE\.cargo\bin\cargo.exe" run --manifest-path scripts\stage0-audio-probe\Cargo.toml --target-dir src-tauri\target\stage0-audio-probe\target --release -- scripts\stage0-audio-probe\samples --playback
 ```
 
-探针使用真实默认输出设备播放了四种格式，并验证了长 WAV 的十秒截断；尚未实现阶段 3 的停止试听、播放队列与错误恢复。阶段 0 完成前，贴边与自定义音效不得作为已验证功能发布。
+探针使用真实默认输出设备播放了四种生成样本，并验证了长 WAV 的十秒截断。阶段 3 已实现文件预检、单线程通知/试听队列、试听停止、设备错误事件与退出清理；队列顺序和格式筛选有 Rust 单测，但实际设置页试听中止、设备恢复和真实来源文件仍需人工体验验证。阶段 4 已实现四边物理几何和原生拖动结束钩子，阶段 5 已实现双条指示与悬停状态；桌面窗口、多显示器和系统通知实测仍未完成，阶段 0 因此仍未通过。
 
-本机曾间歇性拒绝运行新生成的 Rust 可执行文件（`os error 5`）。2026-09-27 重试后，`cargo test --locked` 成功运行全部 17 个 Rust 单元测试；播放探针复用已可运行的 Cargo target 目录后也成功执行。尚未确认最初的执行限制是安全软件、文件同步还是其他本机策略所致。
+本机曾间歇性拒绝运行新生成的 Rust 可执行文件（`os error 5`）。2026-09-27 重试后，`cargo test --locked` 成功运行全部 17 个 Rust 单元测试；播放探针复用已可运行的 Cargo target 目录后也成功执行。2026-09-28 的 v1.1.0 版本已通过 `cargo test --locked`（30 项）和 `cargo check --locked`。尚未确认最初的执行限制是安全软件、文件同步还是其他本机策略所致。

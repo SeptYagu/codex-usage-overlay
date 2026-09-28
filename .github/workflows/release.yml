@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to build and publish (e.g. v1.0.1)'
+        description: 'Tag to build and publish (e.g. v1.1.0-preview)'
         required: true
 
 permissions:
