@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "codex-usage-overlay"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
