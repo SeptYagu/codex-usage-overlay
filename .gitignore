@@ -29,3 +29,4 @@ scripts/stage0-audio-probe/Cargo.lock
 *.sw?
 .DS_Store
 Thumbs.db
+.workbuddy/
