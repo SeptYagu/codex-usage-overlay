@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="46" height="100" viewBox="0 0 46 100" role="img" aria-labelledby="title description">
+  <title id="title">深色主题左右贴边小浮窗样张</title>
+  <desc id="description">与完整悬浮窗同风格的深色圆角矩形，左侧五小时额度为红色低余量，右侧周额度为绿色高余量。</desc>
+  <rect x="0.5" y="0.5" width="45" height="99" rx="14" fill="#1b1d24" fill-opacity="0.77" stroke="#454b58"/>
+  <rect x="11" y="14" width="9" height="72" rx="4.5" fill="#4c5362" fill-opacity="0.65"/>
+  <rect x="26" y="14" width="9" height="72" rx="4.5" fill="#4c5362" fill-opacity="0.65"/>
+  <path d="M11 76.82A4.5 4.5 0 0 1 20 76.82V81.5A4.5 4.5 0 0 1 15.5 86A4.5 4.5 0 0 1 11 81.5Z" fill="#ff7373"/>
+  <path d="M26 35.28A4.5 4.5 0 0 1 35 35.28V81.5A4.5 4.5 0 0 1 30.5 86A4.5 4.5 0 0 1 26 81.5Z" fill="#75d98e"/>
+</svg>

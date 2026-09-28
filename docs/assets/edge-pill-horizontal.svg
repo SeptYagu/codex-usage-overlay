@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="46" viewBox="0 0 100 46" role="img" aria-labelledby="title description">
+  <title id="title">浅色主题上下贴边小浮窗样张</title>
+  <desc id="description">浅色圆角小浮窗顺时针旋转九十度，显示为横向贴边指示条。</desc>
+  <g transform="translate(100 0) rotate(90)">
+    <rect x="0.5" y="0.5" width="45" height="99" rx="14" fill="#f1f3f7" fill-opacity="0.77" stroke="#d7dde6"/>
+    <rect x="11" y="14" width="9" height="72" rx="4.5" fill="#cbd2dd" fill-opacity="0.65"/>
+    <rect x="26" y="14" width="9" height="72" rx="4.5" fill="#cbd2dd" fill-opacity="0.65"/>
+    <path d="M11 76.82A4.5 4.5 0 0 1 20 76.82V81.5A4.5 4.5 0 0 1 15.5 86A4.5 4.5 0 0 1 11 81.5Z" fill="#bf3030"/>
+    <path d="M26 35.28A4.5 4.5 0 0 1 35 35.28V81.5A4.5 4.5 0 0 1 30.5 86A4.5 4.5 0 0 1 26 81.5Z" fill="#16703a"/>
+  </g>
+</svg>
