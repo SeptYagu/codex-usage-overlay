@@ -53,21 +53,25 @@ struct Runtime {
     hover: Option<Hover>,
 }
 
-/// Geometry captured when the pointer entered the collapsed pill, valid for the
-/// expanded session it opens.
+/// Session state captured when the pointer entered the collapsed pill, valid
+/// for the whole expanded session it opens.
 ///
-/// `pill` is the hit area the cursor can be resting on: the expanded capsule is
-/// always shorter than the pill along the free axis, so every reposition of the
-/// expanded window has to keep the cursor — not the whole pill — inside, and it
-/// needs the pill to tell whether the cursor is still on the hit area at all.
+/// `anchor_center` is the centre the expanded session is anchored to.
+///
+/// `entered_cursor` is the cursor point recorded at entry (`mouse_enter`) and is
+/// the session's *only* cursor input: every reposition of the expanded window
+/// reuses it, so the placement is a pure function of the session and cannot
+/// move the window — or drop the pointer — as the pointer travels across the
+/// capsule (spec §3.4). It is `None` when the system reported no pointer
+/// position at entry, in which case placement falls back to `anchor_center`.
 ///
 /// `resize_deadline` is the acquire of the transition guard: background
 /// repositioning stands down until the frontend reports the authoritative
 /// capsule size, or until the lease expires (spec §3.4).
 #[derive(Debug, Clone, Copy)]
 struct Hover {
-    pill: PhysicalRect,
     anchor_center: (i32, i32),
+    entered_cursor: Option<(i32, i32)>,
     resize_deadline: Option<Instant>,
 }
 
@@ -153,12 +157,14 @@ impl DockManager {
         lock(&self.runtime).anchor_center
     }
 
-    /// Records the pill the pointer entered and the centre its expanded
-    /// session is anchored to, and arms the write-back guard (spec §3.4).
-    fn begin_hover(&self, pill: PhysicalRect, anchor_center: (i32, i32)) {
+    /// Records the centre the expanded session is anchored to and the cursor
+    /// point it entered at, and arms the write-back guard (spec §3.4). Both
+    /// stay frozen for the whole session, so every later reposition of the
+    /// expanded window is session-stable and idempotent.
+    fn begin_hover(&self, anchor_center: (i32, i32), entered_cursor: Option<(i32, i32)>) {
         lock(&self.runtime).hover = Some(Hover {
-            pill,
             anchor_center,
+            entered_cursor,
             resize_deadline: Some(Instant::now() + HOVER_RESIZE_LEASE),
         });
     }
@@ -191,8 +197,8 @@ impl DockManager {
         }
     }
 
-    /// Centre of the expanded session's free axis: the pill centre recorded on
-    /// hover entry, falling back to the runtime anchor.
+    /// Centre of the expanded session's free axis: the centre recorded on hover
+    /// entry, falling back to the runtime anchor.
     fn expanded_anchor_center(&self) -> Option<(i32, i32)> {
         let runtime = lock(&self.runtime);
         match runtime.hover {
@@ -550,18 +556,25 @@ pub fn mouse_enter(app: &AppHandle, state: &Arc<AppState>) {
         return;
     };
     if state.dock.enter_pill() {
-        // Capture the pill rectangle and the centre the expanded session is
-        // anchored to *before* the provisional resize: they anchor the
-        // transition rectangle, the authoritative write-back and every later
-        // reposition of this session (spec §3.4). Resizing first would make
-        // `window_center` report the enlarged window's centre instead.
+        // Capture the centre the expanded session is anchored to *before* the
+        // provisional resize: it anchors the transition rectangle, the
+        // authoritative write-back and every later reposition of this session
+        // (spec §3.4). Resizing first would make `window_center` report the
+        // enlarged window's centre instead.
         let anchor_center = state
             .dock
             .anchor_center()
             .unwrap_or_else(|| window_center(&window));
-        if let Some(pill) = window_rect(&window) {
-            state.dock.begin_hover(pill, anchor_center);
-        }
+        // Record the pointer position once, at the instant the session opens.
+        // Every later reposition of this session reuses this point: reading the
+        // live cursor instead would move the window on each background refresh
+        // and, once the pointer slid off the pill onto the wider capsule, drop
+        // it outside (spec §3.4).
+        let entered_cursor = window
+            .cursor_position()
+            .ok()
+            .map(|cursor| (cursor.x.round() as i32, cursor.y.round() as i32));
+        state.dock.begin_hover(anchor_center, entered_cursor);
         let state_clone = state.clone();
         let app_clone = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -945,13 +958,11 @@ fn place_docked_expanded(window: &WebviewWindow, manager: &DockManager) -> Resul
     )
     .ok_or_else(|| "Monitor work area unavailable".to_string())?;
     // The cursor may rest on the pill's outer bands, which the shorter capsule
-    // cannot all cover; the reference tells whether it is still on the hit area
-    // (a pointer that already left must not drag the window along with it).
-    let reference = manager
-        .hover()
-        .map(|hover| hover.pill)
-        .or_else(|| window_rect(window));
-    let cursor = reference.and_then(|reference| cursor_within(window, reference));
+    // cannot all cover, so the rectangle has to be nudged to keep it inside.
+    // The reference is the point recorded when the pointer entered the pill —
+    // fixed for the whole session — so the nudge is constant and the window
+    // never chases the live pointer (spec §3.4).
+    let cursor = manager.hover().and_then(|hover| hover.entered_cursor);
     let rect = docked_expanded_final_rect(edge, work, size, anchor_center, cursor);
     window
         .set_position(Position::Physical(PhysicalPosition::new(rect.x, rect.y)))
@@ -961,8 +972,8 @@ fn place_docked_expanded(window: &WebviewWindow, manager: &DockManager) -> Resul
 /// Geometry of the expanded rectangle once the capsule size is authoritative.
 /// Along the docked axis the rectangle hugs the work-area edge the pill is
 /// pinned to. Along the free axis it is centred on `anchor_center` (the pill's
-/// centre) and then nudged to keep `cursor` inside, before being clamped into
-/// the work area.
+/// centre) and then nudged to keep `cursor` — the session's fixed entry point —
+/// inside, before being clamped into the work area.
 ///
 /// Centring alone is not enough: the capsule is always shorter than the pill
 /// along the free axis (a left/right pill is `PILL_HEIGHT_LOGICAL` = 100
@@ -1032,30 +1043,6 @@ fn cover_cursor(coord: i64, cursor: Option<i64>, size: i64, min: i64, max: i64) 
         None => coord,
     };
     coord.clamp(min, max)
-}
-
-fn window_rect(window: &WebviewWindow) -> Option<PhysicalRect> {
-    let position = window.outer_position().ok()?;
-    let size = window.outer_size().ok()?;
-    Some(PhysicalRect {
-        x: position.x,
-        y: position.y,
-        width: size.width,
-        height: size.height,
-    })
-}
-
-/// The cursor position while it still lies inside `reference` (the pill during
-/// a hover session, the window itself otherwise), else `None`.
-fn cursor_within(window: &WebviewWindow, reference: PhysicalRect) -> Option<(i32, i32)> {
-    let cursor = window.cursor_position().ok()?;
-    let left = reference.x as f64;
-    let top = reference.y as f64;
-    let inside = cursor.x >= left
-        && cursor.y >= top
-        && cursor.x < left + reference.width as f64
-        && cursor.y < top + reference.height as f64;
-    inside.then(|| (cursor.x.round() as i32, cursor.y.round() as i32))
 }
 
 fn window_center(window: &WebviewWindow) -> (i32, i32) {
@@ -1510,29 +1497,25 @@ mod tests {
     #[test]
     fn hover_guard_stands_down_until_the_write_back_or_the_lease_expires() {
         let manager = manager_with(DockState::Docked(Edge::Right), true);
-        let pill = PhysicalRect {
-            x: 2415,
-            y: 352,
-            width: 141,
-            height: 306,
-        };
+        let entered_cursor = (2435, 657);
         assert!(!manager.is_awaiting_resize());
         assert_eq!(manager.expanded_anchor_center(), None);
 
-        manager.begin_hover(pill, (2124, 505));
+        manager.begin_hover((2124, 505), Some(entered_cursor));
         assert!(manager.is_awaiting_resize());
-        assert_eq!(manager.hover().map(|hover| hover.pill), Some(pill));
+        assert_eq!(manager.hover().and_then(|hover| hover.entered_cursor), Some(entered_cursor));
         assert_eq!(manager.expanded_anchor_center(), Some((2124, 505)));
 
-        // The authoritative write-back releases the guard but keeps the pill,
-        // so later repositions of the same session stay centred on it.
+        // The authoritative write-back releases the guard but keeps the session
+        // anchor and entry cursor, so later repositions of the same session stay
+        // session-stable.
         manager.finish_hover_resize();
         assert!(!manager.is_awaiting_resize());
-        assert_eq!(manager.hover().map(|hover| hover.pill), Some(pill));
+        assert_eq!(manager.hover().and_then(|hover| hover.entered_cursor), Some(entered_cursor));
         assert_eq!(manager.expanded_anchor_center(), Some((2124, 505)));
 
         // A lost `dock_window_resized` cannot latch the guard on.
-        manager.begin_hover(pill, (2124, 505));
+        manager.begin_hover((2124, 505), Some(entered_cursor));
         let hover = manager.hover().unwrap();
         lock(&manager.runtime).hover = Some(Hover {
             resize_deadline: Some(Instant::now() - Duration::from_millis(1)),
@@ -1544,15 +1527,7 @@ mod tests {
     #[test]
     fn collapse_and_a_failed_expansion_drop_the_hover_session() {
         let manager = manager_with(DockState::Docked(Edge::Right), true);
-        manager.begin_hover(
-            PhysicalRect {
-                x: 2415,
-                y: 352,
-                width: 141,
-                height: 306,
-            },
-            (2124, 505),
-        );
+        manager.begin_hover((2124, 505), Some((2435, 657)));
         assert!(manager.is_awaiting_resize());
         let timer = manager.leave_window().unwrap();
         assert!(manager.collapse_if_current(timer).is_some());
@@ -1561,20 +1536,82 @@ mod tests {
 
         let manager = manager_with(DockState::Docked(Edge::Left), false);
         assert!(manager.enter_pill());
-        manager.begin_hover(
-            PhysicalRect {
-                x: 4,
-                y: 100,
-                width: 141,
-                height: 306,
-            },
-            (74, 253),
-        );
+        manager.begin_hover((74, 253), Some((74, 253)));
         assert!(manager.is_awaiting_resize());
         manager.revert_expansion();
         assert!(!manager.info().expanded);
         assert!(!manager.is_awaiting_resize());
         assert!(manager.hover().is_none());
+    }
+
+    /// R4-1: an expanded hover session is session-stable. `place_docked_expanded`
+    /// takes its cursor input from the point recorded when the pointer entered
+    /// the pill, never from the live pointer, so every reposition of a session —
+    /// the authoritative size write-back and each background usage refresh
+    /// alike — computes the identical rectangle.
+    ///
+    /// The pre-fix code re-read the live cursor and clamped only while the
+    /// pointer still rested on the 141 physical px-wide pill hit area. The
+    /// capsule is 871 px wide, so sliding left inside it left that hit area, the
+    /// clamp was dropped, and the next refresh jumped the window by up to 96
+    /// physical px — enough to drop a pointer that was inside the window a
+    /// moment earlier.
+    #[test]
+    fn docked_expanded_placement_is_session_stable_and_idempotent() {
+        let wa = physical_work_area();
+        let anchor_center = (2124, 505);
+        let pill = pill_on(Edge::Right, anchor_center);
+        // Right-edge pill: 141 x 306 physical px, far narrower than the capsule.
+        assert_eq!((pill.width, pill.height), (141, 306));
+
+        // Mirrors `place_docked_expanded`: the cursor input is the session's
+        // recorded entry point, read back from the manager; the live pointer is
+        // deliberately not an input.
+        let place = |manager: &DockManager, _live: (i32, i32)| {
+            let anchor = manager.expanded_anchor_center().unwrap();
+            let cursor = manager.hover().and_then(|hover| hover.entered_cursor);
+            docked_expanded_final_rect(Edge::Right, wa, capsule(), anchor, cursor)
+        };
+
+        // Enter on the pill's bottom band — the R4-1 counterexample — then slide
+        // left within the capsule, off the pill hit area (x < 2415) but still
+        // inside the window. Every reposition must yield the same rectangle and
+        // keep covering the live pointer.
+        let manager = manager_with(DockState::Docked(Edge::Right), true);
+        let entered = (2435, 657);
+        manager.begin_hover(anchor_center, Some(entered));
+        // The write-back releases the guard; the session inputs stay frozen.
+        manager.finish_hover_resize();
+        let placed = place(&manager, entered);
+        assert!(contains_point(placed, entered.0, entered.1));
+        for live in [(2435, 657), (2415, 657), (2375, 657), (2200, 640), (1900, 500)] {
+            let again = place(&manager, live);
+            assert_eq!(again, placed, "session must not move while the pointer is at {live:?}");
+            assert!(
+                contains_point(again, live.0, live.1),
+                "session rect {again:?} must keep covering the live pointer {live:?}"
+            );
+        }
+
+        // The same holds for an entry on the pill's top band.
+        let manager = manager_with(DockState::Docked(Edge::Right), true);
+        let entered = (2435, 352);
+        manager.begin_hover(anchor_center, Some(entered));
+        manager.finish_hover_resize();
+        let placed = place(&manager, entered);
+        for live in [(2435, 352), (2375, 352), (1900, 360)] {
+            let again = place(&manager, live);
+            assert_eq!(again, placed, "session must not move while the pointer is at {live:?}");
+            assert!(contains_point(again, live.0, live.1));
+        }
+
+        // Regression guard for the exact R4-1 failure: once the pointer left the
+        // pill hit area but was still inside the window, the pre-fix placement
+        // fell back to the anchor-centred rectangle and dropped it.
+        let pre_fix = docked_expanded_final_rect(Edge::Right, wa, capsule(), anchor_center, None);
+        assert_ne!(pre_fix, place(&manager, (2375, 352)));
+        assert!(!contains_point(pre_fix, 2375, 657));
+        assert!(!contains_point(pre_fix, 2375, 352));
     }
 
     fn manager_with(state: DockState, expanded: bool) -> DockManager {
