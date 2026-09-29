@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTranslation } from 'react-i18next';
 import { OverlaySettings } from '../types';
+import { APP_VERSION } from '../version';
 
 interface UpdateInfo {
   version: string;
@@ -234,7 +235,7 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
           {t('menuSettings')}
         </button>
         <button className="tray-menu-item" role="menuitem" onClick={checkForUpdates} disabled={updateState.kind === 'checking' || updateState.kind === 'installing'}>
-          {updateState.kind === 'checking' ? t('checkingUpdates') : t('menuCheckUpdates')}
+          {updateState.kind === 'checking' ? t('checkingUpdates') : t('menuCheckUpdates', { version: APP_VERSION })}
         </button>
 
         {updateState.kind === 'current' && <p role="status" className="px-2.5 py-1 text-xs text-slate-500">{t('upToDate')}</p>}

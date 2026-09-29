@@ -52,9 +52,23 @@ pub fn run() {
     tauri::Builder::default()
         .on_window_event(move |window, event| {
             match event {
-                tauri::WindowEvent::CloseRequested { api, .. }
-                    if window.label() == "settings" || window.label() == "tray-menu" =>
-                {
+                tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "settings" => {
+                    api.prevent_close();
+                    if let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) {
+                        let scale = window.scale_factor().unwrap_or(1.0);
+                        if scale > 0.0 {
+                            let geometry = config::SettingsWindowGeometry {
+                                x: position.x as f64 / scale,
+                                y: position.y as f64 / scale,
+                                width: size.width as f64 / scale,
+                                height: size.height as f64 / scale,
+                            };
+                            window_state.config_manager.save_settings_geometry(&geometry);
+                        }
+                    }
+                    let _ = window.hide();
+                }
+                tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "tray-menu" => {
                     api.prevent_close();
                     let _ = window.hide();
                 }

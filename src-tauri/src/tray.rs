@@ -2,11 +2,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex as StdMutex;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewUrl,
-    WebviewWindowBuilder, Wry,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Position, Size,
+    WebviewUrl, WebviewWindowBuilder, Wry,
 };
 
 pub const TRAY_ID: &str = "main-tray";
+const SETTINGS_DEFAULT_WIDTH: f64 = 480.0;
+const SETTINGS_DEFAULT_HEIGHT: f64 = 660.0;
+const SETTINGS_MIN_WIDTH: f64 = 380.0;
+const SETTINGS_MIN_HEIGHT: f64 = 400.0;
+const SETTINGS_MAX_WIDTH: f64 = 1600.0;
+const SETTINGS_MAX_HEIGHT: f64 = 1600.0;
 static TRAY_MENU_GENERATION: AtomicU64 = AtomicU64::new(0);
 static TRAY_MENU_LAYOUT_REVISION: AtomicU64 = AtomicU64::new(0);
 static TRAY_MENU_LAYOUT_LOCK: StdMutex<()> = StdMutex::new(());
@@ -183,28 +189,118 @@ pub fn toggle_main_window(app: &AppHandle) {
 }
 
 pub fn open_settings_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("settings") {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+    let (window, created) = if let Some(window) = app.get_webview_window("settings") {
+        (window, false)
     } else {
-        use tauri::{WebviewUrl, WebviewWindowBuilder};
-        let _ = WebviewWindowBuilder::new(
+        match WebviewWindowBuilder::new(
             app,
             "settings",
             WebviewUrl::App("index.html#settings".into()),
         )
         .title("Settings")
-        .inner_size(380.0, 560.0)
-        .min_inner_size(380.0, 350.0)
-        .max_inner_size(380.0, 900.0)
+        .inner_size(SETTINGS_DEFAULT_WIDTH, SETTINGS_DEFAULT_HEIGHT)
+        .min_inner_size(SETTINGS_MIN_WIDTH, SETTINGS_MIN_HEIGHT)
+        .max_inner_size(SETTINGS_MAX_WIDTH, SETTINGS_MAX_HEIGHT)
         .resizable(true)
         .maximizable(false)
         .decorations(true)
         .always_on_top(false)
         .skip_taskbar(false)
-        .build();
+        .build()
+        {
+            Ok(window) => (window, true),
+            Err(_) => return,
+        }
+    };
+    let was_visible = window.is_visible().unwrap_or(false);
+    let _ = window.unminimize();
+    // Only restore persisted geometry when the window is (re)appearing; if it is
+    // already on screen, keep wherever the user has currently placed it.
+    if created || !was_visible {
+        apply_settings_geometry(app, &window);
     }
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+/// Places the settings window using its persisted geometry when it still lands on a
+/// connected monitor's work area (clamped inside); otherwise falls back to the
+/// default size centered on the primary monitor, so a detached display can never
+/// strand the window off-screen.
+fn apply_settings_geometry(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let saved = app
+        .try_state::<std::sync::Arc<crate::commands::AppState>>()
+        .and_then(|state| state.config_manager.load_settings_geometry());
+
+    let Some(geometry) = saved else {
+        center_settings_window(window);
+        return;
+    };
+
+    let monitor = app
+        .available_monitors()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|monitor| geometry_intersects_work_area(monitor, &geometry));
+
+    let Some(monitor) = monitor else {
+        center_settings_window(window);
+        return;
+    };
+
+    let scale = monitor.scale_factor();
+    let work = monitor.work_area();
+    let work_left = work.position.x as f64;
+    let work_top = work.position.y as f64;
+    let work_right = work_left + work.size.width as f64;
+    let work_bottom = work_top + work.size.height as f64;
+
+    let min_width = SETTINGS_MIN_WIDTH * scale;
+    let min_height = SETTINGS_MIN_HEIGHT * scale;
+    let max_width = (work_right - work_left).min(SETTINGS_MAX_WIDTH * scale).max(min_width);
+    let max_height = (work_bottom - work_top).min(SETTINGS_MAX_HEIGHT * scale).max(min_height);
+    let width = (geometry.width * scale).clamp(min_width, max_width);
+    let height = (geometry.height * scale).clamp(min_height, max_height);
+    let x = (geometry.x * scale).clamp(work_left, (work_right - width).max(work_left));
+    let y = (geometry.y * scale).clamp(work_top, (work_bottom - height).max(work_top));
+
+    let _ = window.set_size(Size::Physical(PhysicalSize::new(
+        width.round() as u32,
+        height.round() as u32,
+    )));
+    let _ = window.set_position(Position::Physical(PhysicalPosition::new(
+        x.round() as i32,
+        y.round() as i32,
+    )));
+}
+
+fn center_settings_window(window: &tauri::WebviewWindow) {
+    let _ = window.set_size(Size::Logical(LogicalSize::new(
+        SETTINGS_DEFAULT_WIDTH,
+        SETTINGS_DEFAULT_HEIGHT,
+    )));
+    let _ = window.center();
+}
+
+/// True when the saved logical rectangle overlaps the monitor's work area by a
+/// non-zero area, using the monitor's own scale factor for the conversion.
+fn geometry_intersects_work_area(
+    monitor: &tauri::Monitor,
+    geometry: &crate::config::SettingsWindowGeometry,
+) -> bool {
+    let scale = monitor.scale_factor();
+    let work = monitor.work_area();
+    let left = work.position.x as f64;
+    let top = work.position.y as f64;
+    let right = left + work.size.width as f64;
+    let bottom = top + work.size.height as f64;
+
+    let geo_left = geometry.x * scale;
+    let geo_top = geometry.y * scale;
+    let geo_right = geo_left + geometry.width * scale;
+    let geo_bottom = geo_top + geometry.height * scale;
+
+    geo_left < right && geo_right > left && geo_top < bottom && geo_bottom > top
 }
 
 pub fn update_tray_tooltip(app: &AppHandle, text: &str) {

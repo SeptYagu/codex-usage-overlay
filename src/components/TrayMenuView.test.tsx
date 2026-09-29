@@ -55,6 +55,15 @@ it('remeasures tray content when the language list opens and closes', async () =
   }));
 });
 
+it('shows the client version in the check-for-updates menu item', async () => {
+  render(<TrayMenuView settings={DEFAULT_SETTINGS} onPatchSettings={() => {}} />);
+  expect(screen.getByRole('menuitem', { name: 'Check for Updates (v1.1.3)' })).toBeTruthy();
+  cleanup();
+  await i18n.changeLanguage('zh-CN');
+  render(<TrayMenuView settings={DEFAULT_SETTINGS} onPatchSettings={() => {}} />);
+  expect(screen.getByRole('menuitem', { name: '检查更新 (当前版本: v1.1.3)' })).toBeTruthy();
+});
+
 it('exposes auto edge hide as a synchronized checkbox menu item', () => {
   const onPatchSettings = vi.fn();
   render(<TrayMenuView settings={DEFAULT_SETTINGS} onPatchSettings={onPatchSettings} />);

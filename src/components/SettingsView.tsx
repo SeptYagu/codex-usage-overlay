@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { OverlaySettings } from '../types';
+import { APP_VERSION } from '../version';
 import { useTranslation } from 'react-i18next';
 import { SoundPicker } from './SoundPicker';
 
@@ -36,13 +37,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   return (
-    <div className="h-screen overflow-y-auto bg-[#F5F6F8] dark:bg-slate-900 text-slate-800 dark:text-slate-100 p-5 flex flex-col justify-between font-sans select-none custom-scrollbar">
+    <div className="h-screen overflow-y-auto overflow-x-hidden bg-[#F5F6F8] dark:bg-slate-900 text-slate-800 dark:text-slate-100 p-5 flex flex-col justify-between font-sans select-none custom-scrollbar">
       <div className="space-y-5">
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
           <h2 className="text-base font-bold tracking-tight">{t('windowSettings')}</h2>
           <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-100 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 font-mono">
-            Tauri v2
+            v{APP_VERSION}
           </span>
         </div>
 

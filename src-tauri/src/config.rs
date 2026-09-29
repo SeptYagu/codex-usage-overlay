@@ -95,6 +95,14 @@ pub struct WindowPosition {
     pub top: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsWindowGeometry {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DockPersistence {
     pub docked: bool,
@@ -115,12 +123,22 @@ impl ConfigManager {
         Self { runtime_dir }
     }
 
+    #[cfg(test)]
+    pub fn with_runtime_dir(runtime_dir: PathBuf) -> Self {
+        let _ = fs::create_dir_all(&runtime_dir);
+        Self { runtime_dir }
+    }
+
     pub fn settings_path(&self) -> PathBuf {
         self.runtime_dir.join("settings.json")
     }
 
     pub fn position_path(&self) -> PathBuf {
         self.runtime_dir.join("window-position.json")
+    }
+
+    pub fn settings_geometry_path(&self) -> PathBuf {
+        self.runtime_dir.join("settings-window-geometry.json")
     }
 
     pub fn dock_state_path(&self) -> PathBuf {
@@ -174,6 +192,36 @@ impl ConfigManager {
         let path = self.position_path();
         let tmp = path.with_extension("json.tmp");
         if let Ok(json) = serde_json::to_string(pos) {
+            if fs::write(&tmp, json).is_ok() {
+                let _ = fs::rename(tmp, path);
+            }
+        }
+    }
+
+    pub fn load_settings_geometry(&self) -> Option<SettingsWindowGeometry> {
+        let path = self.settings_geometry_path();
+        if path.is_file() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(geometry) = serde_json::from_str::<SettingsWindowGeometry>(&content) {
+                    if geometry.x.is_finite()
+                        && geometry.y.is_finite()
+                        && geometry.width.is_finite()
+                        && geometry.height.is_finite()
+                        && geometry.width > 0.0
+                        && geometry.height > 0.0
+                    {
+                        return Some(geometry);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn save_settings_geometry(&self, geometry: &SettingsWindowGeometry) {
+        let path = self.settings_geometry_path();
+        let tmp = path.with_extension("json.tmp");
+        if let Ok(json) = serde_json::to_string(geometry) {
             if fs::write(&tmp, json).is_ok() {
                 let _ = fs::rename(tmp, path);
             }
@@ -320,6 +368,35 @@ mod tests {
         assert!(restored.auto_edge_hide);
         assert!(restored.mouse_passthrough);
         assert!(restored.auto_install_updates);
+    }
+
+    #[test]
+    fn settings_geometry_round_trips_and_falls_back_when_corrupt() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-usage-overlay-geometry-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConfigManager::with_runtime_dir(dir.clone());
+
+        assert!(manager.load_settings_geometry().is_none());
+
+        let geometry = SettingsWindowGeometry { x: 120.0, y: 80.0, width: 480.0, height: 660.0 };
+        manager.save_settings_geometry(&geometry);
+        let loaded = manager.load_settings_geometry().expect("saved geometry should load");
+        assert_eq!((loaded.x, loaded.y, loaded.width, loaded.height), (120.0, 80.0, 480.0, 660.0));
+
+        let path = manager.settings_geometry_path();
+        fs::write(&path, "{ not valid json").unwrap();
+        assert!(manager.load_settings_geometry().is_none());
+
+        fs::write(&path, r#"{"x":10.0,"y":20.0,"width":0.0,"height":660.0}"#).unwrap();
+        assert!(manager.load_settings_geometry().is_none());
+
+        fs::write(&path, r#"{"x":10.0,"y":20.0,"width":480.0}"#).unwrap();
+        assert!(manager.load_settings_geometry().is_none());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 
