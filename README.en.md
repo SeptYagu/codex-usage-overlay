@@ -23,6 +23,7 @@ Install a setup package, or extract the portable ZIP and run `CodexUsageOverlay.
 - Settings apply immediately and synchronize between windows. Existing settings files retain their preferences and default to Grouped capsule.
 - Each quota can send its own reset notification, once per confirmed new cycle. Use the Windows default sound or choose and preview an MP3, AAC, M4A, or WAV file; custom playback is capped at 10 seconds and the app stores only the original file path.
 - Drag with the left mouse button. Enable **Auto hide at screen edge**, then drag the overlay to a work-area edge to collapse it into two quota bars; hover to expand it. Right-click for Refresh, Settings, Hide, and Exit. Click the tray icon to show or hide the overlay.
+- Enable **Mouse click-through** in Settings or the tray menu to interact with windows behind the overlay. Use the tray menu to turn it off at any time; click-through cannot be enabled without a working tray icon.
 - Autostart controls are available only for installed copies. Launching a portable or development copy leaves the installed copy's startup entry untouched.
 - Use the tray menu to change languages, check for and install updates. Automatic update checks can be disabled in Settings. Updates are signature-verified; the portable build replaces its executable after it exits, then restarts.
 - Codex executable discovery follows the existing override/PATH/CLI/Store order. If the executable moves or disappears, later polls can rediscover it. Set `CODEX_CLI_PATH` for a custom location.

@@ -25,6 +25,7 @@ export interface OverlaySettings {
   fiveHourSoundPath: string | null;
   weeklySoundPath: string | null;
   autoEdgeHide: boolean;
+  mousePassthrough: boolean;
 }
 
 export interface SettingsEnvelope {
@@ -58,6 +59,7 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   fiveHourSoundPath: null,
   weeklySoundPath: null,
   autoEdgeHide: false,
+  mousePassthrough: false,
 };
 
 export interface UsageStatus {

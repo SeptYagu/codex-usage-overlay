@@ -63,3 +63,12 @@ it('exposes auto edge hide as a synchronized checkbox menu item', () => {
   fireEvent.click(item);
   expect(onPatchSettings).toHaveBeenCalledWith({ autoEdgeHide: true });
 });
+
+it('keeps the click-through recovery switch in the tray menu', () => {
+  const onPatchSettings = vi.fn();
+  render(<TrayMenuView settings={{ ...DEFAULT_SETTINGS, mousePassthrough: true }} onPatchSettings={onPatchSettings} />);
+  const item = screen.getByRole('menuitemcheckbox', { name: 'Mouse click-through' });
+  expect(item.getAttribute('aria-checked')).toBe('true');
+  fireEvent.click(item);
+  expect(onPatchSettings).toHaveBeenCalledWith({ mousePassthrough: false });
+});

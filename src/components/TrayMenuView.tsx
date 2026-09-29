@@ -255,6 +255,16 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
           <span aria-hidden="true">{settings.autoEdgeHide ? '✓' : ''}</span>
         </button>
 
+        <button
+          className="tray-menu-item justify-between"
+          role="menuitemcheckbox"
+          aria-checked={settings.mousePassthrough}
+          onClick={() => onPatchSettings({ mousePassthrough: !settings.mousePassthrough })}
+        >
+          <span>{t('menuMousePassthrough')}</span>
+          <span aria-hidden="true">{settings.mousePassthrough ? '✓' : ''}</span>
+        </button>
+
         {isInstalled && (
           <label className="tray-menu-item cursor-pointer justify-between">
             <span>{t('menuAutoStart')}</span>

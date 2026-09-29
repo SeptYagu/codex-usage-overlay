@@ -116,6 +116,15 @@ describe('settings synchronization', () => {
     }));
   });
 
+  it('saves mouse click-through independently from the settings window', async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Mouse click-through' }));
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
+      patch: { mousePassthrough: true },
+    }));
+    expect(serverSettings.autoEdgeHide).toBe(false);
+  });
+
   it('selects, previews, stops, and clears a custom sound path', async () => {
     render(<App />);
     const mode = await screen.findByRole('combobox', { name: 'Weekly quota reset notification Alert sound' });

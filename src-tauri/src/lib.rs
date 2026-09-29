@@ -25,6 +25,7 @@ pub fn run() {
 
     let app_state = Arc::new(AppState {
         client: Mutex::new(CodexClient::new()),
+        settings_patch: Mutex::new(()),
         config_manager: config_manager.clone(),
         dock: dock::DockManager::new(config_manager.clone()),
         last_usage: Mutex::new(None),
@@ -111,7 +112,13 @@ pub fn run() {
         ])
         .setup(move |app| {
             // Setup system tray
-            let _ = setup_tray(app.handle());
+            let tray_ready = match setup_tray(app.handle()) {
+                Ok(_) => true,
+                Err(error) => {
+                    eprintln!("Could not start system tray: {error}");
+                    false
+                }
+            };
 
             #[cfg(windows)]
             match audio::spawn_worker(app.handle().clone()) {
@@ -134,6 +141,21 @@ pub fn run() {
                 dock::restore_startup(&main_win, &app_state_clone.dock, &initial_settings);
                 if let Err(error) = dock::install_native_window_hook(&main_win, app.handle()) {
                     eprintln!("Could not install the main window event hook: {error}");
+                }
+            }
+            if initial_settings.mouse_passthrough {
+                let restored = tray_ready
+                    && commands::set_main_mouse_passthrough(app.handle(), true).is_ok();
+                if !restored {
+                    eprintln!("Saved mouse passthrough was not restored; keeping the overlay interactive");
+                    let mut safe_settings = initial_settings.clone();
+                    safe_settings.mouse_passthrough = false;
+                    if let Err(error) = app_state_clone.config_manager.save_settings_checked(&safe_settings) {
+                        eprintln!("Could not persist the safe mouse passthrough fallback: {error}");
+                    }
+                    if let Ok(mut settings) = app_state_clone.settings.try_lock() {
+                        *settings = safe_settings;
+                    }
                 }
             }
 

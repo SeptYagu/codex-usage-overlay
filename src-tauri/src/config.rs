@@ -53,6 +53,8 @@ pub struct OverlaySettings {
     pub weekly_sound_path: Option<String>,
     #[serde(default)]
     pub auto_edge_hide: bool,
+    #[serde(default)]
+    pub mouse_passthrough: bool,
 }
 
 fn default_scale() -> u32 { 175 }
@@ -79,6 +81,7 @@ impl Default for OverlaySettings {
             five_hour_sound_path: None,
             weekly_sound_path: None,
             auto_edge_hide: false,
+            mouse_passthrough: false,
         }
     }
 }
@@ -249,6 +252,7 @@ mod tests {
         assert_eq!(settings.five_hour_sound_path, None);
         assert_eq!(settings.weekly_sound_path, None);
         assert!(!settings.auto_edge_hide);
+        assert!(!settings.mouse_passthrough);
     }
 
     #[test]
@@ -297,6 +301,7 @@ mod tests {
         settings.weekly_sound_mode = SoundMode::Custom;
         settings.weekly_sound_path = Some("C:\\sound.m4a".into());
         settings.auto_edge_hide = true;
+        settings.mouse_passthrough = true;
         let restored: OverlaySettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert!(!restored.five_hour_reset_notification);
         assert!(restored.weekly_reset_notification);
@@ -305,6 +310,7 @@ mod tests {
         assert_eq!(restored.five_hour_sound_path, None);
         assert_eq!(restored.weekly_sound_path, Some("C:\\sound.m4a".into()));
         assert!(restored.auto_edge_hide);
+        assert!(restored.mouse_passthrough);
     }
 }
 
@@ -354,4 +360,3 @@ pub fn updater_target() -> &'static str {
         "windows-x86_64-msi"
     }
 }
-

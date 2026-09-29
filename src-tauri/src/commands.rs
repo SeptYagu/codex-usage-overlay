@@ -15,6 +15,7 @@ use crate::tray::{open_settings_window as show_settings_win, update_tray_icon, u
 
 pub struct AppState {
     pub client: Mutex<CodexClient>,
+    pub settings_patch: Mutex<()>,
     pub config_manager: ConfigManager,
     pub dock: crate::dock::DockManager,
     pub last_usage: Mutex<Option<CodexUsage>>,
@@ -134,7 +135,7 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "scalePercent" => value.as_u64().is_some_and(|n| (100..=250).contains(&n) && n % 5 == 0),
             "backgroundTransparencyPercent" => value.as_u64().is_some_and(|n| n <= 80 && n % 5 == 0),
             "showCredits" | "autoCheckUpdates" | "fiveHourResetNotification"
-            | "weeklyResetNotification" | "autoEdgeHide" => value.is_boolean(),
+            | "weeklyResetNotification" | "autoEdgeHide" | "mousePassthrough" => value.is_boolean(),
             "autoStart" => allow_auto_start && value.is_boolean(),
             "refreshIntervalSeconds" => value.as_u64().is_some_and(|n| (15..=3600).contains(&n)),
             "language" => matches!(value.as_str(), Some("auto" | "en-US" | "zh-CN" | "zh-Hant")),
@@ -168,9 +169,10 @@ mod settings_patch_tests {
             "fiveHourResetNotification": false,
             "weeklySoundMode": "custom",
             "weeklySoundPath": "C:\\sound.m4a",
-            "autoEdgeHide": true
+            "autoEdgeHide": true,
+            "mousePassthrough": true
         });
-        assert_eq!(validate_settings_patch(&patch, false).unwrap().len(), 4);
+        assert_eq!(validate_settings_patch(&patch, false).unwrap().len(), 5);
     }
 }
 
@@ -180,16 +182,22 @@ async fn apply_settings_patch(
     patch: Value,
     allow_auto_start: bool,
 ) -> Result<SettingsEnvelope, String> {
+    // Serialize native side effects with the matching persisted preference, even
+    // when Settings and the tray submit changes at the same time.
+    let _patch_guard = state.settings_patch.lock().await;
     let changes = validate_settings_patch(&patch, allow_auto_start)?;
     let (
         envelope,
         auto_check_just_enabled,
         auto_edge_hide_changed,
         previous_auto_edge_hide,
+        mouse_passthrough_changed,
+        previous_mouse_passthrough,
         geometry_changed,
     ) = {
         let mut settings = state.settings.lock().await;
         let was_auto_edge_hide = settings.auto_edge_hide;
+        let was_mouse_passthrough = settings.mouse_passthrough;
         let previous_settings = settings.clone();
         let mut merged = serde_json::to_value(&*settings).map_err(|e| e.to_string())?;
         let fields = merged.as_object_mut().ok_or("Settings are not an object")?;
@@ -206,6 +214,8 @@ async fn apply_settings_patch(
             auto_check_just_enabled,
             was_auto_edge_hide != next.auto_edge_hide,
             was_auto_edge_hide,
+            was_mouse_passthrough != next.mouse_passthrough,
+            was_mouse_passthrough,
             previous_settings.scale_percent != next.scale_percent
                 || previous_settings.show_credits != next.show_credits
                 || previous_settings.overlay_layout != next.overlay_layout
@@ -239,6 +249,26 @@ async fn apply_settings_patch(
                     "Could not update docked overlay: {error}; could not persist rollback: {write_error}"
                 ),
                 None => format!("Could not update docked overlay: {error}"),
+            });
+        }
+    }
+    if mouse_passthrough_changed {
+        if let Err(error) = set_main_mouse_passthrough(app, envelope.settings.mouse_passthrough) {
+            let rollback = {
+                let mut settings = state.settings.lock().await;
+                let mut reverted = settings.clone();
+                reverted.mouse_passthrough = previous_mouse_passthrough;
+                let persistence_error = state.config_manager.save_settings_checked(&reverted).err();
+                *settings = reverted.clone();
+                let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
+                (SettingsEnvelope { revision, settings: reverted }, persistence_error)
+            };
+            let _ = app.emit("settings_updated", &rollback.0);
+            return Err(match rollback.1 {
+                Some(write_error) => format!(
+                    "Could not change mouse passthrough: {error}; could not persist rollback: {write_error}"
+                ),
+                None => format!("Could not change mouse passthrough: {error}"),
             });
         }
     }
@@ -292,6 +322,14 @@ async fn apply_settings_patch(
         });
     }
     Ok(envelope)
+}
+
+pub(crate) fn set_main_mouse_passthrough(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    if enabled && app.tray_by_id(crate::tray::TRAY_ID).is_none() {
+        return Err("System tray is unavailable; mouse passthrough needs a recovery control".into());
+    }
+    let window = app.get_webview_window("main").ok_or("Main overlay window unavailable")?;
+    window.set_ignore_cursor_events(enabled).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
