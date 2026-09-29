@@ -36,6 +36,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         .parse::<u32>()?;
     let current = PathBuf::from(args.next().ok_or_else(missing)?);
     let staged = PathBuf::from(args.next().ok_or_else(missing)?);
+    let helper_target = PathBuf::from(args.next().ok_or_else(missing)?);
+    let restart = match args.next().ok_or_else(missing)?.to_string_lossy().as_ref() {
+        "--restart" => true,
+        "--no-restart" => false,
+        _ => return Err("invalid updater restart mode".into()),
+    };
     let restart_args: Vec<_> = args.collect();
 
     wait_for_process(pid)?;
@@ -48,6 +54,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     if let Err(error) = fs::rename(&staged, &current) {
         restore_backup(&current, &backup);
         return Err(error.into());
+    }
+
+    if !restart {
+        let _ = fs::copy(env::current_exe()?, &helper_target);
+        let _ = fs::remove_file(backup);
+        return Ok(());
     }
 
     let mut updated_app = match Command::new(&current).args(&restart_args).spawn() {
@@ -70,6 +82,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         thread::sleep(Duration::from_secs(1));
     }
 
+    let _ = fs::copy(env::current_exe()?, &helper_target);
     let _ = fs::remove_file(backup);
     Ok(())
 }

@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 #[cfg(windows)]
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -23,8 +23,12 @@ pub struct AppState {
     pub settings_revision: AtomicU64,
     pub autostart_update: Mutex<()>,
     pub update_check: Mutex<()>,
+    pub update_install: Mutex<()>,
+    pub update_installing: AtomicBool,
     pub pending_update: Mutex<Option<tauri_plugin_updater::Update>>,
+    pub prepared_update: StdMutex<Option<PreparedUpdate>>,
     pub available_update: Mutex<Option<AvailableUpdate>>,
+    pub update_error: Mutex<Option<String>>,
     pub last_auto_notified_version: Mutex<Option<String>>,
     pub reset_state: Mutex<ResetStateFile>,
     pub pending_reset_fetches: Mutex<PendingResetFetches>,
@@ -45,6 +49,11 @@ pub struct AvailableUpdate {
     pub version: String,
     pub current_version: String,
     pub notes: Option<String>,
+}
+
+pub struct PreparedUpdate {
+    update: tauri_plugin_updater::Update,
+    bytes: Vec<u8>,
 }
 
 #[derive(Clone, Serialize)]
@@ -134,7 +143,7 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "overlayLayout" => matches!(value.as_str(), Some("grouped" | "stacks")),
             "scalePercent" => value.as_u64().is_some_and(|n| (100..=250).contains(&n) && n % 5 == 0),
             "backgroundTransparencyPercent" => value.as_u64().is_some_and(|n| n <= 80 && n % 5 == 0),
-            "showCredits" | "autoCheckUpdates" | "fiveHourResetNotification"
+            "showCredits" | "autoCheckUpdates" | "autoInstallUpdates" | "fiveHourResetNotification"
             | "weeklyResetNotification" | "autoEdgeHide" | "mousePassthrough" => value.is_boolean(),
             "autoStart" => allow_auto_start && value.is_boolean(),
             "refreshIntervalSeconds" => value.as_u64().is_some_and(|n| (15..=3600).contains(&n)),
@@ -147,7 +156,21 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             return Err(format!("Invalid settings field: {key}"));
         }
     }
+    if changes.get("autoCheckUpdates") == Some(&Value::Bool(false))
+        && changes.get("autoInstallUpdates") == Some(&Value::Bool(true)) {
+        return Err("Automatic installation requires automatic update checks".into());
+    }
     Ok(changes)
+}
+
+fn reconcile_update_preferences(next: &mut OverlaySettings, changes: &Map<String, Value>) {
+    if next.auto_install_updates && !next.auto_check_updates {
+        if changes.get("autoInstallUpdates") == Some(&Value::Bool(true)) {
+            next.auto_check_updates = true;
+        } else {
+            next.auto_install_updates = false;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -174,6 +197,25 @@ mod settings_patch_tests {
         });
         assert_eq!(validate_settings_patch(&patch, false).unwrap().len(), 5);
     }
+
+    #[test]
+    fn automatic_installation_keeps_update_checks_enabled() {
+        let mut settings = OverlaySettings::default();
+        settings.auto_check_updates = false;
+        settings.auto_install_updates = true;
+        let enable = serde_json::json!({"autoInstallUpdates": true});
+        reconcile_update_preferences(&mut settings, validate_settings_patch(&enable, false).unwrap());
+        assert!(settings.auto_check_updates && settings.auto_install_updates);
+
+        settings.auto_install_updates = true;
+        let disable_checks = serde_json::json!({"autoCheckUpdates": false});
+        settings.auto_check_updates = false;
+        reconcile_update_preferences(&mut settings, validate_settings_patch(&disable_checks, false).unwrap());
+        assert!(!settings.auto_install_updates);
+        assert!(validate_settings_patch(&serde_json::json!({
+            "autoCheckUpdates": false, "autoInstallUpdates": true
+        }), false).is_err());
+    }
 }
 
 async fn apply_settings_patch(
@@ -189,6 +231,7 @@ async fn apply_settings_patch(
     let (
         envelope,
         auto_check_just_enabled,
+        auto_install_just_enabled,
         auto_edge_hide_changed,
         previous_auto_edge_hide,
         mouse_passthrough_changed,
@@ -204,14 +247,17 @@ async fn apply_settings_patch(
         for (key, value) in changes {
             fields.insert(key.clone(), value.clone());
         }
-        let next: OverlaySettings = serde_json::from_value(merged).map_err(|e| e.to_string())?;
+        let mut next: OverlaySettings = serde_json::from_value(merged).map_err(|e| e.to_string())?;
+        reconcile_update_preferences(&mut next, changes);
         state.config_manager.save_settings_checked(&next)?;
         let auto_check_just_enabled = !settings.auto_check_updates && next.auto_check_updates;
+        let auto_install_just_enabled = !settings.auto_install_updates && next.auto_install_updates;
         *settings = next.clone();
         let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
         (
             SettingsEnvelope { revision, settings: next.clone() },
             auto_check_just_enabled,
+            auto_install_just_enabled,
             was_auto_edge_hide != next.auto_edge_hide,
             was_auto_edge_hide,
             was_mouse_passthrough != next.mouse_passthrough,
@@ -276,6 +322,11 @@ async fn apply_settings_patch(
         crate::dock::keep_docked_in_work_area(app, state).await;
     }
     let new_settings = &envelope.settings;
+    if !new_settings.auto_install_updates {
+        if let Ok(mut prepared) = state.prepared_update.lock() {
+            *prepared = None;
+        }
+    }
 
     // Update tray tooltip if we have last usage
     if let Some(usage) = state.last_usage.lock().await.as_ref() {
@@ -314,7 +365,7 @@ async fn apply_settings_patch(
 
     // Broadcast updated settings to all windows
     let _ = app.emit("settings_updated", &envelope);
-    if auto_check_just_enabled {
+    if auto_check_just_enabled || auto_install_just_enabled {
         let app_for_check = app.clone();
         let state_for_check = state.clone();
         tauri::async_runtime::spawn(async move {
@@ -545,7 +596,15 @@ pub async fn check_for_updates(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<AvailableUpdate>, String> {
-    check_and_store_update(&app, &state).await
+    let found = check_and_store_update(&app, &state).await?;
+    if found.is_some() && state.settings.lock().await.auto_install_updates {
+        let app_for_prepare = app.clone();
+        let state_for_prepare = state.inner().clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = prepare_update(&app_for_prepare, &state_for_prepare).await;
+        });
+    }
+    Ok(found)
 }
 
 #[tauri::command]
@@ -553,6 +612,21 @@ pub async fn get_available_update(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<AvailableUpdate>, String> {
     Ok(state.available_update.lock().await.clone())
+}
+
+#[tauri::command]
+pub async fn get_update_error(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
+    Ok(state.update_error.lock().await.clone())
+}
+
+#[tauri::command]
+pub fn get_update_installing(state: State<'_, Arc<AppState>>) -> bool {
+    state.update_installing.load(Ordering::SeqCst)
+}
+
+#[tauri::command]
+pub fn get_update_ready(state: State<'_, Arc<AppState>>) -> bool {
+    state.prepared_update.lock().is_ok_and(|prepared| prepared.is_some())
 }
 
 pub(crate) async fn check_and_store_update(
@@ -575,11 +649,23 @@ pub(crate) async fn check_and_store_update(
     });
     *state.pending_update.lock().await = update;
     *state.available_update.lock().await = info.clone();
+    *state.update_error.lock().await = None;
+    if let Ok(mut prepared) = state.prepared_update.lock() {
+        if prepared.as_ref().map(|package| package.update.version.as_str())
+            != info.as_ref().map(|available| available.version.as_str())
+        {
+            *prepared = None;
+        }
+    }
     Ok(info)
 }
 
 pub(crate) async fn check_and_notify_auto_update(app: &AppHandle, state: &AppState) {
     if let Ok(Some(update)) = check_and_store_update(app, state).await {
+        if state.settings.lock().await.auto_install_updates {
+            let _ = prepare_update(app, state).await;
+            return;
+        }
         let should_notify = {
             let mut last = state.last_auto_notified_version.lock().await;
             if last.as_deref() == Some(update.version.as_str()) {
@@ -600,11 +686,43 @@ pub async fn install_update(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    attempt_install_update(&app, state.inner()).await
+}
+
+async fn attempt_install_update(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    if state.update_installing.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return Ok(());
+    }
+    *state.update_error.lock().await = None;
+    let _ = app.emit("update_install_started", ());
+    let result = install_pending_update(app, state).await;
+    state.update_installing.store(false, Ordering::SeqCst);
+    if let Err(error) = &result {
+        *state.update_error.lock().await = Some(error.clone());
+        if let Some(update) = state.available_update.lock().await.clone() {
+            let _ = app.emit("update_install_failed", update);
+        }
+        eprintln!("Update installation failed: {error}");
+    }
+    result
+}
+
+async fn install_pending_update(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    let _install_guard = state.update_install.lock().await;
+    let prepared = state.prepared_update.lock().map_err(|error| error.to_string())?.take();
+    if let Some(package) = prepared {
+        let result = install_verified_bytes(app, &package.update, &package.bytes, false);
+        if result.is_err() {
+            *state.prepared_update.lock().map_err(|error| error.to_string())? = Some(package);
+        }
+        return result;
+    }
     let update = state
         .pending_update
         .lock()
         .await
-        .take()
+        .as_ref()
+        .cloned()
         .ok_or_else(|| "No checked update is available".to_string())?;
 
     if crate::config::is_installed_environment() {
@@ -642,6 +760,20 @@ pub async fn install_update(
         .await
         .map_err(|error| error.to_string())?;
 
+    install_verified_bytes(app, &update, &bytes, false)
+}
+
+fn install_verified_bytes(
+    app: &AppHandle,
+    update: &tauri_plugin_updater::Update,
+    bytes: &[u8],
+    exiting: bool,
+) -> Result<(), String> {
+    if crate::config::is_installed_environment() {
+        let update = update.clone().restart_after_install(!exiting);
+        return update.install(bytes).map_err(|error| error.to_string());
+    }
+
     use std::io::Cursor;
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| format!("Invalid portable update archive: {error}"))?;
@@ -660,24 +792,83 @@ pub async fn install_update(
     let helper = directory.join("CodexUsageUpdater.exe");
     let mut staged_file = std::fs::File::create(&staged_exe).map_err(|error| error.to_string())?;
     std::io::copy(&mut executable, &mut staged_file).map_err(|error| error.to_string())?;
+    drop(executable);
+    drop(staged_file);
 
-    if !helper.is_file() {
+    let staged_helper = directory.join("CodexUsageUpdater.next.exe");
+    let mut helper_archive = archive.by_name("CodexUsageUpdater.exe")
+        .map_err(|error| format!("Portable update is missing the updater helper: {error}"))?;
+    if helper_archive.size() > 64 * 1024 * 1024 {
         let _ = std::fs::remove_file(&staged_exe);
-        return Err("Portable update helper is missing".to_string());
+        return Err("Portable update helper is too large".to_string());
     }
+    let mut helper_file = std::fs::File::create(&staged_helper).map_err(|error| error.to_string())?;
+    std::io::copy(&mut helper_archive, &mut helper_file).map_err(|error| error.to_string())?;
+    drop(helper_file);
 
-    let mut command = std::process::Command::new(helper);
+    let mut command = std::process::Command::new(&staged_helper);
     command
         .arg(std::process::id().to_string())
         .arg(&current_exe)
         .arg(&staged_exe)
+        .arg(&helper)
+        .arg(if exiting { "--no-restart" } else { "--restart" })
         .args(std::env::args_os().skip(1));
     command.spawn().map_err(|error| {
         let _ = std::fs::remove_file(&staged_exe);
+        let _ = std::fs::remove_file(&staged_helper);
         error.to_string()
     })?;
-    app.exit(0);
+    if !exiting {
+        app.exit(0);
+    }
     Ok(())
+}
+
+async fn prepare_update(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    let _install_guard = state.update_install.lock().await;
+    if !state.settings.lock().await.auto_install_updates {
+        return Ok(());
+    }
+    let update = state.pending_update.lock().await.as_ref().cloned()
+        .ok_or_else(|| "No checked update is available".to_string())?;
+    if state.prepared_update.lock().map_err(|error| error.to_string())?
+        .as_ref().is_some_and(|package| package.update.version == update.version)
+    {
+        return Ok(());
+    }
+    let bytes = match update.download(|_, _| {}, || {}).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            *state.update_error.lock().await = Some(error.to_string());
+            if let Some(info) = state.available_update.lock().await.clone() {
+                let _ = app.emit("update_install_failed", info);
+            }
+            eprintln!("Automatic update download failed: {error}");
+            return Err(error.to_string());
+        }
+    };
+    if !state.settings.lock().await.auto_install_updates
+        || state.pending_update.lock().await.as_ref().is_none_or(|pending| pending.version != update.version)
+    {
+        return Ok(());
+    }
+    *state.prepared_update.lock().map_err(|error| error.to_string())? = Some(PreparedUpdate { update, bytes });
+    *state.update_error.lock().await = None;
+    if let Some(info) = state.available_update.lock().await.clone() {
+        let _ = app.emit("update_ready", info);
+    }
+    Ok(())
+}
+
+pub(crate) fn install_prepared_update_on_exit(app: &AppHandle, state: &AppState) {
+    if let Ok(mut prepared) = state.prepared_update.lock() {
+        if let Some(package) = prepared.take() {
+            if let Err(error) = install_verified_bytes(app, &package.update, &package.bytes, true) {
+                eprintln!("Could not install prepared update on exit: {error}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

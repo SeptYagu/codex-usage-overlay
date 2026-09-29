@@ -143,10 +143,25 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <input
               type="checkbox"
               checked={settings.autoCheckUpdates}
-              onChange={(e) => updateField('autoCheckUpdates', e.target.checked)}
+              onChange={(e) => onPatchSettings(e.target.checked
+                ? { autoCheckUpdates: true }
+                : { autoCheckUpdates: false, autoInstallUpdates: false })}
               className="w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 accent-cyan-500 cursor-pointer"
             />
           </label>
+
+          <label className="flex items-center justify-between p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/60 hover:bg-slate-200/60 dark:hover:bg-slate-800 cursor-pointer transition-colors">
+            <span className="text-sm font-medium">{t('autoInstallUpdates')}</span>
+            <input
+              type="checkbox"
+              checked={settings.autoInstallUpdates}
+              onChange={(e) => onPatchSettings(e.target.checked
+                ? { autoInstallUpdates: true, autoCheckUpdates: true }
+                : { autoInstallUpdates: false })}
+              className="w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 accent-cyan-500 cursor-pointer"
+            />
+          </label>
+          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('autoInstallUpdatesHint')}</p>
 
           {/* Refresh Interval */}
           <div className="flex items-center justify-between p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/60">

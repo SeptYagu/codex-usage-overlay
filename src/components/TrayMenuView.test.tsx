@@ -72,3 +72,35 @@ it('keeps the click-through recovery switch in the tray menu', () => {
   fireEvent.click(item);
   expect(onPatchSettings).toHaveBeenCalledWith({ mousePassthrough: false });
 });
+
+it('uses the status line as the install action and allows retry after a failed install', async () => {
+  const update = { version: '1.2.0', currentVersion: '1.1.1', notes: null };
+  let installAttempts = 0;
+  tauri.invoke.mockImplementation(async (command: string) => {
+    if (command === 'get_tray_menu_generation') return 3;
+    if (command === 'layout_tray_menu') return 300;
+    if (command === 'get_available_update') return update;
+    if (command === 'install_update' && ++installAttempts === 1) throw new Error('installer unavailable');
+    return null;
+  });
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  render(<TrayMenuView settings={DEFAULT_SETTINGS} onPatchSettings={() => {}} />);
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Version 1.2.0 available — click to install' }));
+  await waitFor(() => expect(screen.getByRole('menuitem', { name: 'Retry installation' })).toBeTruthy());
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Retry installation' }));
+  await waitFor(() => expect(installAttempts).toBe(2));
+});
+
+it('shows a prepared update in the status line with an immediate install action', async () => {
+  const update = { version: '1.2.0', currentVersion: '1.1.1', notes: null };
+  tauri.invoke.mockImplementation(async (command: string) => {
+    if (command === 'get_tray_menu_generation') return 3;
+    if (command === 'layout_tray_menu') return 300;
+    if (command === 'get_available_update') return update;
+    if (command === 'get_update_ready') return true;
+    return null;
+  });
+  render(<TrayMenuView settings={{ ...DEFAULT_SETTINGS, autoInstallUpdates: true }} onPatchSettings={() => {}} />);
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Version 1.2.0 ready — install now' }));
+  await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('install_update'));
+});

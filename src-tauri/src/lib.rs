@@ -33,8 +33,12 @@ pub fn run() {
         settings_revision: AtomicU64::new(0),
         autostart_update: Mutex::new(()),
         update_check: Mutex::new(()),
+        update_install: Mutex::new(()),
+        update_installing: std::sync::atomic::AtomicBool::new(false),
         pending_update: Mutex::new(None),
+        prepared_update: std::sync::Mutex::new(None),
         available_update: Mutex::new(None),
+        update_error: Mutex::new(None),
         last_auto_notified_version: Mutex::new(None),
         reset_state: Mutex::new(notify::load_reset_state(&config_manager)),
         pending_reset_fetches: Mutex::new(notify::PendingResetFetches::default()),
@@ -108,6 +112,9 @@ pub fn run() {
             commands::toggle_overlay_window,
             commands::check_for_updates,
             commands::get_available_update,
+            commands::get_update_error,
+            commands::get_update_installing,
+            commands::get_update_ready,
             commands::install_update,
         ])
         .setup(move |app| {
@@ -232,6 +239,7 @@ pub fn run() {
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 commands::shutdown_audio(app);
+                commands::install_prepared_update_on_exit(app, app.state::<Arc<AppState>>().inner());
             }
         });
 }

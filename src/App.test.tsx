@@ -125,6 +125,17 @@ describe('settings synchronization', () => {
     expect(serverSettings.autoEdgeHide).toBe(false);
   });
 
+  it('enables automatic checks alongside automatic installation', async () => {
+    serverSettings.autoCheckUpdates = false;
+    render(<App />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Allow automatic update installation' }));
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
+      patch: { autoInstallUpdates: true, autoCheckUpdates: true },
+    }));
+    expect(serverSettings.autoInstallUpdates).toBe(true);
+    expect(serverSettings.autoCheckUpdates).toBe(true);
+  });
+
   it('selects, previews, stops, and clears a custom sound path', async () => {
     render(<App />);
     const mode = await screen.findByRole('combobox', { name: 'Weekly quota reset notification Alert sound' });

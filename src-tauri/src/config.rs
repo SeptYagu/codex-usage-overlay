@@ -39,6 +39,8 @@ pub struct OverlaySettings {
     pub auto_start: bool,
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
+    #[serde(default)]
+    pub auto_install_updates: bool,
     #[serde(default = "default_true")]
     pub five_hour_reset_notification: bool,
     #[serde(default = "default_true")]
@@ -74,6 +76,7 @@ impl Default for OverlaySettings {
             language: default_language(),
             auto_start: default_true(),
             auto_check_updates: default_true(),
+            auto_install_updates: false,
             five_hour_reset_notification: default_true(),
             weekly_reset_notification: default_true(),
             five_hour_sound_mode: SoundMode::default(),
@@ -136,7 +139,10 @@ impl ConfigManager {
         let path = self.settings_path();
         if path.is_file() {
             if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(settings) = serde_json::from_str::<OverlaySettings>(&content) {
+                if let Ok(mut settings) = serde_json::from_str::<OverlaySettings>(&content) {
+                    if !settings.auto_check_updates {
+                        settings.auto_install_updates = false;
+                    }
                     return settings;
                 }
             }
@@ -237,6 +243,7 @@ mod tests {
         assert_eq!(settings.language, "zh-CN");
         assert!(!settings.auto_start);
         assert!(settings.auto_check_updates);
+        assert!(!settings.auto_install_updates);
     }
 
     #[test]
@@ -302,6 +309,7 @@ mod tests {
         settings.weekly_sound_path = Some("C:\\sound.m4a".into());
         settings.auto_edge_hide = true;
         settings.mouse_passthrough = true;
+        settings.auto_install_updates = true;
         let restored: OverlaySettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert!(!restored.five_hour_reset_notification);
         assert!(restored.weekly_reset_notification);
@@ -311,6 +319,7 @@ mod tests {
         assert_eq!(restored.weekly_sound_path, Some("C:\\sound.m4a".into()));
         assert!(restored.auto_edge_hide);
         assert!(restored.mouse_passthrough);
+        assert!(restored.auto_install_updates);
     }
 }
 

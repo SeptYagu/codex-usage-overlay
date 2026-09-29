@@ -18,6 +18,7 @@ export interface OverlaySettings {
   language: string;
   autoStart: boolean;
   autoCheckUpdates: boolean;
+  autoInstallUpdates: boolean;
   fiveHourResetNotification: boolean;
   weeklyResetNotification: boolean;
   fiveHourSoundMode: 'windows' | 'custom';
@@ -52,6 +53,7 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   language: 'auto',
   autoStart: true,
   autoCheckUpdates: true,
+  autoInstallUpdates: false,
   fiveHourResetNotification: true,
   weeklyResetNotification: true,
   fiveHourSoundMode: 'windows',

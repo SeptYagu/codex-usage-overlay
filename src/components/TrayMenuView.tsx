@@ -26,8 +26,9 @@ type UpdateState =
   | { kind: 'checking' }
   | { kind: 'current' }
   | { kind: 'available'; update: UpdateInfo }
+  | { kind: 'ready'; update: UpdateInfo }
   | { kind: 'installing'; progress: UpdateProgress }
-  | { kind: 'error' };
+  | { kind: 'error'; update?: UpdateInfo };
 
 export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSettings }) => {
   const { t } = useTranslation();
@@ -117,20 +118,47 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
 
   useEffect(() => {
     invoke<boolean>('is_installed_version').then(setIsInstalled).catch(() => setIsInstalled(false));
-    invoke<UpdateInfo | null>('get_available_update')
-      .then((update) => {
-        if (update) setUpdateState({ kind: 'available', update });
-      })
-      .catch(() => {});
-
+    let eventSeen = false;
     const updateAvailable = listen<UpdateInfo>('update_available', (event) => {
+      eventSeen = true;
       setUpdateState({ kind: 'available', update: event.payload });
     });
+    const updateStarted = listen('update_install_started', () => {
+      eventSeen = true;
+      setUpdateState({ kind: 'installing', progress: { downloaded: 0, total: null } });
+    });
+    const updateReady = listen<UpdateInfo>('update_ready', (event) => {
+      eventSeen = true;
+      setUpdateState({ kind: 'ready', update: event.payload });
+    });
+    const updateFailed = listen<UpdateInfo>('update_install_failed', (event) => {
+      eventSeen = true;
+      setUpdateState({ kind: 'error', update: event.payload });
+    });
     const updateProgress = listen<UpdateProgress>('update_progress', (event) => {
+      eventSeen = true;
       setUpdateState({ kind: 'installing', progress: event.payload });
     });
+    void Promise.all([updateAvailable, updateStarted, updateReady, updateFailed, updateProgress])
+      .then(() => Promise.all([
+        invoke<UpdateInfo | null>('get_available_update'),
+        invoke<string | null>('get_update_error'),
+        invoke<boolean>('get_update_installing'),
+        invoke<boolean>('get_update_ready'),
+      ]))
+      .then(([update, error, installing, ready]) => {
+        if (eventSeen) return;
+        if (installing) setUpdateState({ kind: 'installing', progress: { downloaded: 0, total: null } });
+        else if (error) setUpdateState({ kind: 'error', update: update ?? undefined });
+        else if (ready && update) setUpdateState({ kind: 'ready', update });
+        else if (update) setUpdateState({ kind: 'available', update });
+      })
+      .catch((error) => console.error('Could not load update status:', error));
     return () => {
       updateAvailable.then((unlisten) => unlisten());
+      updateStarted.then((unlisten) => unlisten());
+      updateReady.then((unlisten) => unlisten());
+      updateFailed.then((unlisten) => unlisten());
       updateProgress.then((unlisten) => unlisten());
     };
   }, []);
@@ -158,7 +186,11 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
     setUpdateState({ kind: 'checking' });
     try {
       const update = await invoke<UpdateInfo | null>('check_for_updates');
-      setUpdateState(update ? { kind: 'available', update } : { kind: 'current' });
+      if (!update) setUpdateState({ kind: 'current' });
+      else {
+        const ready = await invoke<boolean>('get_update_ready');
+        setUpdateState(ready ? { kind: 'ready', update } : { kind: 'available', update });
+      }
     } catch (error) {
       console.error('Update check failed:', error);
       setUpdateState({ kind: 'error' });
@@ -166,12 +198,14 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
   };
 
   const installUpdate = async () => {
+    const update = updateState.kind === 'available' || updateState.kind === 'ready' || updateState.kind === 'error'
+      ? updateState.update : undefined;
     setUpdateState({ kind: 'installing', progress: { downloaded: 0, total: null } });
     try {
       await invoke('install_update');
     } catch (error) {
       console.error('Update installation failed:', error);
-      setUpdateState({ kind: 'error' });
+      setUpdateState({ kind: 'error', update });
     }
   };
 
@@ -205,15 +239,22 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
 
         {updateState.kind === 'current' && <p role="status" className="px-2.5 py-1 text-xs text-slate-500">{t('upToDate')}</p>}
         {updateState.kind === 'available' && (
-          <div className="mx-1 my-1 rounded-md bg-cyan-50 dark:bg-cyan-950/50 p-2 text-xs">
-            <p role="status" className="mb-1.5">{t('updateAvailable', { version: updateState.update.version })}</p>
-            <button className="w-full rounded bg-cyan-600 px-2 py-1.5 font-medium text-white hover:bg-cyan-700" onClick={installUpdate}>
-              {t('installUpdate')}
-            </button>
-          </div>
+          <button className="tray-menu-item text-cyan-700 dark:text-cyan-300" role="menuitem" onClick={installUpdate}>
+            {t('clickToInstallUpdate', { version: updateState.update.version })}
+          </button>
+        )}
+        {updateState.kind === 'ready' && (
+          <button className="tray-menu-item text-cyan-700 dark:text-cyan-300" role="menuitem" onClick={installUpdate}>
+            {t('updateReadyInstallNow', { version: updateState.update.version })}
+          </button>
         )}
         {updateState.kind === 'installing' && <p role="status" className="px-2.5 py-1 text-xs text-cyan-700 dark:text-cyan-300">{t('installingUpdate')} {progressText(updateState.progress)}</p>}
-        {updateState.kind === 'error' && <p role="alert" className="px-2.5 py-1 text-xs text-rose-600">{t('updateFailed')}</p>}
+        {updateState.kind === 'error' && (
+          <div>
+            <p role="alert" className="px-2.5 py-1 text-xs text-rose-600">{t('updateFailed')}</p>
+            {updateState.update && <button className="tray-menu-item text-cyan-700 dark:text-cyan-300" role="menuitem" onClick={installUpdate}>{t('retryInstallUpdate')}</button>}
+          </div>
+        )}
 
         <div className="tray-menu-separator" />
         <button
