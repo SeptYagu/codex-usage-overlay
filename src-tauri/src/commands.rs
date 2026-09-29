@@ -21,6 +21,11 @@ pub struct AppState {
     pub last_usage: Mutex<Option<CodexUsage>>,
     pub settings: Mutex<OverlaySettings>,
     pub settings_revision: AtomicU64,
+    /// Last settings-window geometry observed while the window was on screen and
+    /// not minimized. A minimized window reports an unusable 0x0 client rect, so
+    /// this cache is what lets `CloseRequested` / `RunEvent::Exit` still persist
+    /// the user's placement when the session ends while minimized.
+    pub last_valid_settings_geometry: StdMutex<Option<crate::config::SettingsWindowGeometry>>,
     pub autostart_update: Mutex<()>,
     pub update_check: Mutex<()>,
     pub update_install: Mutex<()>,

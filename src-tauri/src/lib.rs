@@ -31,6 +31,7 @@ pub fn run() {
         last_usage: Mutex::new(None),
         settings: Mutex::new(initial_settings.clone()),
         settings_revision: AtomicU64::new(0),
+        last_valid_settings_geometry: std::sync::Mutex::new(None),
         autostart_update: Mutex::new(()),
         update_check: Mutex::new(()),
         update_install: Mutex::new(()),
@@ -54,18 +55,35 @@ pub fn run() {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "settings" => {
                     api.prevent_close();
+                    let cached = cached_settings_geometry(&window_state);
                     persist_settings_geometry(
                         &window_state.config_manager,
                         window.outer_position(),
                         window.inner_size(),
                         window.scale_factor().unwrap_or(1.0),
                         window.is_minimized().unwrap_or(false),
+                        cached.as_ref(),
                     );
                     let _ = window.hide();
                 }
                 tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "tray-menu" => {
                     api.prevent_close();
                     let _ = window.hide();
+                }
+                // The only point where the "pre-minimize" geometry can still be
+                // observed. A minimized window reports a 0x0 client rect (and
+                // fires a degenerate `Resized`), so the reading is filtered and
+                // only a healthy one refreshes the cache.
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
+                    if window.label() == "settings" =>
+                {
+                    remember_valid_settings_geometry(
+                        &window_state,
+                        window.outer_position(),
+                        window.inner_size(),
+                        window.scale_factor().unwrap_or(1.0),
+                        window.is_minimized().unwrap_or(false),
+                    );
                 }
                 tauri::WindowEvent::Focused(false) if window.label() == "tray-menu" => {
                     let _ = window.hide();
@@ -252,23 +270,26 @@ pub fn run() {
                 // never hits `CloseRequested`. Persist here as a fallback; the run
                 // loop invokes this before windows are torn down.
                 if let Some(window) = app.get_webview_window("settings") {
-                    // Only when it is actually on screen and not minimized. A
-                    // never-opened settings window still reports the OS default
-                    // placement, and persisting that would override the
-                    // centered-on-first-open default. A minimized window still
-                    // reports `is_visible() == true` on Windows while its client
-                    // rect collapses to 0x0, so both checks are required to keep a
-                    // valid record from being overwritten with an unusable one.
-                    if window.is_visible().unwrap_or(false)
-                        && !window.is_minimized().unwrap_or(false)
-                    {
-                        let manager = app.state::<Arc<AppState>>().config_manager.clone();
+                    // Only when it is actually on screen: a never-opened settings
+                    // window still reports the OS default placement, and persisting
+                    // that would override the centered-on-first-open default.
+                    //
+                    // A minimized window still reports `is_visible() == true` on
+                    // Windows while its client rect collapses to 0x0, so the live
+                    // reading is rejected inside `persist_settings_geometry` and the
+                    // last known-good geometry captured from `Moved`/`Resized` is
+                    // written instead — that is what makes "resize, minimize, quit
+                    // from the tray" restore correctly.
+                    if window.is_visible().unwrap_or(false) {
+                        let state = app.state::<Arc<AppState>>();
+                        let cached = cached_settings_geometry(state.inner());
                         persist_settings_geometry(
-                            &manager,
+                            &state.config_manager,
                             window.outer_position(),
                             window.inner_size(),
                             window.scale_factor().unwrap_or(1.0),
                             window.is_minimized().unwrap_or(false),
+                            cached.as_ref(),
                         );
                     }
                 }
@@ -276,6 +297,64 @@ pub fn run() {
                 commands::install_prepared_update_on_exit(app, app.state::<Arc<AppState>>().inner());
             }
         });
+}
+
+/// Converts a raw window reading into a persistable logical record.
+///
+/// Returns `None` for any unusable reading: a minimized window (on Windows it
+/// still reports `is_visible() == true` while its client rect collapses to 0x0),
+/// a degenerate zero-sized rect, an unreadable position/size, or a scale factor
+/// that is not a positive finite number.
+fn sanitize_geometry(
+    position: Result<tauri::PhysicalPosition<i32>, tauri::Error>,
+    size: Result<tauri::PhysicalSize<u32>, tauri::Error>,
+    scale: f64,
+    is_minimized: bool,
+) -> Option<config::SettingsWindowGeometry> {
+    if is_minimized {
+        return None;
+    }
+    let (position, size) = (position.ok()?, size.ok()?);
+    if size.width == 0 || size.height == 0 {
+        return None;
+    }
+    if !(scale.is_finite() && scale > 0.0) {
+        return None;
+    }
+    Some(config::SettingsWindowGeometry {
+        x: position.x as f64 / scale,
+        y: position.y as f64 / scale,
+        width: size.width as f64 / scale,
+        height: size.height as f64 / scale,
+        scale_factor: Some(scale),
+    })
+}
+
+/// Remembers the settings window's current geometry as the last known-good value,
+/// skipping minimized and degenerate readings so the cache can never be poisoned
+/// by the unusable window state that follows a minimize.
+fn remember_valid_settings_geometry(
+    state: &Arc<AppState>,
+    position: Result<tauri::PhysicalPosition<i32>, tauri::Error>,
+    size: Result<tauri::PhysicalSize<u32>, tauri::Error>,
+    scale: f64,
+    is_minimized: bool,
+) {
+    let Some(geometry) = sanitize_geometry(position, size, scale, is_minimized) else {
+        return;
+    };
+    if let Ok(mut cache) = state.last_valid_settings_geometry.lock() {
+        *cache = Some(geometry);
+    }
+}
+
+/// Reads the cached last known-good settings geometry, if any.
+fn cached_settings_geometry(state: &Arc<AppState>) -> Option<config::SettingsWindowGeometry> {
+    state
+        .last_valid_settings_geometry
+        .lock()
+        .ok()
+        .and_then(|cache| cache.clone())
 }
 
 /// Persists the settings window's current physical geometry as logical values plus
@@ -286,33 +365,28 @@ pub fn run() {
 /// because the two call sites — `WindowEvent::CloseRequested` and `RunEvent::Exit`
 /// — hand out different window types that only share these accessors.
 ///
-/// A minimized window must never be persisted: on Windows it still reports
+/// A minimized window must never be persisted as-is: on Windows it still reports
 /// `is_visible() == true` while its client rect collapses to 0x0, so writing that
 /// would overwrite a previously valid record with an unusable one. The same applies
-/// to any degenerate (zero-sized) reading, hence the explicit guards below.
+/// to any degenerate (zero-sized) reading. Both are therefore rejected by
+/// `sanitize_geometry`; when that happens and a `cached` last known-good geometry
+/// exists (captured by `remember_valid_settings_geometry` on `Moved`/`Resized`), the
+/// cache is persisted instead so a resize-then-minimize-then-quit session still
+/// restores the user's placement.
 fn persist_settings_geometry(
     config_manager: &ConfigManager,
     position: Result<tauri::PhysicalPosition<i32>, tauri::Error>,
     size: Result<tauri::PhysicalSize<u32>, tauri::Error>,
     scale: f64,
     is_minimized: bool,
+    cached: Option<&config::SettingsWindowGeometry>,
 ) {
-    if is_minimized {
-        return;
-    }
-    if let (Ok(position), Ok(size)) = (position, size) {
-        if size.width == 0 || size.height == 0 {
-            return;
-        }
-        if scale.is_finite() && scale > 0.0 {
-            let geometry = config::SettingsWindowGeometry {
-                x: position.x as f64 / scale,
-                y: position.y as f64 / scale,
-                width: size.width as f64 / scale,
-                height: size.height as f64 / scale,
-                scale_factor: Some(scale),
-            };
-            config_manager.save_settings_geometry(&geometry);
+    match sanitize_geometry(position, size, scale, is_minimized) {
+        Some(geometry) => config_manager.save_settings_geometry(&geometry),
+        None => {
+            if let Some(geometry) = cached {
+                config_manager.save_settings_geometry(geometry);
+            }
         }
     }
 }
@@ -388,6 +462,7 @@ mod tests {
             Ok(PhysicalSize::new(0, 0)),
             1.0,
             false,
+            None,
         );
         assert_record_unchanged(&manager);
 
@@ -398,6 +473,7 @@ mod tests {
             Ok(PhysicalSize::new(0, 660)),
             1.0,
             false,
+            None,
         );
         assert_record_unchanged(&manager);
 
@@ -407,6 +483,7 @@ mod tests {
             Ok(PhysicalSize::new(480, 0)),
             1.0,
             false,
+            None,
         );
         assert_record_unchanged(&manager);
 
@@ -426,6 +503,7 @@ mod tests {
             Ok(PhysicalSize::new(480, 660)),
             1.0,
             true,
+            None,
         );
         assert_record_unchanged(&manager);
 
@@ -444,6 +522,7 @@ mod tests {
                 Ok(PhysicalSize::new(480, 660)),
                 scale,
                 false,
+                None,
             );
             assert_record_unchanged(&manager);
         }
@@ -463,6 +542,7 @@ mod tests {
             Ok(PhysicalSize::new(960, 1320)),
             2.0,
             false,
+            None,
         );
 
         let loaded = manager
@@ -473,5 +553,138 @@ mod tests {
         assert_eq!(loaded.scale_factor, Some(2.0));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The geometry captured while the window was still healthy — i.e. what the
+    /// settings window's `Moved`/`Resized` handler stores before the user minimizes.
+    fn captured_geometry() -> config::SettingsWindowGeometry {
+        config::SettingsWindowGeometry {
+            x: 42.0,
+            y: 24.0,
+            width: 520.0,
+            height: 700.0,
+            scale_factor: Some(1.0),
+        }
+    }
+
+    fn assert_record_is_captured(manager: &ConfigManager) {
+        let loaded = manager
+            .load_settings_geometry()
+            .expect("the captured geometry must have been persisted");
+        assert_eq!((loaded.x, loaded.y), (42.0, 24.0));
+        assert_eq!((loaded.width, loaded.height), (520.0, 700.0));
+        assert_eq!(loaded.scale_factor, Some(1.0));
+    }
+
+    /// CR3-1: a session that resizes the settings window, minimizes it and then
+    /// quits has no usable live reading at persist time. The geometry captured on
+    /// `Moved`/`Resized` must be what lands on disk — replacing a stale record.
+    #[test]
+    fn persist_writes_captured_geometry_when_minimized() {
+        let (manager, dir) = temp_manager("persist-minimized-capture");
+        // A stale record from a previous session must be replaced, not kept.
+        manager.save_settings_geometry(&valid_geometry());
+        let captured = captured_geometry();
+
+        // The real Windows reading for a minimized window: the client rect
+        // collapses to 0x0 and the position is meaningless.
+        persist_settings_geometry(
+            &manager,
+            Ok(PhysicalPosition::new(0, 0)),
+            Ok(PhysicalSize::new(0, 0)),
+            1.0,
+            true,
+            Some(&captured),
+        );
+        assert_record_is_captured(&manager);
+
+        // Even if the OS hands back a plausible-looking reading while minimized,
+        // the capture still wins: the `is_minimized` guard must not be relaxed.
+        persist_settings_geometry(
+            &manager,
+            Ok(PhysicalPosition::new(999, 999)),
+            Ok(PhysicalSize::new(300, 300)),
+            1.0,
+            true,
+            Some(&captured),
+        );
+        assert_record_is_captured(&manager);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Round 2 acceptance #1: a brand-new profile (no record on disk yet) that
+    /// resizes, minimizes and quits must restore instead of falling back to the
+    /// centered default.
+    #[test]
+    fn persist_writes_captured_geometry_for_a_fresh_profile() {
+        let (manager, dir) = temp_manager("persist-minimized-fresh");
+        assert!(manager.load_settings_geometry().is_none());
+
+        persist_settings_geometry(
+            &manager,
+            Ok(PhysicalPosition::new(0, 0)),
+            Ok(PhysicalSize::new(0, 0)),
+            1.0,
+            true,
+            Some(&captured_geometry()),
+        );
+        assert_record_is_captured(&manager);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Negative control: with no capture available, a minimized reading must still
+    /// write nothing rather than inventing a record.
+    #[test]
+    fn persist_skips_minimized_window_without_a_capture() {
+        let (manager, dir) = temp_manager("persist-minimized-no-capture");
+        assert!(manager.load_settings_geometry().is_none());
+
+        persist_settings_geometry(
+            &manager,
+            Ok(PhysicalPosition::new(0, 0)),
+            Ok(PhysicalSize::new(0, 0)),
+            1.0,
+            true,
+            None,
+        );
+        assert!(
+            manager.load_settings_geometry().is_none(),
+            "a minimized window with no capture must not invent a record"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The capture side must reject the unusable readings too, otherwise a
+    /// degenerate sample taken right after minimizing would poison the cache and
+    /// defeat the fallback.
+    #[test]
+    fn sanitize_rejects_unusable_readings_so_the_capture_survives() {
+        let healthy = sanitize_geometry(
+            Ok(PhysicalPosition::new(300, 400)),
+            Ok(PhysicalSize::new(960, 1320)),
+            2.0,
+            false,
+        )
+        .expect("a healthy reading must be usable");
+        assert_eq!((healthy.x, healthy.y), (150.0, 200.0));
+        assert_eq!((healthy.width, healthy.height), (480.0, 660.0));
+
+        assert!(sanitize_geometry(
+            Ok(PhysicalPosition::new(10, 20)),
+            Ok(PhysicalSize::new(480, 660)),
+            1.0,
+            true,
+        )
+        .is_none());
+        assert!(sanitize_geometry(
+            Ok(PhysicalPosition::new(10, 20)),
+            Ok(PhysicalSize::new(0, 0)),
+            1.0,
+            false,
+        )
+        .is_none());
     }
 }
