@@ -75,18 +75,18 @@ export const SoundPicker: React.FC<SoundPickerProps> = ({ kind, path, disabled =
   };
 
   return (
-    <div className="space-y-2">
-      <p className="break-all select-text rounded bg-white/70 dark:bg-slate-900/60 px-2 py-1 text-xs text-slate-600 dark:text-slate-300" title={path ?? undefined}>
+    <div className="space-y-1.5 pt-0.5">
+      <p className="truncate select-text rounded bg-white/70 dark:bg-slate-900/60 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 font-mono" title={path ?? undefined}>
         {path || t('chooseSoundFile')}
       </p>
-      <div className="flex flex-wrap gap-2">
-        <button type="button" className="rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-white dark:hover:bg-slate-700 disabled:opacity-50" disabled={disabled} onClick={chooseFile}>
+      <div className="flex flex-wrap gap-1.5">
+        <button type="button" className="rounded border border-slate-300 dark:border-slate-600 px-2 py-0.5 text-xs hover:bg-white dark:hover:bg-slate-700 disabled:opacity-50" disabled={disabled} onClick={chooseFile}>
           {t('chooseSoundFileAction')}
         </button>
-        <button type="button" className="rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-white dark:hover:bg-slate-700 disabled:opacity-50" disabled={disabled || !path} onClick={preview}>
+        <button type="button" className="rounded border border-slate-300 dark:border-slate-600 px-2 py-0.5 text-xs hover:bg-white dark:hover:bg-slate-700 disabled:opacity-50" disabled={disabled || !path} onClick={preview}>
           {previewing ? t('stopPreview') : t('previewSound')}
         </button>
-        <button type="button" className="rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-white dark:hover:bg-slate-700 disabled:opacity-50" disabled={disabled || !path} onClick={() => { setError(null); onChangePath(null); }}>
+        <button type="button" className="rounded border border-slate-300 dark:border-slate-600 px-2 py-0.5 text-xs hover:bg-white dark:hover:bg-slate-700 disabled:opacity-50" disabled={disabled || !path} onClick={() => { setError(null); onChangePath(null); }}>
           {t('clearSoundFile')}
         </button>
       </div>

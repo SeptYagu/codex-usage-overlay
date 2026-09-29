@@ -58,7 +58,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {/* Two columns */}
       <div className="grid flex-1 min-h-0 grid-cols-2 gap-5 pt-4">
         {/* Left column: overlay appearance, size and interaction */}
-        <section aria-label={t('windowSettings')} className="min-h-0 space-y-2.5">
+        <section aria-label={t('windowSettings')} className="min-h-0 space-y-2.5 overflow-y-auto pr-1">
           <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
             <label htmlFor="overlay-layout" className="text-sm font-medium">{t('overlayLayout')}</label>
             <select
@@ -170,7 +170,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </section>
 
         {/* Right column: system integration, updates and reset alerts */}
-        <section aria-label={t('notificationSection')} className="min-h-0 space-y-2.5">
+        <section aria-label={t('notificationSection')} className="min-h-0 space-y-2.5 overflow-y-auto pr-1">
           <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
             <span className="text-sm font-medium">{t('refreshInterval')}</span>
             <select

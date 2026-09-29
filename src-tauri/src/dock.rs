@@ -680,6 +680,22 @@ pub fn resolve_drag_outcome(
     }
 }
 
+/// Persists and applies the arbitrated drag outcome to session state and config manager.
+///
+/// Pure receiver mapping: guarantees that the exact `outcome.anchor` coordinates are
+/// persisted to disk, and `outcome.anchor_center` and `outcome.edge` are committed to dock.
+pub fn apply_drag_outcome_to_session<S, D>(
+    outcome: &DragOutcome,
+    mut save_pos: S,
+    mut update_dock: D,
+) where
+    S: FnMut(f64, f64),
+    D: FnMut((i32, i32), Option<Edge>),
+{
+    save_pos(outcome.anchor.0 as f64, outcome.anchor.1 as f64);
+    update_dock(outcome.anchor_center, outcome.edge);
+}
+
 pub fn restore_startup(window: &WebviewWindow, manager: &DockManager, settings: &OverlaySettings) {
     let size_ok = set_full_size(window, settings).is_ok();
     if size_ok {
@@ -798,13 +814,15 @@ pub async fn drag_ended(app: &AppHandle, state: &Arc<AppState>) {
     // The anchor is written only here, after the host-screen arbitration, the seam/
     // boundary decision and the reposition above — so what lands on disk is the
     // authoritative final coordinate, and a restart cannot drift.
-    state.config_manager.save_position(&WindowPosition {
-        left: outcome.anchor.0 as f64,
-        top: outcome.anchor.1 as f64,
-    });
-    state.dock.set_anchor_center(outcome.anchor_center);
-    state.dock.finish_drag(outcome.edge);
-    state.dock.save_docked(outcome.edge);
+    apply_drag_outcome_to_session(
+        &outcome,
+        |left, top| state.config_manager.save_position(&WindowPosition { left, top }),
+        |center, edge| {
+            state.dock.set_anchor_center(center);
+            state.dock.finish_drag(edge);
+            state.dock.save_docked(edge);
+        },
+    );
     emit_state(app, &state.dock);
 }
 
@@ -2180,5 +2198,24 @@ mod tests {
         // monitor under the window so the window stays on screen.
         let selected = select_work_area(&monitors, 0, Some((-9999.0, 300.0))).unwrap();
         assert_eq!(selected.0, primary.0);
+    }
+
+    #[test]
+    fn drag_outcome_persists_settled_anchor_and_never_constants() {
+        let outcome = DragOutcome {
+            rect: PhysicalRect { x: 50, y: 60, width: 300, height: 200 },
+            anchor: (123, 456),
+            anchor_center: (273, 556),
+            edge: Some(Edge::Left),
+        };
+        let mut saved_coords = (0.0, 0.0);
+        let mut dock_state = ((0, 0), None);
+        apply_drag_outcome_to_session(
+            &outcome,
+            |left, top| saved_coords = (left, top),
+            |center, edge| dock_state = (center, edge),
+        );
+        assert_eq!(saved_coords, (123.0, 456.0), "persisted anchor must match outcome.anchor exactly");
+        assert_eq!(dock_state, ((273, 556), Some(Edge::Left)));
     }
 }

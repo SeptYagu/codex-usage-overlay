@@ -86,12 +86,12 @@ pub fn run() {
                         window.is_minimized().unwrap_or(false),
                     );
                 }
-                tauri::WindowEvent::Focused(false) if window.label() == tray::TRAY_MENU_WINDOW_LABEL => {
+                tauri::WindowEvent::Focused(focused) if window.label() == tray::TRAY_MENU_WINDOW_LABEL => {
                     // Inside the post-show grace period the blur is only remembered:
                     // the grace timer re-checks the focus state and is the single
                     // decision point. A blur after the grace period is an ordinary
                     // dismissal and still hides immediately.
-                    if tray::on_tray_menu_blur(window.app_handle()) {
+                    if handle_tray_menu_focus_event(*focused, || tray::on_tray_menu_blur(window.app_handle())) {
                         let _ = window.hide();
                     }
                 }
@@ -417,6 +417,19 @@ fn persist_settings_geometry(
                 config_manager.save_settings_geometry(geometry);
             }
         }
+    }
+}
+
+/// Pure decision for tray menu focus events: hides only when the window has lost focus
+/// AND the blur evaluator (the focus grace period arbiter) determines it should hide.
+pub fn handle_tray_menu_focus_event(
+    is_focused: bool,
+    blur_evaluator: impl FnOnce() -> bool,
+) -> bool {
+    if !is_focused {
+        blur_evaluator()
+    } else {
+        false
     }
 }
 
@@ -918,5 +931,15 @@ mod tests {
         assert_eq!(loaded.scale_factor, Some(2.0));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tray_menu_focus_event_hides_only_when_blur_evaluator_approves() {
+        // When focused becomes true, never hide.
+        assert!(!handle_tray_menu_focus_event(true, || panic!("should not be called")));
+
+        // When focused becomes false, respect the blur evaluator.
+        assert!(!handle_tray_menu_focus_event(false, || false));
+        assert!(handle_tray_menu_focus_event(false, || true));
     }
 }

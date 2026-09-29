@@ -76,12 +76,44 @@ describe('two-column settings layout', () => {
     expect(left.tagName).toBe('SECTION');
     expect(right.tagName).toBe('SECTION');
 
+    // Both columns must have overflow-y-auto and min-h-0 so oversized content
+    // scrolls within the column and never clips controls or breaks root clientHeight == scrollHeight.
+    expect(left.classList.contains('overflow-y-auto')).toBe(true);
+    expect(right.classList.contains('overflow-y-auto')).toBe(true);
+    expect(left.classList.contains('min-h-0')).toBe(true);
+    expect(right.classList.contains('min-h-0')).toBe(true);
+
     // Header and footer sit outside the columns, so they span the full window.
     expect(grid.contains(header)).toBe(false);
     expect(grid.contains(footer)).toBe(false);
     expect(within(header).getByRole('heading', { name: 'Settings' })).toBeTruthy();
     expect(within(header).getByText('v1.2.0')).toBeTruthy();
     expect(within(footer).getByText('septwind@agent.qq.com')).toBeTruthy();
+  });
+
+  it('renders all controls reachable in the right column when custom sounds are selected', async () => {
+    const { right } = await renderSettings({
+      fiveHourResetNotification: true,
+      fiveHourSoundMode: 'custom',
+      fiveHourSoundPath: 'C:\\Users\\custom\\five_hour_alert_long_path_sample.wav',
+      weeklyResetNotification: true,
+      weeklySoundMode: 'custom',
+      weeklySoundPath: 'C:\\Users\\custom\\weekly_alert_long_path_sample.wav',
+    });
+
+    // Both sound pickers are mounted and fully rendered within the right section
+    const chooseButtons = within(right).getAllByRole('button', { name: 'Choose file…' });
+    expect(chooseButtons).toHaveLength(2);
+
+    const previewButtons = within(right).getAllByRole('button', { name: 'Preview' });
+    expect(previewButtons).toHaveLength(2);
+
+    const clearButtons = within(right).getAllByRole('button', { name: 'Clear' });
+    expect(clearButtons).toHaveLength(2);
+
+    // Verify paths are rendered with title attributes for tooltip preview
+    expect(within(right).getByText('C:\\Users\\custom\\five_hour_alert_long_path_sample.wav')).toBeTruthy();
+    expect(within(right).getByText('C:\\Users\\custom\\weekly_alert_long_path_sample.wav')).toBeTruthy();
   });
 
   it('keeps overlay controls in the left column and system controls in the right', async () => {

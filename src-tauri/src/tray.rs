@@ -182,6 +182,22 @@ pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon<Wry>, tauri::Error> {
     Ok(tray)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayMenuWindowEffect {
+    Open,
+    Hide,
+    None,
+}
+
+/// Arbitrates what window action must follow a click gate decision.
+pub fn plan_tray_click_effect(action: TrayMenuClickAction) -> TrayMenuWindowEffect {
+    match action {
+        TrayMenuClickAction::Open => TrayMenuWindowEffect::Open,
+        TrayMenuClickAction::Hide => TrayMenuWindowEffect::Hide,
+        TrayMenuClickAction::Ignore => TrayMenuWindowEffect::None,
+    }
+}
+
 /// Entry point for a tray icon click: debounce it, then open or collapse the popup.
 ///
 /// Both buttons share one intent (spec: "点击托盘时若已可见则收起"), so rapid clicks
@@ -195,16 +211,16 @@ pub fn handle_tray_click(app: &AppHandle) {
         Ok(mut gate) => gate.on_click(Instant::now(), visible),
         Err(_) => TrayMenuClickAction::Ignore,
     };
-    match action {
-        TrayMenuClickAction::Open => open_tray_menu_window(app),
-        TrayMenuClickAction::Hide => {
+    match plan_tray_click_effect(action) {
+        TrayMenuWindowEffect::Open => open_tray_menu_window(app),
+        TrayMenuWindowEffect::Hide => {
             // Already open: collapse it without re-opening, so the generation is
             // left alone (a double click must not restart the popup).
             if let Some(window) = app.get_webview_window(TRAY_MENU_WINDOW_LABEL) {
                 let _ = window.hide();
             }
         }
-        TrayMenuClickAction::Ignore => {}
+        TrayMenuWindowEffect::None => {}
     }
 }
 
@@ -278,13 +294,17 @@ fn note_tray_menu_shown(app: &AppHandle) {
     let _ = with_tray_menu_focus(app, |focus| focus.on_shown(Instant::now()));
 }
 
+/// Pure decision for window blur event: whether to hide immediately or wait for grace period.
+pub fn should_hide_on_tray_menu_blur(focus: &mut TrayMenuFocusState, now: Instant) -> bool {
+    focus.on_blur(now) == TrayMenuFocusAction::Hide
+}
+
 /// Drives the grace period for a `Focused(false)` event on the tray popup.
 ///
 /// Returns true when the caller must hide the popup right away — i.e. when the blur
 /// arrived *after* the grace window, or when no focus state is available at all.
 pub fn on_tray_menu_blur(app: &AppHandle) -> bool {
-    with_tray_menu_focus(app, |focus| focus.on_blur(Instant::now()))
-        .map(|action| action == TrayMenuFocusAction::Hide)
+    with_tray_menu_focus(app, |focus| should_hide_on_tray_menu_blur(focus, Instant::now()))
         .unwrap_or(true)
 }
 
@@ -376,6 +396,44 @@ fn plan_tray_menu_placement(
     }
 }
 
+/// Resolves the tray icon anchor box from a raw tray rect result, degrading safely
+/// to `None` on any error (so `tray_icon_anchor` falls back to the monitor corner).
+pub fn resolve_tray_icon_anchor_box(
+    tray_rect_res: Result<Option<(i32, i32, i32, i32)>, String>,
+    fallback_work: Option<(i32, i32, i32, i32)>,
+) -> Option<(i32, i32, i32, i32)> {
+    let icon_rect = tray_rect_res.ok().flatten();
+    tray_icon_anchor(icon_rect, fallback_work)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayMenuShowAction {
+    SetSize { width: u32, height: u32 },
+    SetPosition { x: i32, y: i32 },
+    Show,
+    NoteShown,
+    SetFocus,
+    ScheduleGraceCheck,
+}
+
+pub fn drive_tray_menu_show_sequence<F: FnMut(TrayMenuShowAction)>(
+    placement: &TrayMenuPlacement,
+    mut emit_action: F,
+) {
+    emit_action(TrayMenuShowAction::SetSize {
+        width: placement.width,
+        height: placement.height,
+    });
+    emit_action(TrayMenuShowAction::SetPosition {
+        x: placement.x,
+        y: placement.y,
+    });
+    emit_action(TrayMenuShowAction::Show);
+    emit_action(TrayMenuShowAction::NoteShown);
+    emit_action(TrayMenuShowAction::SetFocus);
+    emit_action(TrayMenuShowAction::ScheduleGraceCheck);
+}
+
 pub fn layout_tray_menu(
     app: &AppHandle,
     generation: u64,
@@ -401,31 +459,34 @@ pub fn layout_tray_menu(
     // click on such an icon looked like it did nothing at all.
     let fallback_monitor = window.current_monitor().ok().flatten().or_else(|| window.primary_monitor().ok().flatten());
     let fallback_scale = fallback_monitor.as_ref().map(tauri::Monitor::scale_factor).unwrap_or(1.0);
-    let icon_rect = tray.rect().ok().flatten().map(|rect| {
-        let x = match rect.position {
-            Position::Physical(p) => p.x,
-            Position::Logical(p) => (p.x * fallback_scale).round() as i32,
-        };
-        let y = match rect.position {
-            Position::Physical(p) => p.y,
-            Position::Logical(p) => (p.y * fallback_scale).round() as i32,
-        };
-        let width = match rect.size {
-            Size::Physical(s) => s.width as i32,
-            Size::Logical(s) => (s.width * fallback_scale).round() as i32,
-        };
-        let height = match rect.size {
-            Size::Physical(s) => s.height as i32,
-            Size::Logical(s) => (s.height * fallback_scale).round() as i32,
-        };
-        (x, y, width, height)
+    let raw_icon_rect = tray.rect().map_err(|e| e.to_string()).map(|opt_rect| {
+        opt_rect.map(|rect| {
+            let x = match rect.position {
+                Position::Physical(p) => p.x,
+                Position::Logical(p) => (p.x * fallback_scale).round() as i32,
+            };
+            let y = match rect.position {
+                Position::Physical(p) => p.y,
+                Position::Logical(p) => (p.y * fallback_scale).round() as i32,
+            };
+            let width = match rect.size {
+                Size::Physical(s) => s.width as i32,
+                Size::Logical(s) => (s.width * fallback_scale).round() as i32,
+            };
+            let height = match rect.size {
+                Size::Physical(s) => s.height as i32,
+                Size::Logical(s) => (s.height * fallback_scale).round() as i32,
+            };
+            (x, y, width, height)
+        })
     });
     let fallback_work = fallback_monitor.as_ref().map(|monitor| {
         let work = monitor.work_area();
         (work.position.x, work.position.y, work.size.width as i32, work.size.height as i32)
     });
     let (icon_x, icon_y, icon_width, icon_height) =
-        tray_icon_anchor(icon_rect, fallback_work).ok_or("Tray monitor unavailable")?;
+        resolve_tray_icon_anchor_box(raw_icon_rect, fallback_work)
+            .ok_or("Tray monitor unavailable")?;
     let center_x = icon_x + icon_width / 2;
     let center_y = icon_y + icon_height / 2;
     let monitor = app.available_monitors().map_err(|e| e.to_string())?.into_iter().find(|monitor| {
@@ -443,15 +504,26 @@ pub fn layout_tray_menu(
         height_logical,
         width_logical,
     );
-    window.set_size(Size::Physical(PhysicalSize::new(placement.width, placement.height))).map_err(|e| e.to_string())?;
-    window.set_position(Position::Physical(PhysicalPosition::new(placement.x, placement.y))).map_err(|e| e.to_string())?;
-    window.show().map_err(|e| e.to_string())?;
-    // Start the focus grace period at the instant the popup actually appeared: the
-    // transient kill-focus Windows delivers while the popup is still being focused
-    // must be remembered, not acted on.
-    note_tray_menu_shown(app);
-    window.set_focus().map_err(|e| e.to_string())?;
-    schedule_tray_menu_grace_check(app);
+    drive_tray_menu_show_sequence(&placement, |action| match action {
+        TrayMenuShowAction::SetSize { width, height } => {
+            let _ = window.set_size(Size::Physical(PhysicalSize::new(width, height)));
+        }
+        TrayMenuShowAction::SetPosition { x, y } => {
+            let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
+        }
+        TrayMenuShowAction::Show => {
+            let _ = window.show();
+        }
+        TrayMenuShowAction::NoteShown => {
+            note_tray_menu_shown(app);
+        }
+        TrayMenuShowAction::SetFocus => {
+            let _ = window.set_focus();
+        }
+        TrayMenuShowAction::ScheduleGraceCheck => {
+            schedule_tray_menu_grace_check(app);
+        }
+    });
     Ok(placement.height_logical)
 }
 
@@ -1198,5 +1270,68 @@ mod tests {
         assert_eq!(a.intersection_area(&b), 0.0);
         let c = PhysicalRect::new(50.0, 50.0, 100.0, 100.0);
         assert_eq!(a.intersection_area(&c), 2500.0);
+    }
+
+    #[test]
+    fn tray_click_effect_dispatches_hide_and_never_reopens() {
+        assert_eq!(plan_tray_click_effect(TrayMenuClickAction::Open), TrayMenuWindowEffect::Open);
+        assert_eq!(plan_tray_click_effect(TrayMenuClickAction::Hide), TrayMenuWindowEffect::Hide);
+        assert_eq!(plan_tray_click_effect(TrayMenuClickAction::Ignore), TrayMenuWindowEffect::None);
+    }
+
+    #[test]
+    fn tray_icon_anchor_box_degrades_when_tray_rect_fails() {
+        let fallback_work = Some((0, 0, 1920, 1080));
+        let error_res: Result<Option<(i32, i32, i32, i32)>, String> = Err("overflow flyout".into());
+        let anchor = resolve_tray_icon_anchor_box(error_res, fallback_work);
+        assert!(anchor.is_some(), "tray.rect() error must not short-circuit anchor resolution");
+        assert_eq!(anchor, Some((1920, 1080, 0, 0)));
+
+        let none_res: Result<Option<(i32, i32, i32, i32)>, String> = Ok(None);
+        let anchor_none = resolve_tray_icon_anchor_box(none_res, fallback_work);
+        assert_eq!(anchor_none, Some((1920, 1080, 0, 0)));
+
+        let success_res: Result<Option<(i32, i32, i32, i32)>, String> = Ok(Some((100, 200, 24, 24)));
+        let anchor_success = resolve_tray_icon_anchor_box(success_res, fallback_work);
+        assert_eq!(anchor_success, Some((100, 200, 24, 24)));
+    }
+
+    #[test]
+    fn show_sequence_emits_note_shown_and_grace_check_in_exact_order() {
+        let placement = TrayMenuPlacement {
+            x: 100,
+            y: 200,
+            width: 300,
+            height: 400,
+            height_logical: 400.0,
+        };
+        let mut actions = Vec::new();
+        drive_tray_menu_show_sequence(&placement, |a| actions.push(a));
+        assert_eq!(
+            actions,
+            vec![
+                TrayMenuShowAction::SetSize { width: 300, height: 400 },
+                TrayMenuShowAction::SetPosition { x: 100, y: 200 },
+                TrayMenuShowAction::Show,
+                TrayMenuShowAction::NoteShown,
+                TrayMenuShowAction::SetFocus,
+                TrayMenuShowAction::ScheduleGraceCheck,
+            ]
+        );
+    }
+
+    #[test]
+    fn blur_decision_inside_grace_period_defers_and_outside_hides() {
+        let mut focus = TrayMenuFocusState::default();
+        let shown_at = Instant::now();
+        focus.on_shown(shown_at);
+
+        // Inside grace window (100ms < 180ms): MUST defer, should_hide == false
+        let inside = shown_at + Duration::from_millis(100);
+        assert_eq!(should_hide_on_tray_menu_blur(&mut focus, inside), false);
+
+        // Outside grace window (250ms > 180ms): MUST hide immediately
+        let outside = shown_at + Duration::from_millis(250);
+        assert_eq!(should_hide_on_tray_menu_blur(&mut focus, outside), true);
     }
 }
