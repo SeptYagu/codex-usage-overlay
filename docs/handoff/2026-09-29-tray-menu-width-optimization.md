@@ -57,11 +57,14 @@
    - 确保即便 Windows API 报错，也绝不中断 layout 与 show 流程，平滑降级至屏幕右下角安全展示。
 2. **点击去抖与幂等状态机（替代机械监听 DoubleClick）**：
    - 托盘点击引入 250~300ms 快速点击去抖与防重入机制，快速连击或双击统一合流为单次 Toggle 意图；
-   - 菜单已展开状态下，双击图标判定为一次明确的收起动作，绝不二次重开，消除 generation 剧烈抖动。
-3. **失焦保护期闭环（到期复检机制）**：
+   - 菜单已展开状态下，双击图标判定为一次明确的收起动作，绝不二次重开，消除 generation 剧烈抖动；状态机支持注入虚拟时钟以便确定性单测。
+3. **失焦保护期闭环（到期复检机制与唯一守卫契约，P3-1 闭环）**：
    - **计时起点精准锚定**：保护期时间戳严格记录在 `layout_tray_menu` 成功执行 `window.show()`（`tray.rs:181`）时刻；
    - **到期复检状态转移**：在刚 show 出的 150~200ms 保护期内收到 `Focused(false)` 时，不直接无脑丢弃，而是标记 `pending_blur = true`；
-   - **定时器权威裁决**：保护期定时器到期时，检查 `window.is_focused()`：若此时窗口仍未处于获焦状态（表明用户确实在保护期内点击了外部其他窗口），则立即执行 `window.hide()`；若已正常获焦，则清除标记保持显示。彻底杜绝“常置顶菜单永久滞留”的状态机缺陷。
+   - **定时器权威裁决（唯一守卫契约）**：
+     - `Focused(false)` 是保护期到期执行 hide 的**唯一必要前置条件**；
+     - 保护期定时器到期时，**仅当 `pending_blur == true && !window.is_focused()` 时才执行 `window.hide()`**；
+     - 若保护期期间从未收到 `Focused(false)`（即使因 Windows 前台锁定而未获焦 `is_focused() == false`），定时器到期时仅清除计时状态，**绝不得执行 hide**，确保菜单稳定保持可见。若已获焦则清除标记保持显示。彻底杜绝“常置顶菜单永久滞留”与“无失焦误杀”两类状态机缺陷。
 4. **支持已打开状态下的点击关闭（Toggle 语义）**：
    - 点击托盘时若检测到托盘菜单当前已处于可见状态，则执行关闭收起，提供符合 Windows 习惯的开关反馈。
 
@@ -94,7 +97,7 @@
   - **情形 A（完全拖入目标屏）**：重叠面积占比 100%，宿主屏幕无缝切换至目标显示器；
   - **情形 B（跨在两屏接缝处）**：
     - 若进入目标屏幕 B 的面积 **> 50%**：归属判定为**目标显示器 B**，浮窗宿主切换为 B，并平滑吸入 B 的工作区边缘内（避免浮窗跨在物理黑边缝隙上被割裂撕扯），更新 B 对应的 DPI 缩放与坐标；
-    - 若进入目标屏幕 B 的面积 **<= 50%**（即大半仍留在原屏幕 A）：判定归属保留在**原显示器 A**，浮窗平滑弹回吸入 A 的工作区边缘内。
+    - 若进入目标屏幕 B 的面积 **<= 50%**（即大半仍留在原屏幕 A，或恰好各 50%）：判定归属保留在**原显示器 A**（以原宿主屏 `fallback_index` 破平），浮窗平滑弹回吸入 A 的工作区边缘内。
 
 #### 2. 内部接缝（Inter-Monitor Seam）与物理外边界（Outer Bezel）解耦
 - **边缘属性自动识别**：
@@ -126,16 +129,22 @@
 #### 1. 矩形交集与跨屏归属判定 (`select_monitor_by_overlap`)
 ```rust
 /// 计算窗口物理矩形与各显示器工作区的交集面积，按最大面积（>50% 多数原则）确定宿主显示器。
-/// 若与所有工作区零重叠（如错位空洞区或完全拉出屏幕），对齐 dock.rs 既有退化链，回退至窗口当前所在屏或首屏。
+/// 若恰好 50/50 相交，以 fallback_index（原宿主屏）作为 tie-break 破平优先保留在原屏（R-2 闭环）。
+/// 若与所有工作区零重叠（错位空洞或完全拉出屏幕），对齐 dock.rs 既有退化链，回退至窗口当前所在屏或首屏。
+/// 若 monitors 为空（如极罕见的无显示器会话），返回 None 对齐 select_work_area 安全退化链，严禁 panic（R-1 闭环）。
 pub fn select_monitor_by_overlap(
     win: PhysicalRect,
     monitors: &[(PhysicalRect, f64)],
     fallback_index: usize,
-) -> (PhysicalRect, f64) {
+) -> Option<(PhysicalRect, f64)> {
+    if monitors.is_empty() {
+        return None;
+    }
+
     let mut best_monitor = None;
     let mut max_area = 0i64;
 
-    for (work, scale) in monitors {
+    for (idx, (work, scale)) in monitors.iter().enumerate() {
         let ix1 = win.x.max(work.x) as i64;
         let iy1 = win.y.max(work.y) as i64;
         let ix2 = (win.x + win.width as i32).min(work.x + work.width as i32) as i64;
@@ -144,16 +153,17 @@ pub fn select_monitor_by_overlap(
         let overlap_h = (iy2 - iy1).max(0);
         let area = overlap_w * overlap_h;
 
-        if area > max_area {
+        // 面积严格更大；或面积相等且当前屏为原宿主 fallback_index 时破平胜出
+        if area > max_area || (area == max_area && area > 0 && idx == fallback_index) {
             max_area = area;
             best_monitor = Some((*work, *scale));
         }
     }
 
-    // 零重叠时严禁返回 (win, 1.0) 伪工作区，必须回退至真实显示器工作区与真实 scale_factor
+    // 零重叠时安全回退至当前屏或首屏的真实工作区与缩放因子，严禁返回 (win, 1.0) 伪工作区
     best_monitor.or_else(|| {
         monitors.get(fallback_index).or_else(|| monitors.first()).copied()
-    }).expect("Monitors list must not be empty")
+    })
 }
 ```
 
@@ -279,6 +289,8 @@ pub fn detect_edge_multi_monitor(
   - `minHeight`: 从 400px 调整为 **500px**；
   - `maxWidth`: 保持 **1600px**，`maxHeight`: 保持 **1600px**；
   - `src-tauri/tauri.conf.json` 与 `src-tauri/src/tray.rs` 同步更新默认与极值约束。
+- **DPI 缩放验证契约（R-3 落地）**：
+  - 在实现完成后，必须覆盖 100%、150%、200% 系统 DPI 缩放下的核查，通过界面截图断言设置窗口在 960×620 默认尺寸下完整展示全部配置项且无垂直滚动条（`clientHeight == scrollHeight`）。
 
 ### 5.3 双栏功能分区架构
 - **顶部 Header（全宽跨栏）**：
@@ -314,12 +326,12 @@ pub fn detect_edge_multi_monitor(
 | 模块 | 改动文件 | 涉及函数 / 组件 / 配置 | 改动具体内容与目标 |
 | :--- | :--- | :--- | :--- |
 | **模块一** | `src/components/TrayMenuView.tsx` | `measureMenu` | 1. 采用净文本测量解耦容器宽度，杜绝自引用固定点。<br>2. 统一公式：`clamp(280, 500, ceil(textW) + 40)`。<br>3. 保持 `white-space: nowrap` 单行不折行。 |
-| **模块一** | `src/components/TrayMenuView.test.tsx` | 单元测试 | 精确数值断言与平滑收窄测试，验证 280~500px 范围。 |
+| **模块一** | `src/components/TrayMenuView.test.tsx` | 单元测试 | 精确数值断言（260⇒300, 340⇒380）与平滑收窄测试，验证 280~500px 范围。 |
 | **模块一** | `src-tauri/src/tray.rs` | `TRAY_MENU_MIN_WIDTH` | 下限常数从 300.0 微调至 280.0，与前端保持契约统一。 |
 | **模块二** | `src-tauri/src/tray.rs` | `layout_tray_menu` | 将 `tray.rect().map_err(...)?` 改为 `tray.rect().ok().flatten()`，报错时平滑进入屏幕右下角 fallback 分支；将保护期计时起点锚定在 `window.show()` 成功时刻。 |
-| **模块二** | `src-tauri/src/tray.rs` | 点击事件流与状态机 | 引入 250~300ms 点击去抖与防重入机制，合流多次点击为单次 Toggle 语义（已展开时点击收起，收起时点击展开）。 |
-| **模块二** | `src-tauri/src/lib.rs` | `WindowEvent::Focused(false)` | 设立 150~200ms 失焦保护期，保护期内失焦标记 `pending_blur = true`；保护期到期时复检 `!window.is_focused()`，唯有确认仍未获焦时才执行 `hide()`。 |
-| **模块三** | `src-tauri/src/dock.rs` | `select_monitor_by_overlap` | 基于相交面积的宿主屏幕选择算法，实现 >50% 面积跨屏归属；零重叠时安全回退至当前屏或首屏的真实工作区与缩放因子。 |
+| **模块二** | `src-tauri/src/tray.rs` | 点击事件流与状态机 | 引入 250~300ms 点击去抖与防重入机制，支持虚拟时钟测试注入，合流多次点击为单次 Toggle 语义（展开状态双击关闭且 generation ≤ 1）。 |
+| **模块二** | `src-tauri/src/lib.rs` | `WindowEvent::Focused(false)` | 设立 150~200ms 失焦保护期，保护期内失焦标记 `pending_blur = true`；保护期到期时仅当 `pending_blur == true && !window.is_focused()` 才执行 `hide()`，无失焦事件绝不误杀。 |
+| **模块三** | `src-tauri/src/dock.rs` | `select_monitor_by_overlap` | 基于相交面积的宿主屏幕选择算法，实现 >50% 面积跨屏归属，50/50 依据原宿主破平；空显示器列表安全返回 `None` 不 panic，零重叠安全回退至当前屏或首屏。 |
 | **模块三** | `src-tauri/src/dock.rs` | `is_external_boundary` | 整边拓扑判定，内部接缝通道严禁触发贴边折叠。 |
 | **模块三** | `src-tauri/src/dock.rs` | `detect_edge` | 结合外边界判定，支持 `distance <= 0` 越界吸附，仅对物理外边界生效。 |
 | **模块三** | `src-tauri/src/dock.rs` | `drag_ended` | 整合跨屏归属 + clamp 安全回弹 + **权威最终渲染坐标落盘持久化**，彻底杜绝重启漂移。 |
@@ -337,39 +349,54 @@ pub fn detect_edge_multi_monitor(
 ## 七、自动化测试与可证伪性验证方案
 
 ### 7.1 前端 Vitest 测试矩阵
-1. **紧凑基础宽度数值精确断言与缩窄验证**：
-   - 验证菜单文本净宽 220px 时，计算出的 `widthLogical` 精确落在 280px；
-   - 验证文本从长变短时，宽度能够平滑收缩回 280px，彻底消除自引用固定点滞留。
-2. **极端长文案自适应撑开**：
-   - 当菜单项出现超长版本号文案（如 `scrollWidth = 360px`）时，自适应撑开至贴合净宽，不折行且不超过 500px 上限。
-3. **刻度格子开关渲染验证**：
+1. **紧凑基础宽度下限生效断言**：
+   - 验证菜单文本净宽 `textW = 220` 时，计算出的 `widthLogical` 精确落在 280px 下限。
+2. **区分 `+40` 与 `+20` 的精确数值断言（P3-2 核心）**：
+   - 输入 `textW = 260` ⇒ 精确断言 `widthLogical = 300`（按公式 `260 + 40 = 300`；若误用 `+20` 则为 280，测试必然转红！）。
+3. **极端长文案自适应撑开精确断言（P3-2 核心）**：
+   - 输入 `textW = 340` ⇒ 精确断言 `widthLogical = 380`（预期值 `textW + 40`，非 `scrollWidth + 40`；若误用 `+20` 则为 360，测试必然转红！）。
+4. **消除自引用固定点平滑收缩断言**：
+   - 文本净宽从 340px 变短为 196px/220px 时，断言 `widthLogical` 平滑收缩回 280px，彻底消除只增不减的自引用固定点滞留。
+5. **JSDOM 测试替身规范**：
+   - 在 jsdom 环境中通过 `Range.getBoundingClientRect()` 探针或显式注入 `textW` 模拟净文本测量，严禁退回依赖容器自身的 `item.scrollWidth`。
+6. **刻度格子开关渲染验证**：
    - 验证 `showPercentageGrid: true` 时，pill 内部每个进度条渲染出 9 条等分刻度线；
    - 验证 `showPercentageGrid: false` 时，不渲染刻度线节点。
-4. **设置界面双栏与交互验证**：
+7. **设置界面双栏与交互验证**：
    - 验证设置界面中包含双栏结构容器；
    - 验证“开启百分比格子”复选框位于“开启贴边隐藏”之后，且点击后正确触发 `onPatchSettings({ showPercentageGrid: ... })`。
 
 ### 7.2 后端 Rust 单元测试矩阵 (`dock.rs`, `tray.rs`, `commands.rs` & `config.rs`)
-1. **设置项 Patch 白名单验证测试（P2-1）**：
-   - 在 `commands.rs` 中编写测试，验证提交包含 `showPercentageGrid: true/false` 的 patch 请求能够成功通过白名单校验；
-   - 验证非法未知字段仍被严密拒绝（`Err("Invalid settings field")`）。
-2. **多屏 >50% 跨屏归属与零重叠退化测试（P3-3）**：
-   - 模拟两台并排显示器（屏 A: 0..1920, 屏 B: 1920..3840）。
-   - 浮窗横跨两屏（如 70% 面积在屏 B，30% 在屏 A）-> 必须精准判定归属为屏 B。
-   - 浮窗横跨两屏（如 40% 面积在屏 B，60% 在屏 A）-> 必须精准判定归属为屏 A。
-   - 浮窗位于工作区外零重叠区域 -> 验证必须退化返回首屏真实工作区与有效缩放因子，严禁返回假工作区。
+1. **设置项完整落盘与回读链路测试（P2-1 & P3-4 闭环）**：
+   - **白名单闸门断言**：验证提交包含 `showPercentageGrid: true/false` 的 patch 请求能够成功通过白名单校验；验证非法未知字段仍被严密拒绝（`Err("Invalid settings field")`）；
+   - **完整落盘与回读断言（P3-4）**：经 `apply_settings_patch(&json!({"showPercentageGrid": true}))` 执行后，断言内存设置 `show_percentage_grid == true`，`revision` 递增，且触发 `save_settings_checked` 落盘；重新通过 `load_settings()` 读取配置文件，断言其反序列化出的 `show_percentage_grid` 严格等于 `true`；
+   - **变异可证伪性**：若保留白名单但字段名与 serde camelCase 映射失配（或直接丢弃该键），重新加载断言必然转红！
+2. **多屏 >50% 跨屏归属、50/50 破平与零重叠退化测试（P3-3, R-1, R-2 闭环）**：
+   - 模拟两台并排显示器（屏 A: 0..1920, 屏 B: 1920..3840）；
+   - 浮窗横跨两屏（如 70% 面积在屏 B，30% 在屏 A）⇒ 精准判定归属为屏 B；
+   - 浮窗横跨两屏（如 40% 面积在屏 B，60% 在屏 A）⇒ 精准判定归属为屏 A；
+   - **50/50 接缝破平断言（R-2）**：浮窗跨两屏接缝两边面积恰好相等各 50% 时，断言依据 `fallback_index` 严格判定归属于原宿主屏 A，不受显示器枚举遍历顺序翻转影响；
+   - **零重叠安全回退断言（P3-3）**：浮窗位于所有工作区外零重叠区域 ⇒ 验证必须退化返回首屏真实工作区与有效缩放因子，严禁返回假工作区；
+   - **空列表安全防 panic 断言（R-1）**：当输入 `monitors` 为空列表时，安全返回 `None` 对齐 `select_work_area` 既有退化链，绝不 panic。
 3. **内部接缝防误折叠与整边拓扑判定测试（T-2）**：
    - 浮窗在两屏接缝通道处松手，即便开启 `auto_edge_hide: true`，`detect_edge` 必须返回 `None`，严禁触发贴边胶囊折叠。
 4. **物理外边界越界回弹与贴边测试**：
-   - 开启自动贴边时，向最左屏左侧物理外框拖出 50px（越界 `x = -50`）-> 必须命中 `Edge::Left` 并折叠为贴边细条。
-   - 关闭自动贴边时，向最左屏左侧物理外框拖出 50px（越界 `x = -50`）-> 必须平滑弹回屏内 `clamp_position(x = 0)`，绝不留在屏幕外。
+   - 开启自动贴边时，向最左屏左侧物理外框拖出 50px（越界 `x = -50`）⇒ 必须命中 `Edge::Left` 并折叠为贴边细条；
+   - 关闭自动贴边时，向最左屏左侧物理外框拖出 50px（越界 `x = -50`）⇒ 必须平滑弹回屏内 `clamp_position(x = 0)`，绝不留在屏幕外。
 5. **权威锚点持久化落盘时序验证（P3-4）**：
    - 验证在发生跨屏吸入、clamp 回弹或外边界折叠后，保存至配置文件的坐标为最终校正后的合法坐标，而非原始越界坐标。
-6. **托盘点击响应与失焦到期复检测试（P3-1, P3-2）**：
-   - 测试 `tray.rect()` 返回 `None` 时，确保不 panic 且顺利进入 fallback 布局分支；
-   - 测试在保护期内发生失焦并在到期时仍未获焦，状态机正确驱动隐藏流程；若到期时已获焦则保持展示。
+6. **托盘响应性、去抖与失焦保护期可失败断言组（P3-1, P3-3 闭环）**：
+   - **`tray.rect()` 容错与可见性断言**：当 `tray.rect()` 返回 `None` 时，不仅不 panic，且依然调用 `window.show()`，断言窗口最终处于可见状态；
+   - **失焦保护期三向互斥断言组（P3-1）**：
+     ① 保护期内收到 `Focused(false)`（`pending_blur = true`）且到期时仍未获焦 `!window.is_focused()` ⇒ 执行 `window.hide()`；
+     ② 保护期到期时已获焦 `window.is_focused() == true` ⇒ 菜单保持可见，清除标记；
+     ③ **（核心守卫断言）** 保护期内**从未收到** `Focused(false)`，即使到期时 `is_focused() == false`（模拟 Windows 前台锁定抢焦失败场景）⇒ 到期定时器绝不 hide，菜单保持可见。删除 `pending_blur` 守卫时该断言必须转红！
+   - **去抖与 Toggle 状态机断言组（P3-3）**：
+     ④ 连击去抖断言：同一去抖窗口内连续注入 3 次 `Click`（或 1 次 `Click` + 1 次 `DoubleClick`）⇒ 恰好产生 1 次有效 Toggle，`TRAY_MENU_GENERATION` 自增恰好为 1，窗口可见性仅翻转 1 次（若移除去抖逐次触发则转红）；
+     ⑤ 双击收起断言：菜单已处于展开可见状态时连续双击托盘图标 ⇒ 最终稳定为不可见，且本轮 generation 自增 ≤ 1（杜绝双击关闭反被重开）；
+     ⑥ 时钟可注入口径：状态机支持注入虚拟时钟或 `Instant` 偏移（复用 `AppState::for_test` 机制），测试完全确定性执行，不依赖真实线程 sleep。
 7. **配置项序列化与反序列化测试**：
-   - 测试包含/缺失 `showPercentageGrid` 的 json 配置文件的兼容加载与默认值注入。
+   - 测试包含 `"showPercentageGrid": true` 时反序列化读出 `true`；缺失该键时读出默认值 `false`（明确断言读出值等于预期值，而非仅仅"加载不报错"）。
 
 ---
 
