@@ -15,6 +15,13 @@ vi.mock('@tauri-apps/api/window', () => ({
   }),
 }));
 
+// jsdom has no layout engine and reports a zero `scrollWidth`, so these stand in for
+// it. The values are configurable per test: menu items are `width: 100%`, and only
+// their overflow reveals the intrinsic width the popup needs to lay every label out
+// on a single line, so the item width is what drives the adaptive sizing under test.
+let contentScrollWidth = 280;
+let itemScrollWidth = 280;
+
 beforeEach(async () => {
   await i18n.changeLanguage('en-US');
   tauri.invoke.mockReset();
@@ -27,9 +34,11 @@ beforeEach(async () => {
     const radios = this.querySelectorAll('[role="menuitemradio"]').length;
     return { height: 100 + radios * 30 } as DOMRect;
   });
-  // jsdom reports a zero scrollWidth; the popup width is derived from it, so give
-  // it a non-zero value (280 + 20 padding = 300 logical px).
-  vi.spyOn(Element.prototype, 'scrollWidth', 'get').mockReturnValue(280);
+  contentScrollWidth = 280;
+  itemScrollWidth = 280;
+  vi.spyOn(Element.prototype, 'scrollWidth', 'get').mockImplementation(function (this: Element) {
+    return this.classList.contains('tray-menu-item') ? itemScrollWidth : contentScrollWidth;
+  });
 });
 
 afterEach(() => {
@@ -56,6 +65,44 @@ it('remeasures tray content when the language list opens and closes', async () =
   await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('layout_tray_menu', {
     generation: 3,
     revision: 3,
+    heightLogical: 120,
+    widthLogical: 300,
+  }));
+});
+
+it('widens the tray popup to the measured content width', async () => {
+  // A long label overflows the 280px content box: the item's scrollWidth (420) must
+  // win the `Math.max` aggregation, then 20px of padding yields 440 logical px.
+  itemScrollWidth = 420;
+  render(<TrayMenuView settings={DEFAULT_SETTINGS} onPatchSettings={() => {}} />);
+  await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('layout_tray_menu', {
+    generation: 3,
+    revision: 1,
+    heightLogical: 120,
+    widthLogical: 440,
+  }));
+});
+
+it('clamps the tray popup width to the configured maximum', async () => {
+  // 600 + 20 padding exceeds the 500px cap, so the reported width must be clamped.
+  itemScrollWidth = 600;
+  render(<TrayMenuView settings={DEFAULT_SETTINGS} onPatchSettings={() => {}} />);
+  await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('layout_tray_menu', {
+    generation: 3,
+    revision: 1,
+    heightLogical: 120,
+    widthLogical: 500,
+  }));
+});
+
+it('keeps the tray popup at the minimum width for narrow content', async () => {
+  // 100 + 20 is below the 300px floor, so the reported width must be raised to it.
+  contentScrollWidth = 100;
+  itemScrollWidth = 100;
+  render(<TrayMenuView settings={DEFAULT_SETTINGS} onPatchSettings={() => {}} />);
+  await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('layout_tray_menu', {
+    generation: 3,
+    revision: 1,
     heightLogical: 120,
     widthLogical: 300,
   }));

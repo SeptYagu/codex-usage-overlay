@@ -22,6 +22,13 @@ interface TrayMenuViewProps {
   onPatchSettings: (patch: Partial<OverlaySettings>) => void;
 }
 
+// Logical width bounds for the tray popup, mirroring `TRAY_MENU_MIN_WIDTH` /
+// `TRAY_MENU_MAX_WIDTH` in `src-tauri/src/tray.rs`. The backend re-clamps
+// authoritatively when it sizes the native window; clamping here keeps the width we
+// request within those bounds so the adaptive logic is well defined and testable.
+const TRAY_MENU_MIN_WIDTH = 300;
+const TRAY_MENU_MAX_WIDTH = 500;
+
 type UpdateState =
   | { kind: 'idle' }
   | { kind: 'checking' }
@@ -56,8 +63,11 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
     content.querySelectorAll<HTMLElement>('.tray-menu-item').forEach((item) => {
       intrinsicWidth = Math.max(intrinsicWidth, item.scrollWidth);
     });
-    const width = Math.ceil(intrinsicWidth + 20);
-    if (height <= 20 || width <= 20) return;
+    const width = Math.min(
+      TRAY_MENU_MAX_WIDTH,
+      Math.max(TRAY_MENU_MIN_WIDTH, Math.ceil(intrinsicWidth + 20)),
+    );
+    if (height <= 20) return;
     const dprComp = dprCompRef.current;
     const key = `${generation}:${height}:${width}:${dprComp}`;
     if (lastLayoutKey.current === key) return;

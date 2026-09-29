@@ -59,6 +59,7 @@ pub fn run() {
                         window.outer_position(),
                         window.inner_size(),
                         window.scale_factor().unwrap_or(1.0),
+                        window.is_minimized().unwrap_or(false),
                     );
                     let _ = window.hide();
                 }
@@ -251,16 +252,23 @@ pub fn run() {
                 // never hits `CloseRequested`. Persist here as a fallback; the run
                 // loop invokes this before windows are torn down.
                 if let Some(window) = app.get_webview_window("settings") {
-                    // Only when it is actually on screen. A never-opened settings
-                    // window still reports the OS default placement, and persisting
-                    // that would override the centered-on-first-open default.
-                    if window.is_visible().unwrap_or(false) {
+                    // Only when it is actually on screen and not minimized. A
+                    // never-opened settings window still reports the OS default
+                    // placement, and persisting that would override the
+                    // centered-on-first-open default. A minimized window still
+                    // reports `is_visible() == true` on Windows while its client
+                    // rect collapses to 0x0, so both checks are required to keep a
+                    // valid record from being overwritten with an unusable one.
+                    if window.is_visible().unwrap_or(false)
+                        && !window.is_minimized().unwrap_or(false)
+                    {
                         let manager = app.state::<Arc<AppState>>().config_manager.clone();
                         persist_settings_geometry(
                             &manager,
                             window.outer_position(),
                             window.inner_size(),
                             window.scale_factor().unwrap_or(1.0),
+                            window.is_minimized().unwrap_or(false),
                         );
                     }
                 }
@@ -274,16 +282,28 @@ pub fn run() {
 /// the scale factor of the display it sits on, so the restore path can rebuild the
 /// exact physical rectangle even in mixed-DPI layouts.
 ///
-/// The position/size/scale are passed in (rather than a window handle) because the
-/// two call sites — `WindowEvent::CloseRequested` and `RunEvent::Exit` — hand out
-/// different window types that only share these accessors.
+/// The position/size/scale/is-minimized are passed in (rather than a window handle)
+/// because the two call sites — `WindowEvent::CloseRequested` and `RunEvent::Exit`
+/// — hand out different window types that only share these accessors.
+///
+/// A minimized window must never be persisted: on Windows it still reports
+/// `is_visible() == true` while its client rect collapses to 0x0, so writing that
+/// would overwrite a previously valid record with an unusable one. The same applies
+/// to any degenerate (zero-sized) reading, hence the explicit guards below.
 fn persist_settings_geometry(
     config_manager: &ConfigManager,
     position: Result<tauri::PhysicalPosition<i32>, tauri::Error>,
     size: Result<tauri::PhysicalSize<u32>, tauri::Error>,
     scale: f64,
+    is_minimized: bool,
 ) {
+    if is_minimized {
+        return;
+    }
     if let (Ok(position), Ok(size)) = (position, size) {
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
         if scale.is_finite() && scale > 0.0 {
             let geometry = config::SettingsWindowGeometry {
                 x: position.x as f64 / scale,
@@ -312,5 +332,146 @@ pub(crate) async fn fetch_usage_background(handle: &AppHandle, state: &Arc<AppSt
             tray::update_tray_tooltip(handle, "Codex 用量读取失败");
             tray::update_tray_icon(handle, None, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri::{PhysicalPosition, PhysicalSize};
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "codex-usage-overlay-lib-geometry-{tag}-{}",
+            std::process::id()
+        ))
+    }
+
+    /// A fresh manager backed by an isolated temp directory, plus that directory so
+    /// the caller can clean it up the way the config tests do.
+    fn temp_manager(tag: &str) -> (ConfigManager, std::path::PathBuf) {
+        let dir = temp_dir(tag);
+        let _ = std::fs::remove_dir_all(&dir);
+        (ConfigManager::with_runtime_dir(dir.clone()), dir)
+    }
+
+    /// A previously persisted, valid record that must survive any rejected write.
+    fn valid_geometry() -> config::SettingsWindowGeometry {
+        config::SettingsWindowGeometry {
+            x: 120.0,
+            y: 80.0,
+            width: 480.0,
+            height: 660.0,
+            scale_factor: Some(1.0),
+        }
+    }
+
+    fn assert_record_unchanged(manager: &ConfigManager) {
+        let loaded = manager
+            .load_settings_geometry()
+            .expect("the previously saved geometry must still load");
+        assert_eq!((loaded.x, loaded.y), (120.0, 80.0));
+        assert_eq!((loaded.width, loaded.height), (480.0, 660.0));
+        assert_eq!(loaded.scale_factor, Some(1.0));
+    }
+
+    #[test]
+    fn persist_skips_zero_sized_geometry() {
+        let (manager, dir) = temp_manager("persist-zero-size");
+        manager.save_settings_geometry(&valid_geometry());
+
+        // A minimized window reports 0x0 client size; persisting that would clobber
+        // the valid record, so it has to be rejected.
+        persist_settings_geometry(
+            &manager,
+            Ok(PhysicalPosition::new(0, 0)),
+            Ok(PhysicalSize::new(0, 0)),
+            1.0,
+            false,
+        );
+        assert_record_unchanged(&manager);
+
+        // Either degenerate axis alone is enough to reject the write.
+        persist_settings_geometry(
+            &manager,
+            Ok(PhysicalPosition::new(10, 20)),
+            Ok(PhysicalSize::new(0, 660)),
+            1.0,
+            false,
+        );
+        assert_record_unchanged(&manager);
+
+        persist_settings_geometry(
+            &manager,
+            Ok(PhysicalPosition::new(10, 20)),
+            Ok(PhysicalSize::new(480, 0)),
+            1.0,
+            false,
+        );
+        assert_record_unchanged(&manager);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_skips_minimized_windows() {
+        let (manager, dir) = temp_manager("persist-minimized");
+        manager.save_settings_geometry(&valid_geometry());
+
+        // Even if a size somehow reads as non-zero, a minimized window must be
+        // treated as unusable and must not overwrite the stored record.
+        persist_settings_geometry(
+            &manager,
+            Ok(PhysicalPosition::new(10, 20)),
+            Ok(PhysicalSize::new(480, 660)),
+            1.0,
+            true,
+        );
+        assert_record_unchanged(&manager);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_rejects_an_unusable_scale_factor() {
+        let (manager, dir) = temp_manager("persist-bad-scale");
+        manager.save_settings_geometry(&valid_geometry());
+
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            persist_settings_geometry(
+                &manager,
+                Ok(PhysicalPosition::new(10, 20)),
+                Ok(PhysicalSize::new(480, 660)),
+                scale,
+                false,
+            );
+            assert_record_unchanged(&manager);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_writes_valid_geometry_as_logical_values() {
+        let (manager, dir) = temp_manager("persist-valid");
+
+        // Positive control: a healthy reading must still be persisted, converted to
+        // logical units with the display's scale factor.
+        persist_settings_geometry(
+            &manager,
+            Ok(PhysicalPosition::new(300, 400)),
+            Ok(PhysicalSize::new(960, 1320)),
+            2.0,
+            false,
+        );
+
+        let loaded = manager
+            .load_settings_geometry()
+            .expect("geometry should be saved");
+        assert_eq!((loaded.x, loaded.y), (150.0, 200.0));
+        assert_eq!((loaded.width, loaded.height), (480.0, 660.0));
+        assert_eq!(loaded.scale_factor, Some(2.0));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
