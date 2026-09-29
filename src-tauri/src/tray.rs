@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex as StdMutex;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Position, Size,
@@ -7,18 +9,156 @@ use tauri::{
 };
 
 pub const TRAY_ID: &str = "main-tray";
-const SETTINGS_DEFAULT_WIDTH: f64 = 480.0;
-const SETTINGS_DEFAULT_HEIGHT: f64 = 660.0;
-const SETTINGS_MIN_WIDTH: f64 = 380.0;
-const SETTINGS_MIN_HEIGHT: f64 = 400.0;
+/// Label of the tray popup webview window.
+pub const TRAY_MENU_WINDOW_LABEL: &str = "tray-menu";
+const SETTINGS_DEFAULT_WIDTH: f64 = 960.0;
+const SETTINGS_DEFAULT_HEIGHT: f64 = 620.0;
+const SETTINGS_MIN_WIDTH: f64 = 760.0;
+const SETTINGS_MIN_HEIGHT: f64 = 500.0;
 const SETTINGS_MAX_WIDTH: f64 = 1600.0;
 const SETTINGS_MAX_HEIGHT: f64 = 1600.0;
-/// Safety bounds for the tray menu popup width, in logical pixels.
-const TRAY_MENU_MIN_WIDTH: f64 = 300.0;
+/// Safety bounds for the tray menu popup width, in logical pixels. The floor is the
+/// frontend contract's own minimum (`TRAY_MENU_MIN_WIDTH` in `TrayMenuView.tsx`), so
+/// the popup stays compact in the common case and the two ends cannot disagree.
+const TRAY_MENU_MIN_WIDTH: f64 = 280.0;
 const TRAY_MENU_MAX_WIDTH: f64 = 500.0;
+/// Debounce window for tray clicks: a rapid double click (or a burst of clicks)
+/// coalesces into a single show/hide intent instead of firing a toggle per event.
+pub const TRAY_MENU_CLICK_DEBOUNCE: Duration = Duration::from_millis(280);
+/// Length of the focus grace period that follows a successful `window.show()`.
+pub const TRAY_MENU_FOCUS_GRACE: Duration = Duration::from_millis(180);
 static TRAY_MENU_GENERATION: AtomicU64 = AtomicU64::new(0);
 static TRAY_MENU_LAYOUT_REVISION: AtomicU64 = AtomicU64::new(0);
 static TRAY_MENU_LAYOUT_LOCK: StdMutex<()> = StdMutex::new(());
+/// Live click debounce/Toggle state. The decision logic itself lives in
+/// `TrayMenuClickGate`, which takes its clock as a parameter and is therefore
+/// drivable from an offline unit test.
+static TRAY_MENU_CLICK_GATE: StdMutex<TrayMenuClickGate> = StdMutex::new(TrayMenuClickGate::new());
+
+/// What a gated tray click should do.
+///
+/// Modelling the decision as a value — instead of performing the window calls
+/// inline — is what makes the debounce and the Toggle semantics falsifiable without
+/// an `AppHandle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayMenuClickAction {
+    /// The popup was not visible: open (or re-open) it and bump the generation.
+    Open,
+    /// The popup was already visible: collapse it without re-opening it.
+    Hide,
+    /// Swallowed by the debounce window: do nothing at all.
+    Ignore,
+}
+
+/// 250~300 ms click debounce plus an idempotent Toggle state machine, replacing the
+/// mechanical `DoubleClick` listener.
+///
+/// Rapid clicks and double clicks coalesce into one Toggle intent. While the menu is
+/// already expanded a double click is a single deliberate collapse — it is never
+/// re-opened, so the generation does not churn.
+///
+/// The clock is a parameter rather than `Instant::now()`, so tests drive it
+/// deterministically and never depend on a real sleep.
+#[derive(Debug, Default)]
+pub struct TrayMenuClickGate {
+    last_click: Option<Instant>,
+}
+
+impl TrayMenuClickGate {
+    pub const fn new() -> Self {
+        Self { last_click: None }
+    }
+
+    pub fn on_click(&mut self, now: Instant, menu_visible: bool) -> TrayMenuClickAction {
+        if let Some(last) = self.last_click {
+            if now.saturating_duration_since(last) < TRAY_MENU_CLICK_DEBOUNCE {
+                return TrayMenuClickAction::Ignore;
+            }
+        }
+        self.last_click = Some(now);
+        if menu_visible {
+            TrayMenuClickAction::Hide
+        } else {
+            TrayMenuClickAction::Open
+        }
+    }
+}
+
+/// Result of driving the tray popup's focus grace period.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayMenuFocusAction {
+    /// Leave the popup exactly as it is.
+    Keep,
+    /// Close the popup.
+    Hide,
+}
+
+/// The tray popup's focus grace state: when it was last shown and whether a blur
+/// arrived inside the grace window.
+///
+/// Holding the state in a struct with an injectable clock — instead of hiding it
+/// inside the `on_window_event` closure — is what lets the guard below be asserted
+/// offline.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TrayMenuFocusState {
+    /// The plan's `SHOW_TIMESTAMP`: the instant `window.show()` last succeeded. It
+    /// is the start of the grace period and the guard's only reference point.
+    show_timestamp: Option<Instant>,
+    pending_blur: bool,
+}
+
+impl TrayMenuFocusState {
+    /// Anchors the grace window at the instant `window.show()` succeeded.
+    pub fn on_shown(&mut self, now: Instant) {
+        self.show_timestamp = Some(now);
+        self.pending_blur = false;
+    }
+
+    /// Records a `Focused(false)` event.
+    ///
+    /// Inside the grace window the blur is *remembered* rather than acted on: on
+    /// Windows a background process clicking the tray icon often gets a transient
+    /// kill-focus while the popup is still being focused, and hiding on it is what
+    /// made the click look like it did nothing. A blur after the grace window has
+    /// closed is an ordinary dismissal and hides at once.
+    pub fn on_blur(&mut self, now: Instant) -> TrayMenuFocusAction {
+        if self.in_grace(now) {
+            self.pending_blur = true;
+            TrayMenuFocusAction::Keep
+        } else {
+            self.clear();
+            TrayMenuFocusAction::Hide
+        }
+    }
+
+    /// The grace timer's authoritative verdict — the unique guard contract.
+    ///
+    /// The popup is hidden **only** when a blur was actually observed *and* the
+    /// window is still unfocused. A window that never received `Focused(false)` must
+    /// stay visible even if Windows never granted it the foreground and
+    /// `is_focused()` reports false; otherwise the always-on-top popup would be
+    /// killed by a focus state it never observed.
+    pub fn on_grace_expired(&mut self, is_focused: bool) -> TrayMenuFocusAction {
+        let should_hide = self.pending_blur && !is_focused;
+        self.clear();
+        if should_hide {
+            TrayMenuFocusAction::Hide
+        } else {
+            TrayMenuFocusAction::Keep
+        }
+    }
+
+    fn in_grace(&self, now: Instant) -> bool {
+        self.show_timestamp
+            .is_some_and(|shown| now.saturating_duration_since(shown) < TRAY_MENU_FOCUS_GRACE)
+    }
+
+    fn clear(&mut self) {
+        self.show_timestamp = None;
+        self.pending_blur = false;
+    }
+}
+
 
 pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon<Wry>, tauri::Error> {
     // Initial dual-ring gauge icon
@@ -32,7 +172,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon<Wry>, tauri::Error> {
             if let TrayIconEvent::Click { button, button_state: MouseButtonState::Up, .. } = event {
                 let app = tray.app_handle();
                 match button {
-                    MouseButton::Left | MouseButton::Right => open_tray_menu_window(app),
+                    MouseButton::Left | MouseButton::Right => handle_tray_click(app),
                     _ => {}
                 }
             }
@@ -40,6 +180,32 @@ pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon<Wry>, tauri::Error> {
         .build(app)?;
 
     Ok(tray)
+}
+
+/// Entry point for a tray icon click: debounce it, then open or collapse the popup.
+///
+/// Both buttons share one intent (spec: "点击托盘时若已可见则收起"), so rapid clicks
+/// and double clicks produce at most one action.
+pub fn handle_tray_click(app: &AppHandle) {
+    let visible = app
+        .get_webview_window(TRAY_MENU_WINDOW_LABEL)
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false);
+    let action = match TRAY_MENU_CLICK_GATE.lock() {
+        Ok(mut gate) => gate.on_click(Instant::now(), visible),
+        Err(_) => TrayMenuClickAction::Ignore,
+    };
+    match action {
+        TrayMenuClickAction::Open => open_tray_menu_window(app),
+        TrayMenuClickAction::Hide => {
+            // Already open: collapse it without re-opening, so the generation is
+            // left alone (a double click must not restart the popup).
+            if let Some(window) = app.get_webview_window(TRAY_MENU_WINDOW_LABEL) {
+                let _ = window.hide();
+            }
+        }
+        TrayMenuClickAction::Ignore => {}
+    }
 }
 
 pub fn handle_menu_action(app: &AppHandle, id: &str) {
@@ -101,6 +267,115 @@ pub fn tray_menu_generation() -> u64 {
     TRAY_MENU_GENERATION.load(Ordering::SeqCst)
 }
 
+/// Reads the live focus-grace state, or `None` when the app state is unavailable.
+fn with_tray_menu_focus<R>(app: &AppHandle, f: impl FnOnce(&mut TrayMenuFocusState) -> R) -> Option<R> {
+    let state = app.try_state::<Arc<crate::commands::AppState>>()?;
+    state.tray_menu_focus.lock().ok().map(|mut focus| f(&mut focus))
+}
+
+/// Anchors the focus grace period at the instant `window.show()` succeeded.
+fn note_tray_menu_shown(app: &AppHandle) {
+    let _ = with_tray_menu_focus(app, |focus| focus.on_shown(Instant::now()));
+}
+
+/// Drives the grace period for a `Focused(false)` event on the tray popup.
+///
+/// Returns true when the caller must hide the popup right away — i.e. when the blur
+/// arrived *after* the grace window, or when no focus state is available at all.
+pub fn on_tray_menu_blur(app: &AppHandle) -> bool {
+    with_tray_menu_focus(app, |focus| focus.on_blur(Instant::now()))
+        .map(|action| action == TrayMenuFocusAction::Hide)
+        .unwrap_or(true)
+}
+
+/// The grace timer: the only place where a blur *inside* the grace window can close
+/// the popup. It re-checks the window's focus state on expiry, so the `pending_blur`
+/// flag and the focus state must *both* agree before anything is hidden.
+fn schedule_tray_menu_grace_check(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(TRAY_MENU_FOCUS_GRACE).await;
+        let Some(window) = app.get_webview_window(TRAY_MENU_WINDOW_LABEL) else {
+            return;
+        };
+        let is_focused = window.is_focused().unwrap_or(false);
+        let hide = with_tray_menu_focus(&app, |focus| focus.on_grace_expired(is_focused))
+            .map(|action| action == TrayMenuFocusAction::Hide)
+            .unwrap_or(false);
+        if hide {
+            let _ = window.hide();
+        }
+    });
+}
+
+/// Resolves the tray icon's physical anchor rectangle.
+///
+/// `rect` is `None` when the Windows API fails — which it does while the icon sits
+/// in the notification-area overflow flyout. That case degrades to the bottom-right
+/// corner of the fallback monitor's work area, so the popup is still shown inside
+/// the screen instead of the layout aborting before `show()`.
+fn tray_icon_anchor(
+    rect: Option<(i32, i32, i32, i32)>,
+    work: Option<(i32, i32, i32, i32)>,
+) -> Option<(i32, i32, i32, i32)> {
+    match rect {
+        Some(rect) => Some(rect),
+        None => work.map(|(left, top, width, height)| {
+            (left.saturating_add(width), top.saturating_add(height), 0, 0)
+        }),
+    }
+}
+
+/// The physical rectangle the tray popup is placed at, plus the logical height it
+/// reports back to the frontend.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrayMenuPlacement {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub height_logical: f64,
+}
+
+/// Places the popup next to the given icon anchor. Pure, so `rect() == None` can be
+/// asserted offline: the caller owns the window calls.
+fn plan_tray_menu_placement(
+    icon: (i32, i32, i32, i32),
+    work: (i32, i32, i32, i32),
+    scale: f64,
+    height_logical: f64,
+    width_logical: f64,
+) -> TrayMenuPlacement {
+    let (icon_x, icon_y, icon_width, icon_height) = icon;
+    let (left, top, work_width, work_height) = work;
+    let margin = (8.0 * scale).ceil() as i32;
+    let right = left + work_width;
+    let bottom = top + work_height;
+    let desired_width = width_logical.clamp(TRAY_MENU_MIN_WIDTH, TRAY_MENU_MAX_WIDTH);
+    let width = (desired_width * scale).ceil() as i32;
+    let width = width.min(work_width - margin * 2).max(1);
+    let desired_height = (height_logical * scale).ceil() as i32;
+    let height = desired_height.min(work_height - margin * 2).max(1);
+    let (x, y) = if icon_x + icon_width <= left {
+        (left + margin, icon_y + icon_height - height)
+    } else if icon_x >= right {
+        (right - width - margin, icon_y + icon_height - height)
+    } else if icon_y + icon_height <= top {
+        (icon_x + icon_width - width, top + margin)
+    } else {
+        (icon_x + icon_width - width, icon_y - height - margin)
+    };
+    let x = x.clamp(left, (right - width).max(left));
+    let y = y.clamp(top, (bottom - height).max(top));
+    TrayMenuPlacement {
+        x,
+        y,
+        width: width as u32,
+        height: height as u32,
+        height_logical: height as f64 / scale,
+    }
+}
+
 pub fn layout_tray_menu(
     app: &AppHandle,
     generation: u64,
@@ -118,12 +393,15 @@ pub fn layout_tray_menu(
         return Err("Stale or invalid tray menu layout request".into());
     }
     TRAY_MENU_LAYOUT_REVISION.store(revision, Ordering::SeqCst);
-    let window = app.get_webview_window("tray-menu").ok_or("Tray menu window unavailable")?;
+    let window = app.get_webview_window(TRAY_MENU_WINDOW_LABEL).ok_or("Tray menu window unavailable")?;
     let tray = app.tray_by_id(TRAY_ID).ok_or("Tray icon unavailable")?;
-    let rect = tray.rect().map_err(|e| e.to_string())?;
+    // `tray.rect()` fails while the icon lives in the notification-area overflow
+    // flyout. It must degrade to the fallback corner rather than short-circuit the
+    // layout: the `?` that used to sit here skipped `window.show()` entirely, so a
+    // click on such an icon looked like it did nothing at all.
     let fallback_monitor = window.current_monitor().ok().flatten().or_else(|| window.primary_monitor().ok().flatten());
     let fallback_scale = fallback_monitor.as_ref().map(tauri::Monitor::scale_factor).unwrap_or(1.0);
-    let (icon_x, icon_y, icon_width, icon_height) = if let Some(rect) = rect {
+    let icon_rect = tray.rect().ok().flatten().map(|rect| {
         let x = match rect.position {
             Position::Physical(p) => p.x,
             Position::Logical(p) => (p.x * fallback_scale).round() as i32,
@@ -141,10 +419,13 @@ pub fn layout_tray_menu(
             Size::Logical(s) => (s.height * fallback_scale).round() as i32,
         };
         (x, y, width, height)
-    } else {
-        let work = fallback_monitor.as_ref().ok_or("Tray monitor unavailable")?.work_area();
-        (work.position.x + work.size.width as i32, work.position.y + work.size.height as i32, 0, 0)
-    };
+    });
+    let fallback_work = fallback_monitor.as_ref().map(|monitor| {
+        let work = monitor.work_area();
+        (work.position.x, work.position.y, work.size.width as i32, work.size.height as i32)
+    });
+    let (icon_x, icon_y, icon_width, icon_height) =
+        tray_icon_anchor(icon_rect, fallback_work).ok_or("Tray monitor unavailable")?;
     let center_x = icon_x + icon_width / 2;
     let center_y = icon_y + icon_height / 2;
     let monitor = app.available_monitors().map_err(|e| e.to_string())?.into_iter().find(|monitor| {
@@ -155,32 +436,23 @@ pub fn layout_tray_menu(
     }).or(fallback_monitor).ok_or("Tray monitor unavailable")?;
     let scale = monitor.scale_factor();
     let work = monitor.work_area();
-    let margin = (8.0 * scale).ceil() as i32;
-    let desired_width = width_logical.clamp(TRAY_MENU_MIN_WIDTH, TRAY_MENU_MAX_WIDTH);
-    let width = (desired_width * scale).ceil() as i32;
-    let width = width.min(work.size.width as i32 - margin * 2).max(1);
-    let desired_height = (height_logical * scale).ceil() as i32;
-    let height = desired_height.min(work.size.height as i32 - margin * 2).max(1);
-    let left = work.position.x;
-    let top = work.position.y;
-    let right = left + work.size.width as i32;
-    let bottom = top + work.size.height as i32;
-    let (x, y) = if icon_x + icon_width <= left {
-        (left + margin, icon_y + icon_height - height)
-    } else if icon_x >= right {
-        (right - width - margin, icon_y + icon_height - height)
-    } else if icon_y + icon_height <= top {
-        (icon_x + icon_width - width, top + margin)
-    } else {
-        (icon_x + icon_width - width, icon_y - height - margin)
-    };
-    let x = x.clamp(left, (right - width).max(left));
-    let y = y.clamp(top, (bottom - height).max(top));
-    window.set_size(Size::Physical(PhysicalSize::new(width as u32, height as u32))).map_err(|e| e.to_string())?;
-    window.set_position(Position::Physical(PhysicalPosition::new(x, y))).map_err(|e| e.to_string())?;
+    let placement = plan_tray_menu_placement(
+        (icon_x, icon_y, icon_width, icon_height),
+        (work.position.x, work.position.y, work.size.width as i32, work.size.height as i32),
+        scale,
+        height_logical,
+        width_logical,
+    );
+    window.set_size(Size::Physical(PhysicalSize::new(placement.width, placement.height))).map_err(|e| e.to_string())?;
+    window.set_position(Position::Physical(PhysicalPosition::new(placement.x, placement.y))).map_err(|e| e.to_string())?;
     window.show().map_err(|e| e.to_string())?;
+    // Start the focus grace period at the instant the popup actually appeared: the
+    // transient kill-focus Windows delivers while the popup is still being focused
+    // must be remembered, not acted on.
+    note_tray_menu_shown(app);
     window.set_focus().map_err(|e| e.to_string())?;
-    Ok(height as f64 / scale)
+    schedule_tray_menu_grace_check(app);
+    Ok(placement.height_logical)
 }
 
 pub fn toggle_main_window(app: &AppHandle) {
@@ -588,7 +860,184 @@ fn blend_over(dst: [f64; 4], src: [f64; 4]) -> [f64; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SettingsWindowGeometry;
+    use crate::config::{ConfigManager, SettingsWindowGeometry};
+
+    /// Models `handle_tray_click`: the gate decides, and an `Open` is what bumps
+    /// `TRAY_MENU_GENERATION` in `open_tray_menu_window`. Driving the loop here keeps
+    /// the assertion deterministic without a live tray or window.
+    #[derive(Default)]
+    struct ClickHarness {
+        gate: TrayMenuClickGate,
+        visible: bool,
+        opens: usize,
+        hides: usize,
+    }
+
+    impl ClickHarness {
+        fn click_at(&mut self, at: Instant, visible_at_click: bool) -> TrayMenuClickAction {
+            let action = self.gate.on_click(at, visible_at_click);
+            match action {
+                TrayMenuClickAction::Open => {
+                    self.opens += 1;
+                    self.visible = true;
+                }
+                TrayMenuClickAction::Hide => {
+                    self.hides += 1;
+                    self.visible = false;
+                }
+                TrayMenuClickAction::Ignore => {}
+            }
+            action
+        }
+    }
+
+    #[test]
+    fn click_debounce_coalesces_a_burst_into_one_toggle() {
+        // The debounce window must stay inside the specified 250~300ms band.
+        assert!(TRAY_MENU_CLICK_DEBOUNCE >= Duration::from_millis(250));
+        assert!(TRAY_MENU_CLICK_DEBOUNCE <= Duration::from_millis(300));
+
+        let start = Instant::now();
+        let mut harness = ClickHarness::default();
+        // Three clicks inside one window: one Toggle, i.e. one `Open` (and therefore
+        // exactly one generation bump) and a single visibility flip.
+        assert_eq!(harness.click_at(start, false), TrayMenuClickAction::Open);
+        assert_eq!(harness.click_at(start + Duration::from_millis(40), false), TrayMenuClickAction::Ignore);
+        assert_eq!(harness.click_at(start + Duration::from_millis(90), false), TrayMenuClickAction::Ignore);
+        assert_eq!(harness.opens, 1);
+        assert_eq!(harness.hides, 0);
+        assert!(harness.visible);
+
+        // Past the window the next click is a fresh intent again.
+        let later = start + TRAY_MENU_CLICK_DEBOUNCE;
+        assert_eq!(harness.click_at(later, true), TrayMenuClickAction::Hide);
+        assert_eq!(harness.opens, 1);
+        assert_eq!(harness.hides, 1);
+        assert!(!harness.visible);
+    }
+
+    #[test]
+    fn a_double_click_on_an_expanded_menu_is_a_single_collapse() {
+        let start = Instant::now();
+        let mut harness = ClickHarness { visible: true, ..ClickHarness::default() };
+        // Already visible: the first click collapses it, the second is swallowed, so
+        // the popup can never be re-opened by the trailing click of a double click.
+        assert_eq!(harness.click_at(start, true), TrayMenuClickAction::Hide);
+        assert_eq!(harness.click_at(start + Duration::from_millis(120), true), TrayMenuClickAction::Ignore);
+        assert_eq!(harness.opens, 0);
+        assert_eq!(harness.hides, 1);
+        assert!(!harness.visible);
+        // Generation delta this round is opens == 0 (<= 1).
+        assert!(harness.opens <= 1);
+    }
+
+    /// P3-1: the guard is `pending_blur == true && !is_focused`.
+    #[test]
+    fn grace_period_hides_only_after_an_observed_blur_and_a_lost_focus() {
+        let shown = Instant::now();
+
+        // ① Blur inside the grace window and still unfocused on expiry -> hide.
+        let mut focus = TrayMenuFocusState::default();
+        focus.on_shown(shown);
+        assert_eq!(focus.on_blur(shown + Duration::from_millis(30)), TrayMenuFocusAction::Keep);
+        assert!(focus.pending_blur);
+        assert_eq!(focus.on_grace_expired(false), TrayMenuFocusAction::Hide);
+        // The expiry clears the timing state either way.
+        assert!(!focus.pending_blur);
+        assert_eq!(focus.show_timestamp, None);
+
+        // ② Blur inside the grace window but focused again by expiry -> stay visible.
+        let mut focus = TrayMenuFocusState::default();
+        focus.on_shown(shown);
+        focus.on_blur(shown + Duration::from_millis(30));
+        assert_eq!(focus.on_grace_expired(true), TrayMenuFocusAction::Keep);
+        assert!(!focus.pending_blur);
+
+        // ③ Core guard: no blur was ever observed, and Windows never granted the
+        // foreground so `is_focused()` is false. The popup must stay visible —
+        // dropping the `pending_blur` half of the guard turns this assertion red.
+        let mut focus = TrayMenuFocusState::default();
+        focus.on_shown(shown);
+        assert!(!focus.pending_blur);
+        assert_eq!(focus.on_grace_expired(false), TrayMenuFocusAction::Keep);
+
+        // ④ A blur after the window has closed is an ordinary dismissal.
+        let mut focus = TrayMenuFocusState::default();
+        focus.on_shown(shown);
+        assert_eq!(focus.on_blur(shown + TRAY_MENU_FOCUS_GRACE), TrayMenuFocusAction::Hide);
+
+        // ⑤ A popup that was never shown has no grace window to protect.
+        let mut focus = TrayMenuFocusState::default();
+        assert_eq!(focus.on_blur(shown), TrayMenuFocusAction::Hide);
+
+        // The grace period must stay inside the specified 150~200ms band.
+        assert!(TRAY_MENU_FOCUS_GRACE >= Duration::from_millis(150));
+        assert!(TRAY_MENU_FOCUS_GRACE <= Duration::from_millis(200));
+    }
+
+    /// The state the window-event closure and the grace timer share must be the one
+    /// `AppState::for_test` hands out, so the guard above governs the real path.
+    #[test]
+    fn app_state_carries_the_shared_tray_menu_focus_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-usage-overlay-tray-focus-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = Arc::new(crate::commands::AppState::for_test(
+            ConfigManager::with_runtime_dir(dir.clone()),
+        ));
+
+        let shown = Instant::now();
+        {
+            let mut focus = state.tray_menu_focus.lock().expect("focus state");
+            focus.on_shown(shown);
+            focus.on_blur(shown + Duration::from_millis(20));
+        }
+        let mut focus = state.tray_menu_focus.lock().expect("focus state");
+        assert!(focus.pending_blur, "the blur must have been remembered, not acted on");
+        assert_eq!(focus.on_grace_expired(false), TrayMenuFocusAction::Hide);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_tray_icon_rect_degrades_to_the_fallback_corner() {
+        let work = (0, 0, 1920, 1040);
+        // `tray.rect()` failing must not abort the layout: fall back to the corner.
+        assert_eq!(tray_icon_anchor(None, Some(work)), Some((1920, 1040, 0, 0)));
+        // A readable rect wins, whether or not a fallback work area exists.
+        assert_eq!(tray_icon_anchor(Some((10, 20, 24, 24)), Some(work)), Some((10, 20, 24, 24)));
+        assert_eq!(tray_icon_anchor(Some((10, 20, 24, 24)), None), Some((10, 20, 24, 24)));
+        // Nothing to place against at all: an error, never a panic.
+        assert_eq!(tray_icon_anchor(None, None), None);
+    }
+
+    /// The offline half of "`rect() == None` must still show the popup": the
+    /// placement itself is computed from the fallback anchor and stays on screen.
+    #[test]
+    fn a_popup_without_a_tray_icon_rect_still_lands_inside_the_work_area() {
+        let work = (0, 0, 1920, 1040);
+        let anchor = tray_icon_anchor(None, Some(work)).expect("the fallback corner must resolve");
+        let placement = plan_tray_menu_placement(anchor, work, 1.0, 300.0, 380.0);
+        assert_eq!(placement.width, 380, "the requested width must survive the fallback");
+        assert!(placement.x >= 0 && placement.y >= 0);
+        assert!(placement.x + placement.width as i32 <= 1920);
+        assert!(placement.y + placement.height as i32 <= 1040);
+    }
+
+    #[test]
+    fn the_popup_width_uses_the_shared_logical_bounds() {
+        let work = (0, 0, 1920, 1040);
+        let icon = (1900, 1040, 24, 24);
+        // The backend floor matches the frontend contract (`TrayMenuView.tsx`).
+        assert_eq!(plan_tray_menu_placement(icon, work, 1.0, 300.0, 100.0).width, 280);
+        assert_eq!(plan_tray_menu_placement(icon, work, 1.0, 300.0, 280.0).width, 280);
+        assert_eq!(plan_tray_menu_placement(icon, work, 1.0, 300.0, 900.0).width, 500);
+        // The reported logical height divides the clamped physical height back out.
+        let scaled = plan_tray_menu_placement(icon, work, 2.0, 300.0, 300.0);
+        assert!((scaled.height_logical - 300.0).abs() < 0.001, "was {}", scaled.height_logical);
+    }
 
     /// Primary display 1920x1080 @100% at the origin, secondary 2560x1440 @150%
     /// placed to its right — the mixed-DPI layout from the review handoff.
@@ -600,12 +1049,13 @@ mod tests {
     }
 
     /// Window lived on the secondary display: physical (2000, 200), inner size
-    /// 720x990, i.e. logical (1333.33, 133.33, 480, 660) at scale 1.5.
+    /// 1200x990, i.e. logical (1333.33, 133.33, 800, 660) at scale 1.5 — comfortably
+    /// above `SETTINGS_MIN_WIDTH` so the restore is not clamped.
     fn geometry_on_secondary() -> SettingsWindowGeometry {
         SettingsWindowGeometry {
             x: 1333.33,
             y: 133.33,
-            width: 480.0,
+            width: 800.0,
             height: 660.0,
             scale_factor: Some(1.5),
         }
@@ -638,8 +1088,28 @@ mod tests {
         let placement = plan_settings_geometry(&areas, &geometry_on_secondary()).expect("placement");
         assert!((placement.x - 2000.0).abs() < 1.0, "x was {}", placement.x);
         assert!((placement.y - 200.0).abs() < 1.0, "y was {}", placement.y);
-        assert!((placement.width - 720.0).abs() < 0.5, "width was {}", placement.width);
+        assert!((placement.width - 1200.0).abs() < 0.5, "width was {}", placement.width);
         assert!((placement.height - 990.0).abs() < 0.5, "height was {}", placement.height);
+    }
+
+    /// A record saved before the settings window grew must not be restored narrower
+    /// than the new floor: the two-column layout needs `SETTINGS_MIN_WIDTH`.
+    #[test]
+    fn a_legacy_narrow_geometry_is_widened_to_the_new_minimum() {
+        let areas = mixed_dpi_layout();
+        let narrow = SettingsWindowGeometry {
+            x: 1333.33,
+            y: 133.33,
+            width: 480.0,
+            height: 660.0,
+            scale_factor: Some(1.5),
+        };
+        let placement = plan_settings_geometry(&areas, &narrow).expect("placement");
+        assert!(
+            (placement.width - SETTINGS_MIN_WIDTH * 1.5).abs() < 0.5,
+            "width was {}",
+            placement.width
+        );
     }
 
     #[test]
@@ -648,7 +1118,7 @@ mod tests {
         let geometry = geometry_on_secondary();
 
         // Reproduce the old bug: projecting with the primary display's own 100%
-        // scale puts the window at [1333..1813]x[133..793], fully inside the primary
+        // scale puts the window at [1333..2133]x[133..793], overlapping the primary
         // work area — a bogus positive that the old first-hit `find` would accept.
         let legacy_projection = projected_physical_rect(
             &SettingsWindowGeometry { scale_factor: None, ..geometry.clone() },

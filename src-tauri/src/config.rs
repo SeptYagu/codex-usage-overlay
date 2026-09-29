@@ -57,6 +57,10 @@ pub struct OverlaySettings {
     pub auto_edge_hide: bool,
     #[serde(default)]
     pub mouse_passthrough: bool,
+    /// Whether the docked pill draws the 10% grid on its quota bars. Off by
+    /// default, so an upgraded profile keeps the plain bars.
+    #[serde(default)]
+    pub show_percentage_grid: bool,
 }
 
 fn default_scale() -> u32 { 175 }
@@ -85,6 +89,7 @@ impl Default for OverlaySettings {
             weekly_sound_path: None,
             auto_edge_hide: false,
             mouse_passthrough: false,
+            show_percentage_grid: false,
         }
     }
 }
@@ -379,6 +384,32 @@ mod tests {
         assert!(restored.auto_edge_hide);
         assert!(restored.mouse_passthrough);
         assert!(restored.auto_install_updates);
+    }
+
+    /// The `showPercentageGrid` contract: absent -> `false`, present -> the value
+    /// given, and the wire key is the camelCase one the frontend patches with. The
+    /// assertions check the *value* rather than merely "deserialization succeeded",
+    /// so renaming the Rust field (without a matching `serde` rename) turns them red.
+    #[test]
+    fn show_percentage_grid_defaults_off_and_round_trips_when_present() {
+        let absent: OverlaySettings = serde_json::from_value(legacy_settings()).unwrap();
+        assert!(!absent.show_percentage_grid);
+        assert!(!OverlaySettings::default().show_percentage_grid);
+
+        let mut enabled = legacy_settings();
+        enabled["showPercentageGrid"] = json!(true);
+        assert!(serde_json::from_value::<OverlaySettings>(enabled).unwrap().show_percentage_grid);
+
+        let mut disabled = legacy_settings();
+        disabled["showPercentageGrid"] = json!(false);
+        assert!(!serde_json::from_value::<OverlaySettings>(disabled).unwrap().show_percentage_grid);
+
+        let mut settings = OverlaySettings::default();
+        settings.show_percentage_grid = true;
+        let wire = serde_json::to_value(&settings).unwrap();
+        assert_eq!(wire.get("showPercentageGrid"), Some(&json!(true)));
+        let restored: OverlaySettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(restored.show_percentage_grid);
     }
 
     #[test]

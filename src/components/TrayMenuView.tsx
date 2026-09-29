@@ -26,8 +26,61 @@ interface TrayMenuViewProps {
 // `TRAY_MENU_MAX_WIDTH` in `src-tauri/src/tray.rs`. The backend re-clamps
 // authoritatively when it sizes the native window; clamping here keeps the width we
 // request within those bounds so the adaptive logic is well defined and testable.
-const TRAY_MENU_MIN_WIDTH = 300;
+const TRAY_MENU_MIN_WIDTH = 280;
 const TRAY_MENU_MAX_WIDTH = 500;
+// Everything the popup adds around the longest label: the menu item's own left/right
+// padding (20px) plus the outer container's `p-2.5` padding (20px).
+const TRAY_MENU_WIDTH_PADDING = 40;
+
+/**
+ * The single width contract for the tray popup: `clamp(280, 500, ceil(textW) + 40)`,
+ * where `textW` is the *net* width of the longest menu label.
+ *
+ * `textW` has to come from a measurement that is independent of the popup's current
+ * width. Measuring the menu items instead is a non-contractive fixed point: they are
+ * `width: 100%`, so `scrollWidth >= clientWidth` always holds and a popup widened by
+ * one long label can never shrink back once that label gets shorter.
+ */
+export const trayMenuWidthForText = (textW: number): number => Math.min(
+  TRAY_MENU_MAX_WIDTH,
+  Math.max(TRAY_MENU_MIN_WIDTH, Math.ceil(textW) + TRAY_MENU_WIDTH_PADDING),
+);
+
+/**
+ * Rendered width of a single text node. A `Range` measures the text itself, so a
+ * `white-space: nowrap` label reports its intrinsic width even while the popup
+ * container is narrower than the label — which is what makes the contract above
+ * able to shrink as well as grow.
+ */
+const textNodeWidth = (node: Node): number => {
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  return range.getBoundingClientRect().width;
+};
+
+/**
+ * Net text width of one menu item: the widest of its text nodes. Rows whose label is
+ * split across inline spans (e.g. the language row's trailing chevron) are driven by
+ * their longest part, and the unwrapped `Range` measurement above reports that part's
+ * intrinsic width rather than a container-clipped one.
+ */
+const menuItemTextWidth = (item: HTMLElement): number => {
+  const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
+  let widest = 0;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    widest = Math.max(widest, textNodeWidth(node));
+  }
+  return widest;
+};
+
+/** The longest menu label's net text width, in CSS pixels. */
+export const measureLongestTextWidth = (content: HTMLElement): number => {
+  let longest = 0;
+  content.querySelectorAll<HTMLElement>('.tray-menu-item').forEach((item) => {
+    longest = Math.max(longest, menuItemTextWidth(item));
+  });
+  return longest;
+};
 
 type UpdateState =
   | { kind: 'idle' }
@@ -57,16 +110,9 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
     if (!content || !generation || !scaleReadyRef.current) return;
     // 20px covers the outer `p-2.5` padding on both axes.
     const height = Math.ceil(content.getBoundingClientRect().height + 20);
-    // Menu items are `width: 100%`, so only their overflow (`scrollWidth`) reveals
-    // the intrinsic width the popup needs to render every label on a single line.
-    let intrinsicWidth = content.scrollWidth;
-    content.querySelectorAll<HTMLElement>('.tray-menu-item').forEach((item) => {
-      intrinsicWidth = Math.max(intrinsicWidth, item.scrollWidth);
-    });
-    const width = Math.min(
-      TRAY_MENU_MAX_WIDTH,
-      Math.max(TRAY_MENU_MIN_WIDTH, Math.ceil(intrinsicWidth + 20)),
-    );
+    // The popup width follows the longest label's *net* text width only, so it is
+    // free to shrink again when the label gets shorter (see `trayMenuWidthForText`).
+    const width = trayMenuWidthForText(measureLongestTextWidth(content));
     if (height <= 20) return;
     const dprComp = dprCompRef.current;
     const key = `${generation}:${height}:${width}:${dprComp}`;

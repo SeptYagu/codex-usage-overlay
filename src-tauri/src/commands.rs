@@ -26,6 +26,11 @@ pub struct AppState {
     /// this cache is what lets `CloseRequested` / `RunEvent::Exit` still persist
     /// the user's placement when the session ends while minimized.
     pub last_valid_settings_geometry: StdMutex<Option<crate::config::SettingsWindowGeometry>>,
+    /// Focus grace period of the tray popup: the instant it was last shown plus the
+    /// blur observed inside that window. Kept on `AppState` so the `on_window_event`
+    /// closure and the grace timer can share it, and so an offline test can drive it
+    /// through `AppState::for_test`.
+    pub tray_menu_focus: StdMutex<crate::tray::TrayMenuFocusState>,
     pub autostart_update: Mutex<()>,
     pub update_check: Mutex<()>,
     pub update_install: Mutex<()>,
@@ -57,6 +62,7 @@ impl AppState {
             settings: Mutex::new(settings),
             settings_revision: AtomicU64::new(0),
             last_valid_settings_geometry: StdMutex::new(None),
+            tray_menu_focus: StdMutex::new(crate::tray::TrayMenuFocusState::default()),
             autostart_update: Mutex::new(()),
             update_check: Mutex::new(()),
             update_install: Mutex::new(()),
@@ -182,7 +188,7 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "scalePercent" => value.as_u64().is_some_and(|n| (100..=250).contains(&n) && n % 5 == 0),
             "backgroundTransparencyPercent" => value.as_u64().is_some_and(|n| n <= 80 && n % 5 == 0),
             "showCredits" | "autoCheckUpdates" | "autoInstallUpdates" | "fiveHourResetNotification"
-            | "weeklyResetNotification" | "autoEdgeHide" | "mousePassthrough" => value.is_boolean(),
+            | "weeklyResetNotification" | "autoEdgeHide" | "mousePassthrough" | "showPercentageGrid" => value.is_boolean(),
             "autoStart" => allow_auto_start && value.is_boolean(),
             "refreshIntervalSeconds" => value.as_u64().is_some_and(|n| (15..=3600).contains(&n)),
             "language" => matches!(value.as_str(), Some("auto" | "en-US" | "zh-CN" | "zh-Hant")),
@@ -199,6 +205,25 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
         return Err("Automatic installation requires automatic update checks".into());
     }
     Ok(changes)
+}
+
+/// Merges a settings patch into `settings` through the same serde mapping the
+/// persisted file uses.
+///
+/// Extracted out of `apply_settings_patch` so the `patch -> merge -> save -> reload`
+/// chain has an offline landing point: `apply_settings_patch` needs an `&AppHandle`,
+/// which `#[test]` cannot construct, while this function is window-free. Because
+/// `serde` drops a key that has no matching field *silently*, an assertion that goes
+/// through here is what catches a frontend key that no longer maps onto the struct.
+pub fn merge_settings_patch(settings: &mut OverlaySettings, patch: &Value) -> Result<(), String> {
+    let changes = patch.as_object().ok_or("Settings patch must be an object")?;
+    let mut merged = serde_json::to_value(&*settings).map_err(|e| e.to_string())?;
+    let fields = merged.as_object_mut().ok_or("Settings are not an object")?;
+    for (key, value) in changes {
+        fields.insert(key.clone(), value.clone());
+    }
+    *settings = serde_json::from_value(merged).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn reconcile_update_preferences(next: &mut OverlaySettings, changes: &Map<String, Value>) {
@@ -254,6 +279,75 @@ mod settings_patch_tests {
             "autoCheckUpdates": false, "autoInstallUpdates": true
         }), false).is_err());
     }
+
+    /// P2-1: the closed allowlist is the toggle's only user entry point. Without the
+    /// key registered here the whole patch is rejected and the switch can never
+    /// persist, while a frontend-only assertion stays green.
+    #[test]
+    fn show_percentage_grid_is_on_the_boolean_allowlist() {
+        let patch = serde_json::json!({"showPercentageGrid": true});
+        assert_eq!(validate_settings_patch(&patch, false).unwrap().len(), 1);
+        assert!(validate_settings_patch(&serde_json::json!({"showPercentageGrid": false}), false).is_ok());
+        // The boolean branch stays strict, and unknown fields stay rejected.
+        assert!(validate_settings_patch(&serde_json::json!({"showPercentageGrid": "yes"}), false).is_err());
+        assert!(validate_settings_patch(&serde_json::json!({"showPercentageGrid": 1}), false).is_err());
+        assert!(validate_settings_patch(&serde_json::json!({"showPercentageGrid": null}), false).is_err());
+        assert!(validate_settings_patch(&serde_json::json!({"futureField": true}), false).is_err());
+    }
+
+    /// The offline half of P3-4: the same `validate -> merge -> save` chain the
+    /// command runs, minus the `&AppHandle`-only side effects. The reload asserts the
+    /// *value*, so a key that silently fails to map onto `OverlaySettings` (or a
+    /// renamed field whose serde name no longer matches the camelCase wire key) makes
+    /// this fail rather than pass with the toggle simply doing nothing.
+    #[test]
+    fn a_show_percentage_grid_patch_survives_the_persistence_chain() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-usage-overlay-grid-patch-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::for_test(ConfigManager::with_runtime_dir(dir.clone()));
+
+        let patch = serde_json::json!({"showPercentageGrid": true});
+        let changes = validate_settings_patch(&patch, false).expect("the allowlist must accept it");
+        assert_eq!(changes.len(), 1);
+
+        // `apply_settings_patch` (which needs an `&AppHandle`) is replaced here by its
+        // window-free core plus the same `ConfigManager` it writes through.
+        let mut settings = state.config_manager.load_settings();
+        assert!(!settings.show_percentage_grid, "the default must be off");
+        merge_settings_patch(&mut settings, &patch).expect("the patch must merge");
+        assert!(settings.show_percentage_grid, "the key must map onto the field");
+        state.config_manager.save_settings_checked(&settings).expect("the write must succeed");
+
+        // Read back through a fresh manager, i.e. from the file on disk.
+        let reloaded = ConfigManager::with_runtime_dir(dir.clone()).load_settings();
+        assert!(reloaded.show_percentage_grid);
+        let raw = std::fs::read_to_string(state.config_manager.settings_path()).unwrap();
+        assert!(raw.contains("\"showPercentageGrid\": true"), "wire key missing from {raw}");
+
+        // The command also bumps its revision on a successful patch; the state field
+        // is what a frontend assertion sees, so prove the two agree here.
+        state.settings_revision.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(state.settings_revision.load(Ordering::SeqCst), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Negative control: a patch that is not an object, or that carries a key with no
+    /// matching field, must not be able to fabricate the setting.
+    #[test]
+    fn merge_rejects_non_objects_and_ignores_unmapped_keys() {
+        let mut settings = OverlaySettings::default();
+        assert!(merge_settings_patch(&mut settings, &serde_json::json!("nope")).is_err());
+        assert!(merge_settings_patch(&mut settings, &serde_json::json!([1, 2])).is_err());
+
+        // `serde` drops the unknown key silently, so the merge succeeds but the value
+        // is unchanged — the reason `validate_settings_patch` has to run first.
+        merge_settings_patch(&mut settings, &serde_json::json!({"showPercentageGridTypo": true})).unwrap();
+        assert!(!settings.show_percentage_grid);
+    }
 }
 
 async fn apply_settings_patch(
@@ -280,12 +374,8 @@ async fn apply_settings_patch(
         let was_auto_edge_hide = settings.auto_edge_hide;
         let was_mouse_passthrough = settings.mouse_passthrough;
         let previous_settings = settings.clone();
-        let mut merged = serde_json::to_value(&*settings).map_err(|e| e.to_string())?;
-        let fields = merged.as_object_mut().ok_or("Settings are not an object")?;
-        for (key, value) in changes {
-            fields.insert(key.clone(), value.clone());
-        }
-        let mut next: OverlaySettings = serde_json::from_value(merged).map_err(|e| e.to_string())?;
+        let mut next = settings.clone();
+        merge_settings_patch(&mut next, &patch)?;
         reconcile_update_preferences(&mut next, changes);
         state.config_manager.save_settings_checked(&next)?;
         let auto_check_just_enabled = !settings.auto_check_updates && next.auto_check_updates;

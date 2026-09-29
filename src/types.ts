@@ -27,6 +27,7 @@ export interface OverlaySettings {
   weeklySoundPath: string | null;
   autoEdgeHide: boolean;
   mousePassthrough: boolean;
+  showPercentageGrid: boolean;
 }
 
 export interface SettingsEnvelope {
@@ -62,6 +63,7 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   weeklySoundPath: null,
   autoEdgeHide: false,
   mousePassthrough: false,
+  showPercentageGrid: false,
 };
 
 export interface UsageStatus {

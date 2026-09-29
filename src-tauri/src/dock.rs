@@ -99,6 +99,34 @@ pub struct PhysicalRect {
     pub height: u32,
 }
 
+impl PhysicalRect {
+    /// Right edge, in physical pixels. Widened to `i64` so the arithmetic below can
+    /// never overflow on an extreme virtual-desktop coordinate.
+    pub fn right(&self) -> i64 {
+        self.x as i64 + self.width as i64
+    }
+
+    pub fn bottom(&self) -> i64 {
+        self.y as i64 + self.height as i64
+    }
+
+    /// Overlapping area in square physical pixels; zero when the rectangles only
+    /// touch or miss each other entirely.
+    pub fn intersection_area(&self, other: &PhysicalRect) -> i64 {
+        let width = (self.right().min(other.right()) - (self.x as i64).max(other.x as i64)).max(0);
+        let height = (self.bottom().min(other.bottom()) - (self.y as i64).max(other.y as i64)).max(0);
+        width * height
+    }
+}
+
+/// Centre of a rectangle, saturating rather than wrapping on extreme coordinates.
+fn center_of(rect: PhysicalRect) -> (i32, i32) {
+    (
+        rect.x.saturating_add((rect.width / 2).min(i32::MAX as u32) as i32),
+        rect.y.saturating_add((rect.height / 2).min(i32::MAX as u32) as i32),
+    )
+}
+
 impl DockManager {
     pub fn new(config: ConfigManager) -> Self {
         let persisted = config.load_dock_state().unwrap_or_default();
@@ -394,24 +422,84 @@ impl DockManager {
     }
 }
 
-pub fn detect_edge(win: PhysicalRect, work: PhysicalRect, scale_factor: f64) -> Option<Edge> {
+/// True when the two one-dimensional spans share more than an endpoint.
+fn spans(a_start: i32, a_len: u32, b_start: i32, b_len: u32) -> bool {
+    (a_start as i64) < (b_start as i64) + (b_len as i64)
+        && (b_start as i64) < (a_start as i64) + (a_len as i64)
+}
+
+/// True when `edge` of `work` faces empty desktop instead of another monitor.
+///
+/// Whole-edge topology: as soon as *any* part of that edge touches (within a small
+/// alignment tolerance) another monitor's work area that also overlaps on the other
+/// axis, the whole edge is an inter-monitor seam. That is a deliberate
+/// simplification (spec §3.2 T-2): keeping the cursor free to cross between screens
+/// matters more than snapping inside the gap of a staggered layout, because folding
+/// there would strand a capsule in the seam.
+pub fn is_external_boundary(
+    work: PhysicalRect,
+    edge: Edge,
+    all_monitors: &[(PhysicalRect, f64)],
+) -> bool {
+    const TOLERANCE: i64 = 4;
+    for (other, _) in all_monitors {
+        if *other == work {
+            continue;
+        }
+        let touches = match edge {
+            Edge::Left => {
+                (work.x as i64 - other.right()).abs() <= TOLERANCE
+                    && spans(work.y, work.height, other.y, other.height)
+            }
+            Edge::Right => {
+                (work.right() - other.x as i64).abs() <= TOLERANCE
+                    && spans(work.y, work.height, other.y, other.height)
+            }
+            Edge::Top => {
+                (work.y as i64 - other.bottom()).abs() <= TOLERANCE
+                    && spans(work.x, work.width, other.x, other.width)
+            }
+            Edge::Bottom => {
+                (work.bottom() - other.y as i64).abs() <= TOLERANCE
+                    && spans(work.x, work.width, other.x, other.width)
+            }
+        };
+        if touches {
+            return false;
+        }
+    }
+    true
+}
+
+/// Edge detection restricted to physical outer boundaries, and tolerant of a
+/// window that was dragged *past* one.
+///
+/// Two differences from a plain proximity test:
+/// - a seam never matches, so a window released in the channel between two screens
+///   is never folded (spec §3.2);
+/// - a distance `<= 0` still matches, so a window dragged 50px off the left bezel
+///   snaps back to `Edge::Left` instead of being left stranded off-screen, which is
+///   what the old `distance.abs() <= threshold` test did.
+pub fn detect_edge_multi_monitor(
+    win: PhysicalRect,
+    work: PhysicalRect,
+    scale_factor: f64,
+    all_monitors: &[(PhysicalRect, f64)],
+) -> Option<Edge> {
     let threshold = (SNAP_MARGIN_LOGICAL * scale_factor.max(0.1)).round() as i64;
-    let wx = work.x as i64;
-    let wy = work.y as i64;
-    let wr = wx + work.width as i64;
-    let wb = wy + work.height as i64;
     let x = win.x as i64;
     let y = win.y as i64;
-    let right = x + win.width as i64;
-    let bottom = y + win.height as i64;
     [
-        (x - wx, Edge::Left),
-        (wr - right, Edge::Right),
-        (y - wy, Edge::Top),
-        (wb - bottom, Edge::Bottom),
+        (x - work.x as i64, Edge::Left),
+        (work.right() - (x + win.width as i64), Edge::Right),
+        (y - work.y as i64, Edge::Top),
+        (work.bottom() - (y + win.height as i64), Edge::Bottom),
     ]
     .into_iter()
-    .filter(|(distance, _)| distance.abs() <= threshold)
+    // Only a physical outer boundary may fold; an inter-monitor seam never does.
+    .filter(|(_, edge)| is_external_boundary(work, *edge, all_monitors))
+    // Inside the snap threshold, or already dragged out of bounds (`distance <= 0`).
+    .filter(|(distance, _)| *distance <= threshold)
     .min_by_key(|(distance, _)| distance.abs())
     .map(|(_, edge)| edge)
 }
@@ -469,6 +557,129 @@ pub fn pill_geometry(
     }
 }
 
+/// Picks the host monitor for a released window by intersecting it with every work
+/// area. This is the single authoritative attribution rule for a cross-screen drag.
+///
+/// Totality — every input falls into exactly one of these branches:
+/// 1. the screen with the strictly largest intersection area wins, which is what
+///    makes "dragged more than half onto screen B, released, lands on B" hold;
+/// 2. a tie that involves the host (`fallback_index`, the screen the window came
+///    from) goes to the host, so an exact 50/50 release across a seam does not
+///    change screens;
+/// 3. a tie between two *non-host* screens is broken by the smallest `(x, y)`, so
+///    the outcome cannot depend on `available_monitors()`' enumeration order;
+/// 4. with no overlap anywhere (a staggered-monitor void, or fully off the desktop)
+///    the host screen is returned — never an invented work area — and an
+///    out-of-range `fallback_index` degrades to the first screen, mirroring
+///    `select_work_area`'s chain;
+/// 5. an empty monitor list returns `None` instead of panicking.
+pub fn select_monitor_by_overlap(
+    win: PhysicalRect,
+    monitors: &[(PhysicalRect, f64)],
+    fallback_index: usize,
+) -> Option<(PhysicalRect, f64)> {
+    if monitors.is_empty() {
+        return None;
+    }
+    let host = if fallback_index < monitors.len() { fallback_index } else { 0 };
+    let mut best_area = 0i64;
+    for (work, _) in monitors {
+        best_area = best_area.max(win.intersection_area(work));
+    }
+    if best_area == 0 {
+        return monitors.get(host).copied();
+    }
+    let tied: Vec<usize> = monitors
+        .iter()
+        .enumerate()
+        .filter(|(_, (work, _))| win.intersection_area(work) == best_area)
+        .map(|(index, _)| index)
+        .collect();
+    let index = if tied.contains(&fallback_index) {
+        fallback_index
+    } else {
+        // `tied` is non-empty (it contains at least the maximum), so the `min_by_key`
+        // always has an element; the fallback index keeps the function total.
+        *tied
+            .iter()
+            .min_by_key(|&&index| (monitors[index].0.x, monitors[index].0.y))
+            .unwrap_or(&tied[0])
+    };
+    Some(monitors[index])
+}
+
+/// Clamps `rect` into `work` while keeping its size, returning the corrected
+/// on-screen rectangle.
+fn clamped_rect(rect: PhysicalRect, work: PhysicalRect) -> PhysicalRect {
+    let clamped = clamp_position(
+        PhysicalPosition::new(rect.x, rect.y),
+        PhysicalSize::new(rect.width, rect.height),
+        work,
+    );
+    PhysicalRect {
+        x: clamped.x,
+        y: clamped.y,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
+/// The authoritative result of a finished drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DragOutcome {
+    /// The physical rectangle actually applied to the window: the pill's when the
+    /// release folded it onto an outer edge, otherwise the settled full rectangle.
+    pub rect: PhysicalRect,
+    /// Coordinate persisted for the next session. It is always the corrected,
+    /// on-screen top-left of the *expanded* overlay — never the raw release
+    /// position, so a window released off-screen cannot restart off-screen.
+    pub anchor: (i32, i32),
+    /// Centre recorded on the dock manager so an expanded session re-anchors exactly
+    /// where the release settled.
+    pub anchor_center: (i32, i32),
+    /// The edge the overlay folded onto, if any.
+    pub edge: Option<Edge>,
+}
+
+/// Resolves what a released drag settles on, given the host work area that
+/// `select_monitor_by_overlap` arbitrated.
+///
+/// Pure — `drag_ended` only applies the returned rectangle — which is what lets the
+/// state matrix (fold on an outer boundary, clamp on a seam or off-desktop release)
+/// be asserted offline.
+pub fn resolve_drag_outcome(
+    win: PhysicalRect,
+    work: PhysicalRect,
+    scale: f64,
+    all_monitors: &[(PhysicalRect, f64)],
+    auto_edge_hide: bool,
+    scale_percent: u32,
+) -> DragOutcome {
+    // The release is first settled inside the host work area: a window dragged off
+    // the desktop (or across a seam) is pulled back in whole, so neither the pill
+    // anchor nor the outcome can be derived from an off-screen point.
+    let settled = clamped_rect(win, work);
+    match detect_edge_multi_monitor(win, work, scale, all_monitors) {
+        Some(edge) if auto_edge_hide => {
+            let pill = pill_geometry(edge, work, scale, scale_percent, center_of(settled));
+            DragOutcome {
+                rect: pill,
+                anchor: (settled.x, settled.y),
+                anchor_center: center_of(pill),
+                edge: Some(edge),
+            }
+        }
+        // Auto hiding off, a seam release, or a plain in-area release: slide it in
+        // without folding. The clamp is a no-op when it is already inside.
+        _ => DragOutcome {
+            rect: settled,
+            anchor: (settled.x, settled.y),
+            anchor_center: center_of(settled),
+            edge: None,
+        },
+    }
+}
+
 pub fn restore_startup(window: &WebviewWindow, manager: &DockManager, settings: &OverlaySettings) {
     let size_ok = set_full_size(window, settings).is_ok();
     if size_ok {
@@ -492,6 +703,38 @@ pub fn restore_startup(window: &WebviewWindow, manager: &DockManager, settings: 
     }
 }
 
+/// Every attached monitor's work area, in physical pixels.
+fn available_work_areas(window: &WebviewWindow) -> Vec<(PhysicalRect, f64)> {
+    window
+        .available_monitors()
+        .map(|monitors| monitors.iter().map(monitor_bounds).collect())
+        .unwrap_or_default()
+}
+
+/// The screen the window came from: the monitor under its centre, used to break a
+/// 50/50 seam tie. Falls back to the first entry so the result is always an index
+/// into `monitors`.
+fn monitor_index_for(
+    window: &WebviewWindow,
+    monitors: &[(PhysicalRect, f64)],
+    win: PhysicalRect,
+) -> usize {
+    if let Some(index) = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|current| monitor_bounds(&current))
+        .and_then(|current| monitors.iter().position(|candidate| *candidate == current))
+    {
+        return index;
+    }
+    let center = center_of(win);
+    monitors
+        .iter()
+        .position(|(rect, _)| monitor_contains(*rect, center.0 as f64, center.1 as f64))
+        .unwrap_or(0)
+}
+
 pub async fn drag_ended(app: &AppHandle, state: &Arc<AppState>) {
     let Some(window) = app.get_webview_window("main") else {
         return;
@@ -504,50 +747,64 @@ pub async fn drag_ended(app: &AppHandle, state: &Arc<AppState>) {
         state.dock.cancel_drag();
         return;
     };
-    let anchor = WindowPosition {
-        left: position.x as f64,
-        top: position.y as f64,
+    let win = PhysicalRect {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
     };
-    state.config_manager.save_position(&anchor);
-    let anchor_center = (
-        position
-            .x
-            .saturating_add((size.width / 2).min(i32::MAX as u32) as i32),
-        position
-            .y
-            .saturating_add((size.height / 2).min(i32::MAX as u32) as i32),
-    );
-    state.dock.set_anchor_center(anchor_center);
     let settings = state.settings.lock().await.clone();
-    let edge = if settings.auto_edge_hide {
-        work_area(&window).and_then(|(work, scale)| {
-            detect_edge(
-                PhysicalRect {
-                    x: position.x,
-                    y: position.y,
-                    width: size.width,
-                    height: size.height,
-                },
-                work,
-                scale,
-            )
-        })
-    } else {
-        None
-    };
-    if let Some(edge) = edge {
-        if let Err(error) = apply_pill(&window, edge, &settings, anchor_center) {
-            eprintln!("Could not collapse overlay at screen edge: {error}");
-            state.dock.finish_drag(None);
-            state.dock.save_docked(None);
-        } else {
-            state.dock.finish_drag(Some(edge));
-            state.dock.save_docked(Some(edge));
-        }
-    } else {
+    let monitors = available_work_areas(&window);
+    if monitors.is_empty() {
+        // A session with no monitor information at all: keep the release position,
+        // reposition nothing and never panic (module 3 R-1's caller-side contract).
+        state
+            .config_manager
+            .save_position(&WindowPosition { left: position.x as f64, top: position.y as f64 });
+        state.dock.set_anchor_center(center_of(win));
         state.dock.finish_drag(None);
         state.dock.save_docked(None);
+        emit_state(app, &state.dock);
+        return;
     }
+
+    // Drag is free-roaming; only the release is arbitrated. The host screen comes
+    // from the intersection areas, with the screen the window came from breaking an
+    // exact 50/50 tie (spec §3.2).
+    let fallback_index = monitor_index_for(&window, &monitors, win);
+    let (work, scale) = select_monitor_by_overlap(win, &monitors, fallback_index)
+        .unwrap_or_else(|| monitors[fallback_index]);
+    let outcome = resolve_drag_outcome(
+        win,
+        work,
+        scale,
+        &monitors,
+        settings.auto_edge_hide,
+        settings.scale_percent,
+    );
+
+    if outcome.rect.width != win.width || outcome.rect.height != win.height {
+        if let Err(error) = window
+            .set_size(Size::Physical(PhysicalSize::new(outcome.rect.width, outcome.rect.height)))
+        {
+            eprintln!("Could not resize overlay after drag: {error}");
+        }
+    }
+    if let Err(error) = window
+        .set_position(Position::Physical(PhysicalPosition::new(outcome.rect.x, outcome.rect.y)))
+    {
+        eprintln!("Could not reposition overlay after drag: {error}");
+    }
+    // The anchor is written only here, after the host-screen arbitration, the seam/
+    // boundary decision and the reposition above — so what lands on disk is the
+    // authoritative final coordinate, and a restart cannot drift.
+    state.config_manager.save_position(&WindowPosition {
+        left: outcome.anchor.0 as f64,
+        top: outcome.anchor.1 as f64,
+    });
+    state.dock.set_anchor_center(outcome.anchor_center);
+    state.dock.finish_drag(outcome.edge);
+    state.dock.save_docked(outcome.edge);
     emit_state(app, &state.dock);
 }
 
@@ -1275,8 +1532,13 @@ mod tests {
         }
     }
 
+    /// A single-monitor desktop: every edge of `work` is a physical outer boundary.
+    fn solo(work: PhysicalRect, scale: f64) -> Vec<(PhysicalRect, f64)> {
+        vec![(work, scale)]
+    }
+
     #[test]
-    fn snap_threshold_is_scaled_and_accepts_negative_coordinates() {
+    fn snap_threshold_is_scaled_and_matches_out_of_bounds_releases() {
         let wa = work();
         let near_left = PhysicalRect {
             x: -1947,
@@ -1284,14 +1546,25 @@ mod tests {
             width: 300,
             height: 100,
         };
-        let far_left = PhysicalRect {
+        // Dragged past the bezel: the old `distance.abs() <= threshold` test missed
+        // this and left the window stranded off-screen, so it must still snap.
+        let beyond_left = PhysicalRect {
             x: -1950,
             y: 200,
             width: 300,
             height: 100,
         };
-        assert_eq!(detect_edge(near_left, wa, 1.75), Some(Edge::Left));
-        assert_eq!(detect_edge(far_left, wa, 1.75), None);
+        assert_eq!(detect_edge_multi_monitor(near_left, wa, 1.75, &solo(wa, 1.75)), Some(Edge::Left));
+        assert_eq!(detect_edge_multi_monitor(beyond_left, wa, 1.75, &solo(wa, 1.75)), Some(Edge::Left));
+
+        // A window resting well inside the work area matches nothing.
+        let middle = PhysicalRect {
+            x: -900,
+            y: 400,
+            width: 300,
+            height: 100,
+        };
+        assert_eq!(detect_edge_multi_monitor(middle, wa, 1.75, &solo(wa, 1.75)), None);
     }
 
     #[test]
@@ -1302,7 +1575,203 @@ mod tests {
             width: 300,
             height: 100,
         };
-        assert_eq!(detect_edge(rect, work(), 1.0), Some(Edge::Left));
+        assert_eq!(detect_edge_multi_monitor(rect, work(), 1.0, &solo(work(), 1.0)), Some(Edge::Left));
+    }
+
+    /// Two 1920x1040 screens side by side at 100%, i.e. A: 0..1920, B: 1920..3840.
+    fn side_by_side() -> [(PhysicalRect, f64); 2] {
+        [
+            (PhysicalRect { x: 0, y: 0, width: 1920, height: 1040 }, 1.0),
+            (PhysicalRect { x: 1920, y: 0, width: 1920, height: 1040 }, 1.0),
+        ]
+    }
+
+    #[test]
+    fn a_cross_screen_release_lands_on_the_screen_holding_the_majority() {
+        let monitors = side_by_side();
+        // 1000x400 window released with 700px (70%) over screen B.
+        let mostly_b = PhysicalRect { x: 1620, y: 200, width: 1000, height: 400 };
+        assert_eq!(select_monitor_by_overlap(mostly_b, &monitors, 0), Some(monitors[1]));
+        // The same window released with only 400px (40%) over screen B: mostly A, so
+        // despite the host being A this is decided by area, not by the host.
+        let mostly_a = PhysicalRect { x: 1320, y: 200, width: 1000, height: 400 };
+        assert_eq!(select_monitor_by_overlap(mostly_a, &monitors, 1), Some(monitors[0]));
+    }
+
+    #[test]
+    fn an_exact_seam_tie_stays_on_the_host_screen_in_any_order() {
+        let monitors = side_by_side();
+        // Exactly 50/50 across the seam.
+        let straddling = PhysicalRect { x: 1420, y: 200, width: 1000, height: 400 };
+        assert_eq!(monitors[0].0.intersection_area(&straddling), monitors[1].0.intersection_area(&straddling));
+        // The host keeps the window: from A it stays on A, from B it stays on B.
+        assert_eq!(select_monitor_by_overlap(straddling, &monitors, 0), Some(monitors[0]));
+        assert_eq!(select_monitor_by_overlap(straddling, &monitors, 1), Some(monitors[1]));
+
+        // Reversing the enumeration must not change the physical answer: the host is
+        // now index 1 on the same screen.
+        let reversed = [monitors[1], monitors[0]];
+        assert_eq!(select_monitor_by_overlap(straddling, &reversed, 1), Some(reversed[1]));
+    }
+
+    #[test]
+    fn a_tie_between_two_non_host_screens_is_geometrically_stable() {
+        // Three screens in a row; the window straddles B|C 50/50 and never touches
+        // the host A, so the host cannot break the tie.
+        let a = (PhysicalRect { x: 0, y: 0, width: 1920, height: 1040 }, 1.0);
+        let b = (PhysicalRect { x: 1920, y: 0, width: 1920, height: 1040 }, 1.0);
+        let c = (PhysicalRect { x: 3840, y: 0, width: 1920, height: 1040 }, 1.0);
+        let straddling = PhysicalRect { x: 3740, y: 200, width: 200, height: 400 };
+        assert_eq!(b.0.intersection_area(&straddling), c.0.intersection_area(&straddling));
+        assert_eq!(a.0.intersection_area(&straddling), 0);
+
+        assert_eq!(select_monitor_by_overlap(straddling, &[a, b, c], 0), Some(b));
+        // A different `available_monitors()` order must yield the same physical
+        // screen, not merely a different index.
+        assert_eq!(select_monitor_by_overlap(straddling, &[a, c, b], 0), Some(b));
+        assert_eq!(select_monitor_by_overlap(straddling, &[c, b, a], 2), Some(b));
+    }
+
+    #[test]
+    fn the_strictly_largest_share_wins_even_without_a_majority() {
+        // Staggered layout: D sits below B. The window is on the A|B|D corner and no
+        // single screen holds >50%, but A holds the strictly largest share — so A
+        // wins and the "no majority keeps the original screen" reading is excluded.
+        let a = (PhysicalRect { x: 0, y: 0, width: 1920, height: 1040 }, 1.0);
+        let b = (PhysicalRect { x: 1920, y: 0, width: 1920, height: 1040 }, 1.0);
+        let d = (PhysicalRect { x: 1920, y: 1040, width: 1920, height: 1040 }, 1.0);
+        let win = PhysicalRect { x: 1700, y: 900, width: 400, height: 200 };
+        let union = win.width as i64 * win.height as i64;
+        let shares = [a.0.intersection_area(&win), b.0.intersection_area(&win), d.0.intersection_area(&win)];
+        assert!(shares.iter().all(|share| *share * 2 < union), "no screen may hold a majority: {shares:?}");
+        assert!(shares[0] > shares[1] && shares[1] > shares[2], "A must be the strict maximum: {shares:?}");
+
+        // D is the host (index 2), yet A wins.
+        assert_eq!(select_monitor_by_overlap(win, &[a, b, d], 2), Some(a));
+    }
+
+    #[test]
+    fn zero_overlap_falls_back_to_the_host_then_the_first_screen() {
+        // Different scale factors so the assertion covers the scale that comes back.
+        let a = (PhysicalRect { x: 0, y: 0, width: 1920, height: 1040 }, 1.0);
+        let b = (PhysicalRect { x: 1920, y: 0, width: 1920, height: 1040 }, 1.5);
+        let monitors = [a, b];
+        // Off the desktop entirely: the host's real work area and scale come back.
+        let offscreen = PhysicalRect { x: 10_000, y: 10_000, width: 300, height: 100 };
+        assert_eq!(select_monitor_by_overlap(offscreen, &monitors, 0), Some(a));
+        assert_eq!(select_monitor_by_overlap(offscreen, &monitors, 1), Some(b));
+        // An out-of-range host index degrades to the first screen.
+        assert_eq!(select_monitor_by_overlap(offscreen, &monitors, 99), Some(a));
+    }
+
+    #[test]
+    fn an_empty_monitor_list_returns_none() {
+        let win = PhysicalRect { x: 0, y: 0, width: 300, height: 100 };
+        assert_eq!(select_monitor_by_overlap(win, &[], 0), None);
+        assert_eq!(select_monitor_by_overlap(win, &[], 7), None);
+    }
+
+    #[test]
+    fn an_internal_seam_is_never_treated_as_an_outer_boundary() {
+        let monitors = side_by_side();
+        let a = monitors[0].0;
+        let b = monitors[1].0;
+        // B's left edge and A's right edge touch, so neither is external.
+        assert!(!is_external_boundary(a, Edge::Right, &monitors));
+        assert!(!is_external_boundary(b, Edge::Left, &monitors));
+        // Their outer edges still are.
+        assert!(is_external_boundary(a, Edge::Left, &monitors));
+        assert!(is_external_boundary(b, Edge::Right, &monitors));
+        assert!(is_external_boundary(a, Edge::Top, &monitors));
+        assert!(is_external_boundary(a, Edge::Bottom, &monitors));
+    }
+
+    #[test]
+    fn a_release_in_the_seam_channel_never_folds() {
+        let monitors = side_by_side();
+        let a = monitors[0].0;
+        let b = monitors[1].0;
+        // Released in the channel, overlapping both screens' seam edges.
+        let in_channel = PhysicalRect { x: 1900, y: 400, width: 40, height: 200 };
+        assert_eq!(detect_edge_multi_monitor(in_channel, a, 1.0, &monitors), None);
+        assert_eq!(detect_edge_multi_monitor(in_channel, b, 1.0, &monitors), None);
+
+        // Even with auto edge hiding on, an unbroken channel release slides into the
+        // host screen without collapsing into a pill.
+        let outcome = resolve_drag_outcome(in_channel, b, 1.0, &monitors, true, 175);
+        assert_eq!(outcome.edge, None);
+        assert_eq!(outcome.rect, PhysicalRect { x: 1920, y: 400, width: 40, height: 200 });
+        assert!(contains(b, outcome.rect));
+    }
+
+    #[test]
+    fn an_outer_boundary_release_folds_or_clamps_with_auto_hide() {
+        let monitors = side_by_side();
+        let a = monitors[0].0;
+        // Dragged 50px off the left bezel of the leftmost screen.
+        let overshot = PhysicalRect { x: -50, y: 400, width: 300, height: 100 };
+        assert_eq!(detect_edge_multi_monitor(overshot, a, 1.0, &monitors), Some(Edge::Left));
+
+        // Auto edge hiding on: fold into a pill pinned to that edge.
+        let folded = resolve_drag_outcome(overshot, a, 1.0, &monitors, true, 175);
+        assert_eq!(folded.edge, Some(Edge::Left));
+        let settled_center = center_of(PhysicalRect { x: 0, y: 400, width: 300, height: 100 });
+        assert_eq!(folded.rect, pill_geometry(Edge::Left, a, 1.0, 175, settled_center));
+        assert!(contains(a, folded.rect));
+
+        // Auto edge hiding off: clamp back inside instead of folding, and never leave
+        // the window off-screen.
+        let clamped = resolve_drag_outcome(overshot, a, 1.0, &monitors, false, 175);
+        assert_eq!(clamped.edge, None);
+        assert_eq!(clamped.rect, PhysicalRect { x: 0, y: 400, width: 300, height: 100 });
+        assert!(contains(a, clamped.rect));
+    }
+
+    #[test]
+    fn a_seam_release_slides_the_window_fully_into_the_target_screen() {
+        let monitors = side_by_side();
+        let b = monitors[1].0;
+        // 70% over B: the host is arbitrated to B and the window is then pulled whole
+        // into B's work area, so it no longer straddles the physical seam.
+        let mostly_b = PhysicalRect { x: 1620, y: 200, width: 1000, height: 400 };
+        let work = select_monitor_by_overlap(mostly_b, &monitors, 0).expect("a host").0;
+        assert_eq!(work, b);
+        let outcome = resolve_drag_outcome(mostly_b, work, 1.0, &monitors, true, 175);
+        assert_eq!(outcome.edge, None);
+        assert_eq!(outcome.rect, PhysicalRect { x: 1920, y: 200, width: 1000, height: 400 });
+        assert!(contains(b, outcome.rect));
+    }
+
+    /// P3-4: what is persisted is the corrected on-screen coordinate, never the raw
+    /// release point, so a restart cannot drift off-screen.
+    #[test]
+    fn the_persisted_anchor_is_the_final_corrected_coordinate() {
+        let monitors = side_by_side();
+        let a = monitors[0].0;
+        let overshot = PhysicalRect { x: -50, y: 400, width: 300, height: 100 };
+
+        // Clamped release: the off-screen x is corrected to 0 before anything is
+        // written, and the recorded centre follows the corrected rectangle.
+        let clamped = resolve_drag_outcome(overshot, a, 1.0, &monitors, false, 175);
+        assert_eq!(clamped.anchor, (0, 400));
+        assert_ne!(clamped.anchor, (overshot.x, overshot.y));
+        assert!(monitor_contains(a, clamped.anchor.0 as f64, clamped.anchor.1 as f64));
+        assert_eq!(clamped.anchor_center, center_of(clamped.rect));
+
+        // Folded release: the persisted anchor is still the corrected expanded
+        // coordinate (what `estimated_anchor_center` re-derives from on the next
+        // refresh), and the recorded centre is the pill's own final centre.
+        let folded = resolve_drag_outcome(overshot, a, 1.0, &monitors, true, 175);
+        assert_eq!(folded.anchor, (0, 400));
+        assert_ne!(folded.anchor, (overshot.x, overshot.y));
+        assert_eq!(folded.anchor_center, center_of(folded.rect));
+
+        // Cross-screen drag: the anchor is the corrected target-screen coordinate.
+        let mostly_b = PhysicalRect { x: 1620, y: 200, width: 1000, height: 400 };
+        let crossed = resolve_drag_outcome(mostly_b, monitors[1].0, 1.0, &monitors, true, 175);
+        assert_eq!(crossed.anchor, (1920, 200));
+        assert_ne!(crossed.anchor, (mostly_b.x, mostly_b.y));
+        assert!(monitor_contains(monitors[1].0, crossed.anchor.0 as f64, crossed.anchor.1 as f64));
     }
 
     #[test]

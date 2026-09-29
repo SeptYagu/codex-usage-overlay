@@ -134,6 +134,18 @@ html, body, #root {
   border-radius: inherit;
   transition: height .18s ease-out;
 }
+/* Percentage grid: nine hairlines that split each pill bar into ten 10% cells.
+   They sit above the fill so the colour column reads straight through them, and
+   they need no rotation handling of their own — the rotated pill rotates its DOM. */
+.overlay-pill-tick {
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: rgba(0, 0, 0, .45);
+  z-index: 1;
+  pointer-events: none;
+}
 .overlay-pill-fill.overlay-healthy { background: var(--overlay-healthy); }
 .overlay-pill-fill.overlay-warning { background: var(--overlay-warning); }
 .overlay-pill-fill.overlay-low { background: var(--overlay-low); }

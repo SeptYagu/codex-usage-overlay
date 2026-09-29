@@ -32,6 +32,7 @@ pub fn run() {
         settings: Mutex::new(initial_settings.clone()),
         settings_revision: AtomicU64::new(0),
         last_valid_settings_geometry: std::sync::Mutex::new(None),
+        tray_menu_focus: std::sync::Mutex::new(tray::TrayMenuFocusState::default()),
         autostart_update: Mutex::new(()),
         update_check: Mutex::new(()),
         update_install: Mutex::new(()),
@@ -66,7 +67,7 @@ pub fn run() {
                     );
                     let _ = window.hide();
                 }
-                tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "tray-menu" => {
+                tauri::WindowEvent::CloseRequested { api, .. } if window.label() == tray::TRAY_MENU_WINDOW_LABEL => {
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -85,8 +86,14 @@ pub fn run() {
                         window.is_minimized().unwrap_or(false),
                     );
                 }
-                tauri::WindowEvent::Focused(false) if window.label() == "tray-menu" => {
-                    let _ = window.hide();
+                tauri::WindowEvent::Focused(false) if window.label() == tray::TRAY_MENU_WINDOW_LABEL => {
+                    // Inside the post-show grace period the blur is only remembered:
+                    // the grace timer re-checks the focus state and is the single
+                    // decision point. A blur after the grace period is an ordinary
+                    // dismissal and still hides immediately.
+                    if tray::on_tray_menu_blur(window.app_handle()) {
+                        let _ = window.hide();
+                    }
                 }
                 tauri::WindowEvent::ScaleFactorChanged { .. } if window.label() == "main" => {
                     let app = window.app_handle().clone();

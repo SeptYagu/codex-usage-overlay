@@ -28,6 +28,13 @@ function usageTone(percent: number | null | undefined): string {
   return percent >= 50 ? 'healthy' : percent >= 20 ? 'warning' : 'low';
 }
 
+/**
+ * Vertical positions of the pill's percentage grid, in percent of the bar's height.
+ * Nine lines split 0~100% into ten 10% cells, so the remaining quota can be counted
+ * off the pill without a numeric readout.
+ */
+const PERCENTAGE_GRID_TICKS = [10, 20, 30, 40, 50, 60, 70, 80, 90];
+
 export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoading, dockState }) => {
   const { t } = useTranslation();
   const [, setTick] = useState(0);
@@ -211,6 +218,14 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
                       style={{ height: `${percent}%` }}
                     />
                   )}
+                  {settings.showPercentageGrid && PERCENTAGE_GRID_TICKS.map((bottom) => (
+                    <span
+                      key={bottom}
+                      aria-hidden="true"
+                      className="overlay-pill-tick"
+                      style={{ bottom: `${bottom}%` }}
+                    />
+                  ))}
                 </div>
               );
             })}

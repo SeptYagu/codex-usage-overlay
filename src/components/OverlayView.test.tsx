@@ -200,6 +200,37 @@ it('represents unknown quota data with empty neutral bars', () => {
   expect(container.querySelector('.overlay-pill-bars')?.classList.contains('overlay-pill-rotated')).toBe(true);
 });
 
+it('draws nine 10% grid lines per pill bar only when the setting is on', () => {
+  const dockState = { docked: true, edge: 'left' as const, expanded: false, hidden: false };
+  const { container, rerender } = render(
+    <OverlayView
+      settings={{ ...DEFAULT_SETTINGS, showPercentageGrid: true }}
+      usage={usage}
+      isLoading={false}
+      dockState={dockState}
+    />,
+  );
+  const tracks = container.querySelectorAll('.overlay-pill-track');
+  expect(tracks.length).toBe(2);
+  const expected = ['10%', '20%', '30%', '40%', '50%', '60%', '70%', '80%', '90%'];
+  tracks.forEach((track) => {
+    const ticks = track.querySelectorAll<HTMLElement>('.overlay-pill-tick');
+    expect(ticks.length).toBe(9);
+    expect(Array.from(ticks).map((tick) => tick.style.bottom)).toEqual(expected);
+  });
+
+  // Off again: the bars go back to being plain columns.
+  rerender(
+    <OverlayView
+      settings={{ ...DEFAULT_SETTINGS, showPercentageGrid: false }}
+      usage={usage}
+      isLoading={false}
+      dockState={dockState}
+    />,
+  );
+  expect(container.querySelectorAll('.overlay-pill-tick').length).toBe(0);
+});
+
 it('re-measures the capsule after a docked collapse and expand cycle', async () => {
   const collapsed = { docked: true, edge: 'left' as const, expanded: false, hidden: false };
   const expanded = { ...collapsed, expanded: true };
