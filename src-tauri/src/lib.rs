@@ -54,18 +54,12 @@ pub fn run() {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "settings" => {
                     api.prevent_close();
-                    if let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) {
-                        let scale = window.scale_factor().unwrap_or(1.0);
-                        if scale > 0.0 {
-                            let geometry = config::SettingsWindowGeometry {
-                                x: position.x as f64 / scale,
-                                y: position.y as f64 / scale,
-                                width: size.width as f64 / scale,
-                                height: size.height as f64 / scale,
-                            };
-                            window_state.config_manager.save_settings_geometry(&geometry);
-                        }
-                    }
+                    persist_settings_geometry(
+                        &window_state.config_manager,
+                        window.outer_position(),
+                        window.inner_size(),
+                        window.scale_factor().unwrap_or(1.0),
+                    );
                     let _ = window.hide();
                 }
                 tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "tray-menu" => {
@@ -252,10 +246,55 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                // The settings window is hidden (not destroyed) when the user closes
+                // it, so a user who resizes it and then quits straight from the tray
+                // never hits `CloseRequested`. Persist here as a fallback; the run
+                // loop invokes this before windows are torn down.
+                if let Some(window) = app.get_webview_window("settings") {
+                    // Only when it is actually on screen. A never-opened settings
+                    // window still reports the OS default placement, and persisting
+                    // that would override the centered-on-first-open default.
+                    if window.is_visible().unwrap_or(false) {
+                        let manager = app.state::<Arc<AppState>>().config_manager.clone();
+                        persist_settings_geometry(
+                            &manager,
+                            window.outer_position(),
+                            window.inner_size(),
+                            window.scale_factor().unwrap_or(1.0),
+                        );
+                    }
+                }
                 commands::shutdown_audio(app);
                 commands::install_prepared_update_on_exit(app, app.state::<Arc<AppState>>().inner());
             }
         });
+}
+
+/// Persists the settings window's current physical geometry as logical values plus
+/// the scale factor of the display it sits on, so the restore path can rebuild the
+/// exact physical rectangle even in mixed-DPI layouts.
+///
+/// The position/size/scale are passed in (rather than a window handle) because the
+/// two call sites — `WindowEvent::CloseRequested` and `RunEvent::Exit` — hand out
+/// different window types that only share these accessors.
+fn persist_settings_geometry(
+    config_manager: &ConfigManager,
+    position: Result<tauri::PhysicalPosition<i32>, tauri::Error>,
+    size: Result<tauri::PhysicalSize<u32>, tauri::Error>,
+    scale: f64,
+) {
+    if let (Ok(position), Ok(size)) = (position, size) {
+        if scale.is_finite() && scale > 0.0 {
+            let geometry = config::SettingsWindowGeometry {
+                x: position.x as f64 / scale,
+                y: position.y as f64 / scale,
+                width: size.width as f64 / scale,
+                height: size.height as f64 / scale,
+                scale_factor: Some(scale),
+            };
+            config_manager.save_settings_geometry(&geometry);
+        }
+    }
 }
 
 pub(crate) async fn fetch_usage_background(handle: &AppHandle, state: &Arc<AppState>) {

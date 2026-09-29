@@ -101,6 +101,12 @@ pub struct SettingsWindowGeometry {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    /// Scale factor of the monitor the window was on when it was saved. It is the
+    /// anchor that lets the restore path convert the logical rectangle back into
+    /// the physical space it was measured in; records written by older versions
+    /// have no such field (`None`).
+    #[serde(default)]
+    pub scale_factor: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -202,7 +208,7 @@ impl ConfigManager {
         let path = self.settings_geometry_path();
         if path.is_file() {
             if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(geometry) = serde_json::from_str::<SettingsWindowGeometry>(&content) {
+                if let Ok(mut geometry) = serde_json::from_str::<SettingsWindowGeometry>(&content) {
                     if geometry.x.is_finite()
                         && geometry.y.is_finite()
                         && geometry.width.is_finite()
@@ -210,6 +216,11 @@ impl ConfigManager {
                         && geometry.width > 0.0
                         && geometry.height > 0.0
                     {
+                        // A corrupt scale factor is dropped rather than rejecting the
+                        // whole record, so a bad field can never strand the window.
+                        geometry.scale_factor = geometry
+                            .scale_factor
+                            .filter(|scale| scale.is_finite() && *scale > 0.0);
                         return Some(geometry);
                     }
                 }
@@ -381,10 +392,17 @@ mod tests {
 
         assert!(manager.load_settings_geometry().is_none());
 
-        let geometry = SettingsWindowGeometry { x: 120.0, y: 80.0, width: 480.0, height: 660.0 };
+        let geometry = SettingsWindowGeometry {
+            x: 120.0,
+            y: 80.0,
+            width: 480.0,
+            height: 660.0,
+            scale_factor: Some(1.5),
+        };
         manager.save_settings_geometry(&geometry);
         let loaded = manager.load_settings_geometry().expect("saved geometry should load");
         assert_eq!((loaded.x, loaded.y, loaded.width, loaded.height), (120.0, 80.0, 480.0, 660.0));
+        assert_eq!(loaded.scale_factor, Some(1.5));
 
         let path = manager.settings_geometry_path();
         fs::write(&path, "{ not valid json").unwrap();
@@ -395,6 +413,38 @@ mod tests {
 
         fs::write(&path, r#"{"x":10.0,"y":20.0,"width":480.0}"#).unwrap();
         assert!(manager.load_settings_geometry().is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_geometry_without_scale_factor_still_loads() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-usage-overlay-geometry-legacy-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let manager = ConfigManager::with_runtime_dir(dir.clone());
+
+        let path = manager.settings_geometry_path();
+        fs::write(&path, r#"{"x":10.0,"y":20.0,"width":480.0,"height":660.0}"#).unwrap();
+        let loaded = manager.load_settings_geometry().expect("legacy geometry should load");
+        assert_eq!(loaded.scale_factor, None);
+
+        // An unusable scale factor is discarded instead of poisoning the record.
+        fs::write(
+            &path,
+            r#"{"x":10.0,"y":20.0,"width":480.0,"height":660.0,"scale_factor":0.0}"#,
+        )
+        .unwrap();
+        assert_eq!(manager.load_settings_geometry().unwrap().scale_factor, None);
+
+        fs::write(
+            &path,
+            r#"{"x":10.0,"y":20.0,"width":480.0,"height":660.0,"scale_factor":-2.0}"#,
+        )
+        .unwrap();
+        assert_eq!(manager.load_settings_geometry().unwrap().scale_factor, None);
 
         let _ = fs::remove_dir_all(&dir);
     }

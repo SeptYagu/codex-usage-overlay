@@ -48,10 +48,18 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
     const content = menuRef.current;
     const generation = generationRef.current;
     if (!content || !generation || !scaleReadyRef.current) return;
+    // 20px covers the outer `p-2.5` padding on both axes.
     const height = Math.ceil(content.getBoundingClientRect().height + 20);
-    if (height <= 20) return;
+    // Menu items are `width: 100%`, so only their overflow (`scrollWidth`) reveals
+    // the intrinsic width the popup needs to render every label on a single line.
+    let intrinsicWidth = content.scrollWidth;
+    content.querySelectorAll<HTMLElement>('.tray-menu-item').forEach((item) => {
+      intrinsicWidth = Math.max(intrinsicWidth, item.scrollWidth);
+    });
+    const width = Math.ceil(intrinsicWidth + 20);
+    if (height <= 20 || width <= 20) return;
     const dprComp = dprCompRef.current;
-    const key = `${generation}:${height}:${dprComp}`;
+    const key = `${generation}:${height}:${width}:${dprComp}`;
     if (lastLayoutKey.current === key) return;
     lastLayoutKey.current = key;
     const revision = ++layoutRevision.current;
@@ -60,6 +68,7 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
         generation,
         revision,
         heightLogical: height * dprComp,
+        widthLogical: width * dprComp,
       });
       if (generation === generationRef.current && revision === layoutRevision.current) {
         setMaxCssHeight(actualLogicalHeight / dprComp);

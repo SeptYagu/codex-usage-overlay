@@ -13,6 +13,9 @@ const SETTINGS_MIN_WIDTH: f64 = 380.0;
 const SETTINGS_MIN_HEIGHT: f64 = 400.0;
 const SETTINGS_MAX_WIDTH: f64 = 1600.0;
 const SETTINGS_MAX_HEIGHT: f64 = 1600.0;
+/// Safety bounds for the tray menu popup width, in logical pixels.
+const TRAY_MENU_MIN_WIDTH: f64 = 300.0;
+const TRAY_MENU_MAX_WIDTH: f64 = 500.0;
 static TRAY_MENU_GENERATION: AtomicU64 = AtomicU64::new(0);
 static TRAY_MENU_LAYOUT_REVISION: AtomicU64 = AtomicU64::new(0);
 static TRAY_MENU_LAYOUT_LOCK: StdMutex<()> = StdMutex::new(());
@@ -98,12 +101,20 @@ pub fn tray_menu_generation() -> u64 {
     TRAY_MENU_GENERATION.load(Ordering::SeqCst)
 }
 
-pub fn layout_tray_menu(app: &AppHandle, generation: u64, revision: u64, height_logical: f64) -> Result<f64, String> {
+pub fn layout_tray_menu(
+    app: &AppHandle,
+    generation: u64,
+    revision: u64,
+    height_logical: f64,
+    width_logical: f64,
+) -> Result<f64, String> {
     let _layout_guard = TRAY_MENU_LAYOUT_LOCK.lock().map_err(|e| e.to_string())?;
     if generation != tray_menu_generation()
         || revision <= TRAY_MENU_LAYOUT_REVISION.load(Ordering::SeqCst)
         || !height_logical.is_finite()
-        || height_logical <= 0.0 {
+        || height_logical <= 0.0
+        || !width_logical.is_finite()
+        || width_logical <= 0.0 {
         return Err("Stale or invalid tray menu layout request".into());
     }
     TRAY_MENU_LAYOUT_REVISION.store(revision, Ordering::SeqCst);
@@ -145,7 +156,8 @@ pub fn layout_tray_menu(app: &AppHandle, generation: u64, revision: u64, height_
     let scale = monitor.scale_factor();
     let work = monitor.work_area();
     let margin = (8.0 * scale).ceil() as i32;
-    let width = (300.0 * scale).ceil() as i32;
+    let desired_width = width_logical.clamp(TRAY_MENU_MIN_WIDTH, TRAY_MENU_MAX_WIDTH);
+    let width = (desired_width * scale).ceil() as i32;
     let width = width.min(work.size.width as i32 - margin * 2).max(1);
     let desired_height = (height_logical * scale).ceil() as i32;
     let height = desired_height.min(work.size.height as i32 - margin * 2).max(1);
@@ -237,40 +249,25 @@ fn apply_settings_geometry(app: &AppHandle, window: &tauri::WebviewWindow) {
         return;
     };
 
-    let monitor = app
+    let work_areas: Vec<MonitorWorkArea> = app
         .available_monitors()
         .unwrap_or_default()
-        .into_iter()
-        .find(|monitor| geometry_intersects_work_area(monitor, &geometry));
+        .iter()
+        .map(monitor_work_area)
+        .collect();
 
-    let Some(monitor) = monitor else {
+    let Some(placement) = plan_settings_geometry(&work_areas, &geometry) else {
         center_settings_window(window);
         return;
     };
 
-    let scale = monitor.scale_factor();
-    let work = monitor.work_area();
-    let work_left = work.position.x as f64;
-    let work_top = work.position.y as f64;
-    let work_right = work_left + work.size.width as f64;
-    let work_bottom = work_top + work.size.height as f64;
-
-    let min_width = SETTINGS_MIN_WIDTH * scale;
-    let min_height = SETTINGS_MIN_HEIGHT * scale;
-    let max_width = (work_right - work_left).min(SETTINGS_MAX_WIDTH * scale).max(min_width);
-    let max_height = (work_bottom - work_top).min(SETTINGS_MAX_HEIGHT * scale).max(min_height);
-    let width = (geometry.width * scale).clamp(min_width, max_width);
-    let height = (geometry.height * scale).clamp(min_height, max_height);
-    let x = (geometry.x * scale).clamp(work_left, (work_right - width).max(work_left));
-    let y = (geometry.y * scale).clamp(work_top, (work_bottom - height).max(work_top));
-
     let _ = window.set_size(Size::Physical(PhysicalSize::new(
-        width.round() as u32,
-        height.round() as u32,
+        placement.width.round().max(1.0) as u32,
+        placement.height.round().max(1.0) as u32,
     )));
     let _ = window.set_position(Position::Physical(PhysicalPosition::new(
-        x.round() as i32,
-        y.round() as i32,
+        placement.x.round() as i32,
+        placement.y.round() as i32,
     )));
 }
 
@@ -282,25 +279,155 @@ fn center_settings_window(window: &tauri::WebviewWindow) {
     let _ = window.center();
 }
 
-/// True when the saved logical rectangle overlaps the monitor's work area by a
-/// non-zero area, using the monitor's own scale factor for the conversion.
-fn geometry_intersects_work_area(
-    monitor: &tauri::Monitor,
-    geometry: &crate::config::SettingsWindowGeometry,
-) -> bool {
-    let scale = monitor.scale_factor();
+fn monitor_work_area(monitor: &tauri::Monitor) -> MonitorWorkArea {
     let work = monitor.work_area();
-    let left = work.position.x as f64;
-    let top = work.position.y as f64;
-    let right = left + work.size.width as f64;
-    let bottom = top + work.size.height as f64;
+    MonitorWorkArea {
+        left: work.position.x as f64,
+        top: work.position.y as f64,
+        width: work.size.width as f64,
+        height: work.size.height as f64,
+        scale_factor: monitor.scale_factor(),
+    }
+}
 
-    let geo_left = geometry.x * scale;
-    let geo_top = geometry.y * scale;
-    let geo_right = geo_left + geometry.width * scale;
-    let geo_bottom = geo_top + geometry.height * scale;
+/// Axis-aligned rectangle in physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhysicalRect {
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+}
 
-    geo_left < right && geo_right > left && geo_top < bottom && geo_bottom > top
+impl PhysicalRect {
+    pub fn new(left: f64, top: f64, width: f64, height: f64) -> Self {
+        Self { left, top, width, height }
+    }
+
+    pub fn right(&self) -> f64 {
+        self.left + self.width
+    }
+
+    pub fn bottom(&self) -> f64 {
+        self.top + self.height
+    }
+
+    /// Overlapping area with `other`; zero when they only touch or miss entirely.
+    pub fn intersection_area(&self, other: &PhysicalRect) -> f64 {
+        let width = (self.right().min(other.right()) - self.left.max(other.left)).max(0.0);
+        let height = (self.bottom().min(other.bottom()) - self.top.max(other.top)).max(0.0);
+        width * height
+    }
+}
+
+/// A monitor work area in physical pixels, decoupled from `tauri::Monitor` so the
+/// placement maths stays pure and unit-testable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MonitorWorkArea {
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+    pub scale_factor: f64,
+}
+
+impl MonitorWorkArea {
+    pub fn rect(&self) -> PhysicalRect {
+        PhysicalRect::new(self.left, self.top, self.width, self.height)
+    }
+
+    fn has_usable_scale(&self) -> bool {
+        self.scale_factor.is_finite() && self.scale_factor > 0.0
+    }
+}
+
+/// The resolved physical geometry to apply to the settings window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SettingsPlacement {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Projects the persisted logical geometry into physical pixels. When the record
+/// carries the scale factor of the monitor it was saved on, that one factor is used
+/// for every candidate monitor — which is what makes the comparison below
+/// independent of enumeration order. Records written before the field existed fall
+/// back to the candidate's own factor (the historical behaviour).
+fn projected_physical_rect(
+    geometry: &crate::config::SettingsWindowGeometry,
+    candidate_scale: f64,
+) -> PhysicalRect {
+    let scale = geometry
+        .scale_factor
+        .filter(|scale| scale.is_finite() && *scale > 0.0)
+        .unwrap_or(candidate_scale);
+    PhysicalRect::new(
+        geometry.x * scale,
+        geometry.y * scale,
+        geometry.width * scale,
+        geometry.height * scale,
+    )
+}
+
+/// Picks the index of the monitor whose work area overlaps the saved geometry by the
+/// largest non-zero area. Comparing areas (instead of taking the first hit) removes
+/// both the false positive produced by projecting with the wrong scale factor
+/// and any dependency on monitor enumeration order.
+pub fn select_work_area(
+    work_areas: &[MonitorWorkArea],
+    geometry: &crate::config::SettingsWindowGeometry,
+) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (index, work) in work_areas.iter().enumerate() {
+        if !work.has_usable_scale() {
+            continue;
+        }
+        let area = projected_physical_rect(geometry, work.scale_factor)
+            .intersection_area(&work.rect());
+        let is_better = match best {
+            Some((_, best_area)) => area > best_area,
+            None => true,
+        };
+        if area > 0.0 && is_better {
+            best = Some((index, area));
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
+fn place_within_work_area(
+    work: &MonitorWorkArea,
+    geometry: &crate::config::SettingsWindowGeometry,
+) -> SettingsPlacement {
+    let scale = if work.has_usable_scale() { work.scale_factor } else { 1.0 };
+    let left = work.left;
+    let top = work.top;
+    let right = work.left + work.width;
+    let bottom = work.top + work.height;
+
+    let min_width = SETTINGS_MIN_WIDTH * scale;
+    let min_height = SETTINGS_MIN_HEIGHT * scale;
+    let max_width = (right - left).min(SETTINGS_MAX_WIDTH * scale).max(min_width);
+    let max_height = (bottom - top).min(SETTINGS_MAX_HEIGHT * scale).max(min_height);
+    let width = (geometry.width * scale).clamp(min_width, max_width);
+    let height = (geometry.height * scale).clamp(min_height, max_height);
+    let x = (geometry.x * scale).clamp(left, (right - width).max(left));
+    let y = (geometry.y * scale).clamp(top, (bottom - height).max(top));
+
+    SettingsPlacement { x, y, width, height }
+}
+
+/// Resolves the saved geometry to a physical placement, or `None` when no connected
+/// work area overlaps it (e.g. the monitor it lived on was detached), in which case
+/// the caller centres the window on the primary monitor.
+pub fn plan_settings_geometry(
+    work_areas: &[MonitorWorkArea],
+    geometry: &crate::config::SettingsWindowGeometry,
+) -> Option<SettingsPlacement> {
+    let index = select_work_area(work_areas, geometry)?;
+    Some(place_within_work_area(&work_areas[index], geometry))
 }
 
 pub fn update_tray_tooltip(app: &AppHandle, text: &str) {
@@ -456,4 +583,150 @@ fn blend_over(dst: [f64; 4], src: [f64; 4]) -> [f64; 4] {
     let g = (src[1] * src_a + dst[1] * dst_a * (1.0 - src_a)) / out_a;
     let b = (src[2] * src_a + dst[2] * dst_a * (1.0 - src_a)) / out_a;
     [r, g, b, out_a * 255.0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::SettingsWindowGeometry;
+
+    /// Primary display 1920x1080 @100% at the origin, secondary 2560x1440 @150%
+    /// placed to its right — the mixed-DPI layout from the review handoff.
+    fn mixed_dpi_layout() -> [MonitorWorkArea; 2] {
+        [
+            MonitorWorkArea { left: 0.0, top: 0.0, width: 1920.0, height: 1080.0, scale_factor: 1.0 },
+            MonitorWorkArea { left: 1920.0, top: 0.0, width: 2560.0, height: 1440.0, scale_factor: 1.5 },
+        ]
+    }
+
+    /// Window lived on the secondary display: physical (2000, 200), inner size
+    /// 720x990, i.e. logical (1333.33, 133.33, 480, 660) at scale 1.5.
+    fn geometry_on_secondary() -> SettingsWindowGeometry {
+        SettingsWindowGeometry {
+            x: 1333.33,
+            y: 133.33,
+            width: 480.0,
+            height: 660.0,
+            scale_factor: Some(1.5),
+        }
+    }
+
+    #[test]
+    fn mixed_dpi_selects_the_saved_display() {
+        let areas = mixed_dpi_layout();
+        assert_eq!(select_work_area(&areas, &geometry_on_secondary()), Some(1));
+    }
+
+    #[test]
+    fn mixed_dpi_selection_is_independent_of_enumeration_order() {
+        let forward = mixed_dpi_layout();
+        let mut reversed = mixed_dpi_layout();
+        reversed.reverse();
+
+        let forward_pick = select_work_area(&forward, &geometry_on_secondary());
+        let reversed_pick = select_work_area(&reversed, &geometry_on_secondary());
+
+        assert_eq!(forward_pick, Some(1));
+        assert_eq!(reversed_pick, Some(0));
+        // Both orders must land on the same physical monitor (the 150% secondary).
+        assert_eq!(forward[forward_pick.unwrap()], reversed[reversed_pick.unwrap()]);
+    }
+
+    #[test]
+    fn mixed_dpi_restores_physical_position_and_logical_size() {
+        let areas = mixed_dpi_layout();
+        let placement = plan_settings_geometry(&areas, &geometry_on_secondary()).expect("placement");
+        assert!((placement.x - 2000.0).abs() < 1.0, "x was {}", placement.x);
+        assert!((placement.y - 200.0).abs() < 1.0, "y was {}", placement.y);
+        assert!((placement.width - 720.0).abs() < 0.5, "width was {}", placement.width);
+        assert!((placement.height - 990.0).abs() < 0.5, "height was {}", placement.height);
+    }
+
+    #[test]
+    fn overlap_area_beats_the_historical_false_positive() {
+        let areas = mixed_dpi_layout();
+        let geometry = geometry_on_secondary();
+
+        // Reproduce the old bug: projecting with the primary display's own 100%
+        // scale puts the window at [1333..1813]x[133..793], fully inside the primary
+        // work area — a bogus positive that the old first-hit `find` would accept.
+        let legacy_projection = projected_physical_rect(
+            &SettingsWindowGeometry { scale_factor: None, ..geometry.clone() },
+            1.0,
+        );
+        assert!(legacy_projection.intersection_area(&areas[0].rect()) > 0.0);
+
+        // With the saved scale factor recorded the projection is unambiguous and the
+        // largest-overlap pick lands on the secondary display.
+        assert_eq!(select_work_area(&areas, &geometry), Some(1));
+    }
+
+    #[test]
+    fn detached_display_falls_back_to_no_placement() {
+        let areas = mixed_dpi_layout();
+        // Saved on a third monitor that has since been unplugged: nothing on the
+        // current layout overlaps it, so the caller must centre instead.
+        let geometry = SettingsWindowGeometry {
+            x: 5000.0,
+            y: 300.0,
+            width: 480.0,
+            height: 660.0,
+            scale_factor: Some(1.5),
+        };
+        assert_eq!(select_work_area(&areas, &geometry), None);
+        assert_eq!(plan_settings_geometry(&areas, &geometry), None);
+    }
+
+    #[test]
+    fn legacy_geometry_without_scale_factor_still_resolves_by_area() {
+        let areas = mixed_dpi_layout();
+        let geometry = SettingsWindowGeometry {
+            x: 1333.33,
+            y: 133.33,
+            width: 480.0,
+            height: 660.0,
+            scale_factor: None,
+        };
+        assert_eq!(select_work_area(&areas, &geometry), Some(1));
+    }
+
+    #[test]
+    fn saved_geometry_is_clamped_inside_the_selected_work_area() {
+        let areas = mixed_dpi_layout();
+        let geometry = SettingsWindowGeometry {
+            x: 1800.0,
+            y: 1000.0,
+            width: 4000.0,
+            height: 3000.0,
+            scale_factor: Some(1.0),
+        };
+        let index = select_work_area(&areas, &geometry).expect("a monitor should match");
+        let work = areas[index];
+        let placement = plan_settings_geometry(&areas, &geometry).expect("placement");
+
+        assert!(placement.width <= work.width, "width {} > {}", placement.width, work.width);
+        assert!(placement.height <= work.height, "height {} > {}", placement.height, work.height);
+        assert!(placement.x >= work.left);
+        assert!(placement.y >= work.top);
+        assert!(placement.x + placement.width <= work.rect().right() + 0.001);
+        assert!(placement.y + placement.height <= work.rect().bottom() + 0.001);
+    }
+
+    #[test]
+    fn degenerate_monitor_scale_is_ignored() {
+        let areas = [
+            MonitorWorkArea { left: 0.0, top: 0.0, width: 1920.0, height: 1080.0, scale_factor: 0.0 },
+            MonitorWorkArea { left: 1920.0, top: 0.0, width: 2560.0, height: 1440.0, scale_factor: 1.5 },
+        ];
+        assert_eq!(select_work_area(&areas, &geometry_on_secondary()), Some(1));
+    }
+
+    #[test]
+    fn intersection_area_is_zero_when_rectangles_only_touch() {
+        let a = PhysicalRect::new(0.0, 0.0, 100.0, 100.0);
+        let b = PhysicalRect::new(100.0, 0.0, 100.0, 100.0);
+        assert_eq!(a.intersection_area(&b), 0.0);
+        let c = PhysicalRect::new(50.0, 50.0, 100.0, 100.0);
+        assert_eq!(a.intersection_area(&c), 2500.0);
+    }
 }

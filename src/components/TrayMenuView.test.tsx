@@ -27,6 +27,9 @@ beforeEach(async () => {
     const radios = this.querySelectorAll('[role="menuitemradio"]').length;
     return { height: 100 + radios * 30 } as DOMRect;
   });
+  // jsdom reports a zero scrollWidth; the popup width is derived from it, so give
+  // it a non-zero value (280 + 20 padding = 300 logical px).
+  vi.spyOn(Element.prototype, 'scrollWidth', 'get').mockReturnValue(280);
 });
 
 afterEach(() => {
@@ -40,18 +43,21 @@ it('remeasures tray content when the language list opens and closes', async () =
     generation: 3,
     revision: 1,
     heightLogical: 120,
+    widthLogical: 300,
   }));
   fireEvent.click(screen.getByRole('menuitem', { name: /Language \/ 语言/ }));
   await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('layout_tray_menu', {
     generation: 3,
     revision: 2,
     heightLogical: 240,
+    widthLogical: 300,
   }));
   fireEvent.click(screen.getByRole('menuitem', { name: /Language \/ 语言/ }));
   await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('layout_tray_menu', {
     generation: 3,
     revision: 3,
     heightLogical: 120,
+    widthLogical: 300,
   }));
 });
 

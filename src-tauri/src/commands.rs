@@ -399,8 +399,14 @@ pub fn get_tray_menu_generation() -> u64 {
 }
 
 #[tauri::command]
-pub fn layout_tray_menu(app: AppHandle, generation: u64, revision: u64, height_logical: f64) -> Result<f64, String> {
-    crate::tray::layout_tray_menu(&app, generation, revision, height_logical)
+pub fn layout_tray_menu(
+    app: AppHandle,
+    generation: u64,
+    revision: u64,
+    height_logical: f64,
+    width_logical: f64,
+) -> Result<f64, String> {
+    crate::tray::layout_tray_menu(&app, generation, revision, height_logical, width_logical)
 }
 
 #[tauri::command]
