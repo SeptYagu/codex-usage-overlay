@@ -340,21 +340,43 @@ fn remember_valid_settings_geometry(
     scale: f64,
     is_minimized: bool,
 ) {
+    remember_valid_settings_geometry_into(
+        &state.last_valid_settings_geometry,
+        position,
+        size,
+        scale,
+        is_minimized,
+    );
+}
+
+/// The cache half of `remember_valid_settings_geometry`, driven by the bare mutex
+/// so the capture path can be exercised without a window, an `AppState` or an
+/// event loop.
+fn remember_valid_settings_geometry_into(
+    cache: &std::sync::Mutex<Option<config::SettingsWindowGeometry>>,
+    position: Result<tauri::PhysicalPosition<i32>, tauri::Error>,
+    size: Result<tauri::PhysicalSize<u32>, tauri::Error>,
+    scale: f64,
+    is_minimized: bool,
+) {
     let Some(geometry) = sanitize_geometry(position, size, scale, is_minimized) else {
         return;
     };
-    if let Ok(mut cache) = state.last_valid_settings_geometry.lock() {
-        *cache = Some(geometry);
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(geometry);
     }
 }
 
 /// Reads the cached last known-good settings geometry, if any.
 fn cached_settings_geometry(state: &Arc<AppState>) -> Option<config::SettingsWindowGeometry> {
-    state
-        .last_valid_settings_geometry
-        .lock()
-        .ok()
-        .and_then(|cache| cache.clone())
+    cached_settings_geometry_from(&state.last_valid_settings_geometry)
+}
+
+/// The cache half of `cached_settings_geometry`.
+fn cached_settings_geometry_from(
+    cache: &std::sync::Mutex<Option<config::SettingsWindowGeometry>>,
+) -> Option<config::SettingsWindowGeometry> {
+    cache.lock().ok().and_then(|guard| guard.clone())
 }
 
 /// Persists the settings window's current physical geometry as logical values plus
@@ -686,5 +708,208 @@ mod tests {
             false,
         )
         .is_none());
+    }
+
+    /// A state that exists only to hold the geometry cache: no window, no event
+    /// loop, no network. It is built through the real `AppState` so these cases go
+    /// through the same capture/read functions the window handlers call.
+    fn test_state(tag: &str) -> (Arc<AppState>, std::path::PathBuf) {
+        let (manager, dir) = temp_manager(tag);
+        (Arc::new(AppState::for_test(manager)), dir)
+    }
+
+    /// A healthy reading: 300x400 @2.0 -> 150x200 logical, 960x1320 @2.0 -> 480x660.
+    fn capture_healthy(state: &Arc<AppState>) {
+        remember_valid_settings_geometry(
+            state,
+            Ok(PhysicalPosition::new(300, 400)),
+            Ok(PhysicalSize::new(960, 1320)),
+            2.0,
+            false,
+        );
+    }
+
+    fn assert_cache_is_healthy(state: &Arc<AppState>) {
+        let cached = cached_settings_geometry(state).expect("the healthy reading must be cached");
+        assert_eq!((cached.x, cached.y), (150.0, 200.0));
+        assert_eq!((cached.width, cached.height), (480.0, 660.0));
+        assert_eq!(cached.scale_factor, Some(2.0));
+    }
+
+    /// CR3-1 wiring, part 1: the capture point must actually fill the cache and the
+    /// read must hand back exactly what was captured. Fails if
+    /// `remember_valid_settings_geometry` (or the cache half it delegates to) is
+    /// turned into a no-op, or if `cached_settings_geometry` stops reading.
+    #[test]
+    fn capture_fills_the_cache_and_read_back_matches() {
+        let (state, dir) = test_state("cache-capture");
+
+        assert!(
+            cached_settings_geometry(&state).is_none(),
+            "a session that never captured anything must not report a cached geometry"
+        );
+
+        capture_healthy(&state);
+        assert_cache_is_healthy(&state);
+
+        // A later healthy reading replaces the previous one.
+        remember_valid_settings_geometry(
+            &state,
+            Ok(PhysicalPosition::new(100, 200)),
+            Ok(PhysicalSize::new(1000, 1200)),
+            2.0,
+            false,
+        );
+        let cached = cached_settings_geometry(&state).expect("the second reading must be cached");
+        assert_eq!((cached.x, cached.y), (50.0, 100.0));
+        assert_eq!((cached.width, cached.height), (500.0, 600.0));
+        assert_eq!(cached.scale_factor, Some(2.0));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CR3-1 wiring, part 2: every unusable sample must be dropped by the capture
+    /// point. If any of them got through, the first degenerate reading after a
+    /// minimize would poison the cache and the minimize-then-quit fallback would
+    /// persist garbage.
+    #[test]
+    fn capture_never_poisons_the_cache_with_an_unusable_reading() {
+        let (state, dir) = test_state("cache-not-poisoned");
+        capture_healthy(&state);
+        assert_cache_is_healthy(&state);
+
+        // Minimized: Windows reports a 0x0 rect at a meaningless position.
+        remember_valid_settings_geometry(
+            &state,
+            Ok(PhysicalPosition::new(-32000, -32000)),
+            Ok(PhysicalSize::new(0, 0)),
+            1.0,
+            true,
+        );
+        assert_cache_is_healthy(&state);
+
+        // Minimized with a plausible-looking rect: `is_minimized` alone must reject it.
+        remember_valid_settings_geometry(
+            &state,
+            Ok(PhysicalPosition::new(999, 999)),
+            Ok(PhysicalSize::new(300, 300)),
+            1.0,
+            true,
+        );
+        assert_cache_is_healthy(&state);
+
+        // Degenerate rects while not minimized.
+        for size in [
+            PhysicalSize::new(0, 0),
+            PhysicalSize::new(0, 660),
+            PhysicalSize::new(480, 0),
+        ] {
+            remember_valid_settings_geometry(
+                &state,
+                Ok(PhysicalPosition::new(10, 20)),
+                Ok(size),
+                1.0,
+                false,
+            );
+            assert_cache_is_healthy(&state);
+        }
+
+        // Unusable scale factors.
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            remember_valid_settings_geometry(
+                &state,
+                Ok(PhysicalPosition::new(10, 20)),
+                Ok(PhysicalSize::new(480, 660)),
+                scale,
+                false,
+            );
+            assert_cache_is_healthy(&state);
+        }
+
+        // An unreadable accessor result is dropped as well.
+        remember_valid_settings_geometry(
+            &state,
+            Err(tauri::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "unreadable",
+            ))),
+            Ok(PhysicalSize::new(480, 660)),
+            1.0,
+            false,
+        );
+        assert_cache_is_healthy(&state);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CR3-1 wiring, part 3: the end-of-session fallback must go through the same
+    /// read entry point the handlers use, not a cache passed in by the caller.
+    #[test]
+    fn persist_falls_back_to_the_cache_through_the_read_wiring() {
+        let (manager, dir) = temp_manager("persist-cache-wiring");
+        let state = Arc::new(AppState::for_test(manager.clone()));
+
+        remember_valid_settings_geometry(
+            &state,
+            Ok(PhysicalPosition::new(42, 24)),
+            Ok(PhysicalSize::new(520, 700)),
+            1.0,
+            false,
+        );
+
+        // Minimized at quit time, so the live reading is unusable.
+        persist_settings_geometry(
+            &manager,
+            Ok(PhysicalPosition::new(-32000, -32000)),
+            Ok(PhysicalSize::new(0, 0)),
+            1.0,
+            true,
+            cached_settings_geometry(&state).as_ref(),
+        );
+        assert_record_is_captured(&manager);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The live reading must win over the cache whenever it is usable: the cache
+    /// only exists to stand in for an unusable reading. Reversing that priority
+    /// persists the stale placement instead and fails here.
+    #[test]
+    fn persist_prefers_the_live_reading_over_a_non_empty_cache() {
+        let (manager, dir) = temp_manager("persist-live-wins");
+        let state = Arc::new(AppState::for_test(manager.clone()));
+
+        // The placement captured earlier in the session...
+        remember_valid_settings_geometry(
+            &state,
+            Ok(PhysicalPosition::new(42, 24)),
+            Ok(PhysicalSize::new(520, 700)),
+            1.0,
+            false,
+        );
+        let cached = cached_settings_geometry(&state);
+        assert!(
+            cached.is_some(),
+            "this case is only meaningful while the cache is non-empty"
+        );
+
+        // ...versus the healthy live reading taken at persist time.
+        persist_settings_geometry(
+            &manager,
+            Ok(PhysicalPosition::new(300, 400)),
+            Ok(PhysicalSize::new(960, 1320)),
+            2.0,
+            false,
+            cached.as_ref(),
+        );
+
+        let loaded = manager
+            .load_settings_geometry()
+            .expect("the live reading must have been persisted");
+        assert_eq!((loaded.x, loaded.y), (150.0, 200.0));
+        assert_eq!((loaded.width, loaded.height), (480.0, 660.0));
+        assert_eq!(loaded.scale_factor, Some(2.0));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

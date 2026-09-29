@@ -41,6 +41,39 @@ pub struct AppState {
     pub audio: OnceLock<crate::audio::AudioHandle>,
 }
 
+/// A state for unit tests that never touch a window, the event loop, the tray or
+/// the network. The caller's `config_manager` is kept so tests can assert on the
+/// files it writes.
+#[cfg(test)]
+impl AppState {
+    pub(crate) fn for_test(config_manager: ConfigManager) -> Self {
+        let settings = config_manager.load_settings();
+        Self {
+            client: Mutex::new(CodexClient::new()),
+            settings_patch: Mutex::new(()),
+            config_manager: config_manager.clone(),
+            dock: crate::dock::DockManager::new(config_manager.clone()),
+            last_usage: Mutex::new(None),
+            settings: Mutex::new(settings),
+            settings_revision: AtomicU64::new(0),
+            last_valid_settings_geometry: StdMutex::new(None),
+            autostart_update: Mutex::new(()),
+            update_check: Mutex::new(()),
+            update_install: Mutex::new(()),
+            update_installing: AtomicBool::new(false),
+            pending_update: Mutex::new(None),
+            prepared_update: StdMutex::new(None),
+            available_update: Mutex::new(None),
+            update_error: Mutex::new(None),
+            last_auto_notified_version: Mutex::new(None),
+            reset_state: Mutex::new(crate::notify::load_reset_state(&config_manager)),
+            pending_reset_fetches: Mutex::new(PendingResetFetches::default()),
+            #[cfg(windows)]
+            audio: OnceLock::new(),
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsEnvelope {
