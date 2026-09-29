@@ -16,16 +16,20 @@
   - **保留自适应算法**：不直接退回到写死宽度的旧方案，保留自适应骨架以防御极端大字体、系统高 DPI 缩放或长文本带来的物理遮挡风险；
   - **收窄多余预留**：核算并收窄算法中累加的多余安全余量，消除虚高膨胀，使菜单在常规状态下紧凑贴合，仅在必要时才做最小幅度微调。
 
-### 1.2 算法优化方案
-1. **消除内边距双重累加**：
-   - 现存问题：`.tray-menu-item` 本身已有左右各 10px 内边距（合计 20px），测量后外层又叠加了 `Math.ceil(intrinsicWidth + 20)`，且 `content.scrollWidth` 在初始渲染时容易受容器自身宽度影响，导致水平余量被多重放大；
-   - 优化：直接测量菜单项内部文本节点的真实内联宽度（Inline text width），或扣除重复计算的内边距，实现真实净文字宽度度量。
-2. **紧凑基准线收紧**：
-   - 设定紧凑基准下限（如紧凑贴合的 280~300px 范围）；
-   - 仅在文字净宽度真实突破紧凑内容区边界时，才按实际超出量做贴合撑开，不再粗暴预留大额空白安全垫。
-3. **保留单行排版契约**：
-   - 继续保留 CSS 的 `.tray-menu-item { white-space: nowrap; }`，杜绝任何难看的折行；
-   - 达到“常规场景精致小巧、极端长文案安全贴合”的平衡。
+### 1.2 算法优化方案与唯一契约
+1. **根因纠偏与测量解耦**：
+   - **真实根因**：原有菜单项具有 `width: 100%`，导致其 `scrollWidth >= clientWidth` 恒成立。一旦因长文案（如检查更新）使得窗口撑大到 350px，后续渲染的 `scrollWidth` 就会受制于当前容器 clientWidth 而无法缩小，形成**自引用固定点（只增不减）**；原有代码中的 `+20` 实为外层容器 `p-2.5` 的内边距，并非重复多算。
+   - **解耦测量**：必须将测量机制与当前容器宽度彻底解耦，直接测量最长菜单项净文本节点的内联宽度 `textW`（通过 `Range.getBoundingClientRect()` 或不受容器约束的内联探针测量），使宽度既能自适应撑开，也能在文案变短时平滑收窄。
+2. **唯一宽度计算公式**：
+   - 严格规定全链路唯一的宽度计算公式：
+     $$\text{widthLogical} = \text{clamp}(280, 500, \lceil\text{textW}\rceil + 40)$$
+   - **40px 构成严格界定**：`item 左右内边距(20px) + 外层容器 p-2.5 左右内边距(20px)`。
+3. **双端紧凑基准下限同步**：
+   - 前端 `src/components/TrayMenuView.tsx` 中的 `TRAY_MENU_MIN_WIDTH = 280`；
+   - 后端 `src-tauri/src/tray.rs` 中的 `TRAY_MENU_MIN_WIDTH = 280.0`；
+   - 双端保持严格一致，确保常规场景紧凑贴合（280px 下限），极端长文案自适应撑开至 500px 上限。
+4. **保留单行排版契约**：
+   - 保留 CSS 的 `.tray-menu-item { white-space: nowrap; }`，杜绝任何折行。
 
 ---
 
@@ -33,29 +37,16 @@
 
 ### 2.1 根因分析（Root Cause）
 1. **核心诱因：Windows 前台焦点锁定与瞬间失焦误杀（高发于穿透开启状态）**：
-   - 未穿透时，用户频繁点击主悬浮窗，程序常处于 Windows 前台进程状态；
-   - 穿透开启后，主悬浮窗完全忽略鼠标，用户操作的焦点完全属于第三方应用（浏览器、IDE、游戏等），本程序处于纯后台无焦点状态；
-   - 用户点击托盘图标触发 `window.show(); window.set_focus();` 时，受 Windows Foreground Activation Lock（前台激活锁定）限制，后台进程无法随意抢夺前台焦点；
-   - `lib.rs:88` 的 `tauri::WindowEvent::Focused(false)` 监听：
-     ```rust
-     tauri::WindowEvent::Focused(false) if window.label() == "tray-menu" => {
-         let _ = window.hide();
-     }
-     ```
-     在 Windows 点击切换的瞬间极易收到 transient killfocus 信号，导致菜单在 show 出的几毫秒内被立即 hide 隐藏，肉眼表现为“点击毫无反应”。
+   - 穿透开启后主悬浮窗忽略鼠标，程序处于后台无焦点状态；
+   - 点击托盘触发 `window.show(); window.set_focus();` 时，受 Windows Foreground Activation Lock 限制，后台进程无法随意抢占前台焦点；
+   - `lib.rs:88` 的 `tauri::WindowEvent::Focused(false)` 在点击切换瞬间极易收到 transient killfocus 信号，导致菜单刚 show 出几毫秒就被立即 hide，肉眼表现为“毫无反应”。
 2. **代码级硬缺陷：`tray.rect()` 报错导致整个弹出流程被 `?` 直接中断**：
-   - `src-tauri/src/tray.rs:123`：
-     ```rust
-     let rect = tray.rect().map_err(|e| e.to_string())?;
-     ```
-   - Windows 原生 API `Shell_NotifyIconGetRect` 在图标位于折叠区（`^` 向上箭头内）、任务栏重绘或快速连点时经常返回错误；
-   - 虽然后续第 126-147 行写有针对未获取到位置时的屏幕右下角 fallback 降级分支，但由于第 123 行使用了 `?` 提前退出，一旦报错整个调用直接中止，**根本无法进入 fallback 分支，也从未调用 `window.show()`**。
-3. **事件捕获缺陷：快速连点或双击被静默丢弃**：
-   - `src-tauri/src/tray.rs:31-39` 仅匹配了 `TrayIconEvent::Click { button_state: MouseButtonState::Up, .. }`；
-   - 穿透开启后用户急于关闭穿透，常伴随快速连击或双击，500ms 内的后续点击会被操作系统识别为 `TrayIconEvent::DoubleClick`；
-   - 由于未匹配 `DoubleClick`，后续点击被静默丢弃，导致用户主观感受“狂点托盘没反应”。
+   - `src-tauri/src/tray.rs:123` 的 `let rect = tray.rect().map_err(|e| e.to_string())?;` 在图标位于折叠区（`^` 向上箭头内）或连点时报错，导致流程直接中止，**无法进入 fallback 分支，也从未调用 `window.show()`**。
+3. **快速点击与双击时序机理澄清（纠偏）**：
+   - 经核查底层的 `tray-icon 0.25.1`（`mod.rs:439`），`WM_LBUTTONUP` 均无条件映射为 `Click { button_state: Up }`。快速双击并不会被系统静默丢弃，而是产生多轮触发；
+   - 若机械式监听 `DoubleClick`，不仅不能解决吞键，反而会导致双击产生多达三次触发，且与新增的 Toggle 语义产生冲突（双击收起反而被再次打开）。
 4. **异步测算先 `hide()` 的竞态空档**：
-   - 每次点击第一步先调用 `window.hide()`，再通过 IPC 触发前端测量与反向 invoke；在 IPC 和渲染这数十毫秒的空档内，若发生连续点击，会导致前后两代 generation 冲突互斥，窗口停留在隐藏状态。
+   - 每次点击第一步先调用 `window.hide()`，再通过 IPC 触发前端测量与反向 invoke；在数十毫秒的空档内连续点击会导致前后两代 generation 冲突互斥，窗口停留在隐藏状态。
 
 ### 2.2 响应性加固方案
 1. **加固 `tray.rect()` 容错降级（彻底消除致命短路）**：
@@ -64,10 +55,13 @@
      let rect = tray.rect().ok().flatten();
      ```
    - 确保即便 Windows API 报错，也绝不中断 layout 与 show 流程，平滑降级至屏幕右下角安全展示。
-2. **事件监听纳入 `DoubleClick`**：
-   - 在 `on_tray_icon_event` 中，将 `TrayIconEvent::DoubleClick` 视为与 `Click` 相同的弹出操作，彻底解决快速点击与双击吞键问题。
-3. **增加失焦误杀保护期（防瞬时焦点抖动）**：
-   - 托盘菜单在刚刚 show 出后的前 150~200ms 内设立瞬时保护期，忽略来自操作系统的瞬时 `Focused(false)`，等待前台激活平稳后才允许因用户点击外部而自然关闭。
+2. **点击去抖与幂等状态机（替代机械监听 DoubleClick）**：
+   - 托盘点击引入 250~300ms 快速点击去抖与防重入机制，快速连击或双击统一合流为单次 Toggle 意图；
+   - 菜单已展开状态下，双击图标判定为一次明确的收起动作，绝不二次重开，消除 generation 剧烈抖动。
+3. **失焦保护期闭环（到期复检机制）**：
+   - **计时起点精准锚定**：保护期时间戳严格记录在 `layout_tray_menu` 成功执行 `window.show()`（`tray.rs:181`）时刻；
+   - **到期复检状态转移**：在刚 show 出的 150~200ms 保护期内收到 `Focused(false)` 时，不直接无脑丢弃，而是标记 `pending_blur = true`；
+   - **定时器权威裁决**：保护期定时器到期时，检查 `window.is_focused()`：若此时窗口仍未处于获焦状态（表明用户确实在保护期内点击了外部其他窗口），则立即执行 `window.hide()`；若已正常获焦，则清除标记保持显示。彻底杜绝“常置顶菜单永久滞留”的状态机缺陷。
 4. **支持已打开状态下的点击关闭（Toggle 语义）**：
    - 点击托盘时若检测到托盘菜单当前已处于可见状态，则执行关闭收起，提供符合 Windows 习惯的开关反馈。
 
@@ -110,26 +104,33 @@
 - **防误折叠契约**：
   - **内部接缝严禁触发贴边折叠**：跨屏接缝仅用于屏幕切换与吸入，即便开启了 `auto_edge_hide`，也绝不在内部接缝处收缩为 pill，确保多屏视觉连贯与光标通行无阻；
   - **物理外边界正常响应贴边**：只有接触或拖出物理外边界时，才根据 `auto_edge_hide` 设置执行贴边折叠或外框回弹。
+  - **架构取舍决策记录（T-2）**：`is_external_boundary` 采用整边拓扑判定。若某条边的任何一段与相邻显示器的工作区紧贴，整条边即被定性为内部接缝通道，严格禁用贴边折叠。该设计是刻意为之的工程简化，最高优先级确保多屏通道顺畅，防止在错位屏幕缝隙中发生难看的悬空折叠。
 
-#### 3. 松手时行为状态矩阵（State Matrix）
+#### 3. 松手时行为状态矩阵（State Matrix）与持久化契约
+- **权威锚点持久化契约（P3-4）**：
+  - 严禁在计算和重定位之前落盘裸坐标！
+  - 必须在完成所有屏幕归属仲裁、边缘判定、贴边收缩或工作区 clamp 重定位之后，以**最终稳定的物理渲染坐标**调用 `state.config_manager.save_position(&final_anchor)` 与 `state.dock.set_anchor_center(final_center)`；
+  - 状态矩阵中所有行均保证最终锚点权威回写，彻底杜绝重启后跨屏幕归属漂移。
 
 | 拖拽松手落点 | 自动贴边开启 (`auto_edge_hide: true`) | 自动贴边关闭 (`auto_edge_hide: false`) |
 | :--- | :--- | :--- |
-| **完全位于单屏内部** | 保持当前位置，更新保存锚点 | 保持当前位置，更新保存锚点 |
-| **接触或拖出物理外边界** (`dist <= 16px` 或 `越界`) | 命中对应外边缘，立即收缩为贴边细条（`apply_pill`） | 平滑弹回工作区内边界紧贴（`clamp_position`），保持展开状态 |
-| **两屏接缝处（>50% 进入目标屏 B）** | 归属于目标屏 B，完整滑入屏 B 接缝内紧贴，**不折叠**（保持展开） | 归属于目标屏 B，完整滑入屏 B 接缝内紧贴，**不折叠**（保持展开） |
-| **两屏接缝处（<=50% 留在原屏 A）** | 归属于原屏 A，完整滑回屏 A 接缝内紧贴，**不折叠**（保持展开） | 归属于原屏 A，完整滑回屏 A 接缝内紧贴，**不折叠**（保持展开） |
+| **完全位于单屏内部** | 保持当前位置，更新保存最终位置锚点 | 保持当前位置，更新保存最终位置锚点 |
+| **接触或拖出物理外边界** (`dist <= 16px` 或 `越界`) | 命中对应外边缘，立即收缩为贴边细条（`apply_pill`），更新保存最终锚点 | 平滑弹回工作区内边界紧贴（`clamp_position`），更新保存最终位置锚点 |
+| **两屏接缝处（>50% 进入目标屏 B）** | 归属于目标屏 B，完整滑入屏 B 接缝内紧贴，**不折叠**，更新保存最终位置锚点 | 归属于目标屏 B，完整滑入屏 B 接缝内紧贴，**不折叠**，更新保存最终位置锚点 |
+| **两屏接缝处（<=50% 留在原屏 A）** | 归属于原屏 A，完整滑回屏 A 接缝内紧贴，**不折叠**，更新保存最终位置锚点 | 归属于原屏 A，完整滑回屏 A 接缝内紧贴，**不折叠**，更新保存最终位置锚点 |
+| **与所有工作区零重叠（错位空洞区 / 完全出屏）** | 归属于当前/最近屏，外边界按设置折叠或 clamp，更新保存最终位置锚点 | 归属于当前/最近屏，平滑弹回工作区内边界紧贴（`clamp_position`），更新保存最终位置锚点 |
 
 
 ### 3.3 核心算法设计与伪代码规范
 
 #### 1. 矩形交集与跨屏归属判定 (`select_monitor_by_overlap`)
 ```rust
-/// 计算窗口物理矩形与各显示器工作区的交集面积，按最大面积（>50% 多数原则）确定宿主显示器
+/// 计算窗口物理矩形与各显示器工作区的交集面积，按最大面积（>50% 多数原则）确定宿主显示器。
+/// 若与所有工作区零重叠（如错位空洞区或完全拉出屏幕），对齐 dock.rs 既有退化链，回退至窗口当前所在屏或首屏。
 pub fn select_monitor_by_overlap(
     win: PhysicalRect,
     monitors: &[(PhysicalRect, f64)],
-    fallback: usize,
+    fallback_index: usize,
 ) -> (PhysicalRect, f64) {
     let mut best_monitor = None;
     let mut max_area = 0i64;
@@ -149,9 +150,10 @@ pub fn select_monitor_by_overlap(
         }
     }
 
-    best_monitor.unwrap_or_else(|| {
-        monitors.get(fallback).copied().unwrap_or((win, 1.0))
-    })
+    // 零重叠时严禁返回 (win, 1.0) 伪工作区，必须回退至真实显示器工作区与真实 scale_factor
+    best_monitor.or_else(|| {
+        monitors.get(fallback_index).or_else(|| monitors.first()).copied()
+    }).expect("Monitors list must not be empty")
 }
 ```
 
@@ -249,12 +251,14 @@ pub fn detect_edge_multi_monitor(
    - 刻度线外观：高度为 1px 的细黑线（`rgba(0, 0, 0, 0.45)` 在浅色高饱和的绿/黄/红填充条以及底槽上具有极佳辨识度，深色模式下清晰自然）；
    - 刻度线层级：位于进度条填充（`.overlay-pill-fill`）的上层覆盖，指针/填充色上涨时直接穿过格线，用户一眼即可数出剩余“满格数 + 半格”；
    - 旋转自适应：在 Top / Bottom 边缘贴边时，小窗整体旋转 90deg（`.overlay-pill-rotated`），刻度线随 DOM 树自然跟随旋转，无需额外计算。
-2. **配置契约与持久化**：
+2. **配置契约与持久化闭环（含 P2-1 闭环）**：
    - `OverlaySettings` 新增字段 `showPercentageGrid: boolean`（默认 `false`，由用户按需开启）；
-   - 前端 `src/types.ts`、后端 `src-tauri/src/config.rs` 同步增加定义与 serde 默认值。
-   - `src/i18n.ts` 同步增加双语翻译：
-     - 中文：`showPercentageGrid: '开启百分比格子'`
-     - 英文：`showPercentageGrid: 'Show Percentage Grid'`
+   - 前端 `src/types.ts`、后端 `src-tauri/src/config.rs` 同步增加定义与 serde 默认值；
+   - **后端白名单硬约束（P2-1）**：`src-tauri/src/commands.rs::validate_settings_patch` 拥有严格的 boolean 字段白名单，**必须将 `"showPercentageGrid"` 明确加入白名单**，否则前端发起的 patch 请求会被直接拦截报错 `Err("Invalid settings field")`；
+   - **全语种国际化契约（P2-1）**：`src/i18n.ts` 必须同步补齐全部 3 个受支持语言包：
+     - `zh-CN`: `showPercentageGrid: '开启百分比格子'`
+     - `zh-Hant`: `showPercentageGrid: '開啟百分比格子'`
+     - `en-US`: `showPercentageGrid: 'Show Percentage Grid'`
 
 ---
 
@@ -266,10 +270,10 @@ pub fn detect_edge_multi_monitor(
   - **宽度乘二（480px → 960px）**，重构为专业、工整的**双栏并排设计（Two-Column Layout）**；
   - **默认一屏幕展示所有选项**：彻底消除默认尺寸下的垂直滚动条，所有核心配置项在打开设置窗口的瞬间尽收眼底。
 
-### 5.2 窗口尺寸与约束规范
+### 5.2 窗口尺寸与约束规范（T-1 闭环）
 - **默认尺寸**：
   - 宽度从 480px 乘二增加至 **960px**（`SETTINGS_DEFAULT_WIDTH = 960.0`）；
-  - 默认高度设定为 **600px ~ 620px**（`SETTINGS_DEFAULT_HEIGHT = 600.0`）；
+  - 默认高度锁定为 **620px**（`SETTINGS_DEFAULT_HEIGHT = 620.0`），确保容纳双栏最大内容（约 470px）及上下内边距和标题栏，留出充分的安全余量，达成真正的零滚动浏览；
 - **窗口约束调整**：
   - `minWidth`: 从 380px 调整为 **760px**（保证双栏并排时不发生空间挤压换行）；
   - `minHeight`: 从 400px 调整为 **500px**；
@@ -278,7 +282,7 @@ pub fn detect_edge_multi_monitor(
 
 ### 5.3 双栏功能分区架构
 - **顶部 Header（全宽跨栏）**：
-  - 窗口设置标题 (`t('windowSettings')`) 与版本标识徽章 (`v1.1.3`)，下方贯穿式分割线；
+  - 窗口设置标题 (`t('windowSettings')`) 与版本标识徽章 (`v1.2.0`)，下方贯穿式分割线；
 - **核心内容区（2-Column Grid 并排）**：
   - **左栏（第一栏：浮窗外观、尺寸与交互控制）**：
     1. 布局方式选择（`overlayLayout`：分组胶囊 / 紧凑堆叠）
@@ -301,7 +305,7 @@ pub fn detect_edge_multi_monitor(
   - 贯穿式分割线与居中反馈邮箱 (`septwind@agent.qq.com`)。
 - **一屏尽览效果核算**：
   - 左栏高度约 460px，右栏高度约 470px；
-  - 在 600px 窗口高度下，两栏完全无缝容纳在一屏之内，无需任何上下滚动！
+  - 在 620px 窗口高度下，两栏完全无缝容纳在一屏之内，无需任何上下滚动！
 
 ---
 
@@ -309,23 +313,23 @@ pub fn detect_edge_multi_monitor(
 
 | 模块 | 改动文件 | 涉及函数 / 组件 / 配置 | 改动具体内容与目标 |
 | :--- | :--- | :--- | :--- |
-| **模块一** | `src/components/TrayMenuView.tsx` | `measureMenu` | 1. 消除外层重复叠加的 `+ 20` 内边距。<br>2. 测量净文本元素真实宽度，紧凑基准下限收紧至 280px。<br>3. 保持 `white-space: nowrap` 单行不折行。 |
-| **模块一** | `src/components/TrayMenuView.test.tsx` | 单元测试 | 更新测试期望值与 mock，保证 280~500px 范围有效性与可证伪性。 |
+| **模块一** | `src/components/TrayMenuView.tsx` | `measureMenu` | 1. 采用净文本测量解耦容器宽度，杜绝自引用固定点。<br>2. 统一公式：`clamp(280, 500, ceil(textW) + 40)`。<br>3. 保持 `white-space: nowrap` 单行不折行。 |
+| **模块一** | `src/components/TrayMenuView.test.tsx` | 单元测试 | 精确数值断言与平滑收窄测试，验证 280~500px 范围。 |
 | **模块一** | `src-tauri/src/tray.rs` | `TRAY_MENU_MIN_WIDTH` | 下限常数从 300.0 微调至 280.0，与前端保持契约统一。 |
-| **模块二** | `src-tauri/src/tray.rs` | `layout_tray_menu` | 将 `tray.rect().map_err(...)?` 改为 `tray.rect().ok().flatten()`，报错时平滑进入屏幕右下角 fallback 分支。 |
-| **模块二** | `src-tauri/src/tray.rs` | `setup_tray` | 监听纳入 `TrayIconEvent::DoubleClick`，防止快速连击被操作系统吞键。 |
-| **模块二** | `src-tauri/src/tray.rs` | `open_tray_menu_window` | 增加 Toggle 支持（若菜单已可见则直接隐藏），并记录打开时间戳。 |
-| **模块二** | `src-tauri/src/lib.rs` | `WindowEvent::Focused(false)` | 设立 150~200ms 保护期，过滤鼠标穿透启动时的瞬时 killfocus 误杀。 |
-| **模块三** | `src-tauri/src/dock.rs` | `select_monitor_by_overlap` | 新增基于重叠相交面积的宿主屏幕选择算法，实现 >50% 面积跨屏归属。 |
-| **模块三** | `src-tauri/src/dock.rs` | `is_external_boundary` | 新增屏幕接缝通道 vs 物理外边界拓扑判定，内部接缝严禁触发贴边折叠。 |
-| **模块三** | `src-tauri/src/dock.rs` | `detect_edge` | 支持 `distance <= 0` 越界吸附，仅对物理外边界生效。 |
-| **模块三** | `src-tauri/src/dock.rs` | `drag_ended` | 整合跨屏归属 + clamp 安全回弹 + 锚点持久化，未贴边时确保窗口完整吸在屏内。 |
+| **模块二** | `src-tauri/src/tray.rs` | `layout_tray_menu` | 将 `tray.rect().map_err(...)?` 改为 `tray.rect().ok().flatten()`，报错时平滑进入屏幕右下角 fallback 分支；将保护期计时起点锚定在 `window.show()` 成功时刻。 |
+| **模块二** | `src-tauri/src/tray.rs` | 点击事件流与状态机 | 引入 250~300ms 点击去抖与防重入机制，合流多次点击为单次 Toggle 语义（已展开时点击收起，收起时点击展开）。 |
+| **模块二** | `src-tauri/src/lib.rs` | `WindowEvent::Focused(false)` | 设立 150~200ms 失焦保护期，保护期内失焦标记 `pending_blur = true`；保护期到期时复检 `!window.is_focused()`，唯有确认仍未获焦时才执行 `hide()`。 |
+| **模块三** | `src-tauri/src/dock.rs` | `select_monitor_by_overlap` | 基于相交面积的宿主屏幕选择算法，实现 >50% 面积跨屏归属；零重叠时安全回退至当前屏或首屏的真实工作区与缩放因子。 |
+| **模块三** | `src-tauri/src/dock.rs` | `is_external_boundary` | 整边拓扑判定，内部接缝通道严禁触发贴边折叠。 |
+| **模块三** | `src-tauri/src/dock.rs` | `detect_edge` | 结合外边界判定，支持 `distance <= 0` 越界吸附，仅对物理外边界生效。 |
+| **模块三** | `src-tauri/src/dock.rs` | `drag_ended` | 整合跨屏归属 + clamp 安全回弹 + **权威最终渲染坐标落盘持久化**，彻底杜绝重启漂移。 |
 | **模块四** | `src/types.ts` / `config.rs` | `OverlaySettings` | 新增 `showPercentageGrid: boolean` 配置字段及默认值。 |
-| **模块四** | `src/i18n.ts` | 国际化语言包 | 增加 `showPercentageGrid` 双语对照文案。 |
+| **模块四** | `src-tauri/src/commands.rs` | `validate_settings_patch` | **（P2-1 闭环）** 将 `"showPercentageGrid"` 纳入后端 boolean 字段白名单，避免 patch 保存失败。 |
+| **模块四** | `src/i18n.ts` | 国际化语言包 | **（P2-1 闭环）** 补齐 `zh-CN`, `zh-Hant`, `en-US` 三套完整语言词条。 |
 | **模块四** | `src/components/OverlayView.tsx` | 胶囊渲染 | 在 `settings.showPercentageGrid` 开启时，在小窗进度条上渲染 9 条等分刻度黑细线（10 等分格子）。 |
 | **模块四** | `src/index.css` | `.overlay-pill-tick` | 添加刻度细线绝对定位样式（`bottom: 10% ~ 90%`）。 |
-| **模块五** | `src-tauri/tauri.conf.json` | `settings` window | 设置窗口默认尺寸从 480×660 升级为 960×600，minWidth 改为 760，minHeight 改为 500。 |
-| **模块五** | `src-tauri/src/tray.rs` | 常数定义 | `SETTINGS_DEFAULT_WIDTH` 更新为 960.0，`SETTINGS_DEFAULT_HEIGHT` 更新为 600.0，`SETTINGS_MIN_WIDTH` 更新为 760.0。 |
+| **模块五** | `src-tauri/tauri.conf.json` | `settings` window | 设置窗口默认尺寸从 480×660 升级为 960×620，minWidth 改为 760，minHeight 改为 500。 |
+| **模块五** | `src-tauri/src/tray.rs` | 常数定义 | `SETTINGS_DEFAULT_WIDTH` 更新为 960.0，`SETTINGS_DEFAULT_HEIGHT` 更新为 620.0，`SETTINGS_MIN_WIDTH` 更新为 760.0，`SETTINGS_MIN_HEIGHT` 更新为 500.0。 |
 | **模块五** | `src/components/SettingsView.tsx` | 整体布局 | 重构为双栏 Grid 布局，将所有设置项划分为“外观与交互”和“系统协同与通知”两栏，放置“开启百分比格子”于贴边隐藏正下方，消除垂直滚动。 |
 
 ---
@@ -333,8 +337,9 @@ pub fn detect_edge_multi_monitor(
 ## 七、自动化测试与可证伪性验证方案
 
 ### 7.1 前端 Vitest 测试矩阵
-1. **紧凑基础宽度回归**：
-   - 当菜单项文本在常规紧凑范围（如 220px 净宽）时，计算出的 `widthLogical` 落在 280px 基准下限，不再膨胀为 320~350px。
+1. **紧凑基础宽度数值精确断言与缩窄验证**：
+   - 验证菜单文本净宽 220px 时，计算出的 `widthLogical` 精确落在 280px；
+   - 验证文本从长变短时，宽度能够平滑收缩回 280px，彻底消除自引用固定点滞留。
 2. **极端长文案自适应撑开**：
    - 当菜单项出现超长版本号文案（如 `scrollWidth = 360px`）时，自适应撑开至贴合净宽，不折行且不超过 500px 上限。
 3. **刻度格子开关渲染验证**：
@@ -344,27 +349,33 @@ pub fn detect_edge_multi_monitor(
    - 验证设置界面中包含双栏结构容器；
    - 验证“开启百分比格子”复选框位于“开启贴边隐藏”之后，且点击后正确触发 `onPatchSettings({ showPercentageGrid: ... })`。
 
-### 7.2 后端 Rust 单元测试矩阵 (`dock.rs`, `tray.rs` & `config.rs`)
-1. **多屏 >50% 跨屏归属判定测试**：
+### 7.2 后端 Rust 单元测试矩阵 (`dock.rs`, `tray.rs`, `commands.rs` & `config.rs`)
+1. **设置项 Patch 白名单验证测试（P2-1）**：
+   - 在 `commands.rs` 中编写测试，验证提交包含 `showPercentageGrid: true/false` 的 patch 请求能够成功通过白名单校验；
+   - 验证非法未知字段仍被严密拒绝（`Err("Invalid settings field")`）。
+2. **多屏 >50% 跨屏归属与零重叠退化测试（P3-3）**：
    - 模拟两台并排显示器（屏 A: 0..1920, 屏 B: 1920..3840）。
    - 浮窗横跨两屏（如 70% 面积在屏 B，30% 在屏 A）-> 必须精准判定归属为屏 B。
    - 浮窗横跨两屏（如 40% 面积在屏 B，60% 在屏 A）-> 必须精准判定归属为屏 A。
-2. **内部接缝防误折叠测试**：
-   - 浮窗在屏 A 和屏 B 交界处（屏 A 的右边界 / 屏 B 的左边界）松手，即便开启 `auto_edge_hide: true`，`detect_edge` 必须返回 `None`，严禁触发贴边胶囊折叠。
-3. **物理外边界越界回弹与贴边测试**：
+   - 浮窗位于工作区外零重叠区域 -> 验证必须退化返回首屏真实工作区与有效缩放因子，严禁返回假工作区。
+3. **内部接缝防误折叠与整边拓扑判定测试（T-2）**：
+   - 浮窗在两屏接缝通道处松手，即便开启 `auto_edge_hide: true`，`detect_edge` 必须返回 `None`，严禁触发贴边胶囊折叠。
+4. **物理外边界越界回弹与贴边测试**：
    - 开启自动贴边时，向最左屏左侧物理外框拖出 50px（越界 `x = -50`）-> 必须命中 `Edge::Left` 并折叠为贴边细条。
    - 关闭自动贴边时，向最左屏左侧物理外框拖出 50px（越界 `x = -50`）-> 必须平滑弹回屏内 `clamp_position(x = 0)`，绝不留在屏幕外。
-4. **托盘点击响应性测试**：
-   - 测试 `tray.rect()` 返回 `Err` 时，确保不 panic 且顺利进入 fallback 布局分支。
-   - 测试菜单在 `show` 后 100ms 内触发 `Focused(false)` 时，不被误触发 `hide`。
-5. **配置项序列化与反序列化测试**：
+5. **权威锚点持久化落盘时序验证（P3-4）**：
+   - 验证在发生跨屏吸入、clamp 回弹或外边界折叠后，保存至配置文件的坐标为最终校正后的合法坐标，而非原始越界坐标。
+6. **托盘点击响应与失焦到期复检测试（P3-1, P3-2）**：
+   - 测试 `tray.rect()` 返回 `None` 时，确保不 panic 且顺利进入 fallback 布局分支；
+   - 测试在保护期内发生失焦并在到期时仍未获焦，状态机正确驱动隐藏流程；若到期时已获焦则保持展示。
+7. **配置项序列化与反序列化测试**：
    - 测试包含/缺失 `showPercentageGrid` 的 json 配置文件的兼容加载与默认值注入。
 
 ---
 
 ## 八、执行与交付流程（定稿后执行）
 
-1. **定稿确认**：待用户审阅确认本技术设计文档全部五大模块无误后，启动实现。
+1. **定稿确认**：方案经双 Agent 审查收敛达成一致后，正式进入 Mode C 实现阶段。
 2. **代码修改与实现**：按照第六节清单严格顺序修改前端与后端核心逻辑。
 3. **全量门禁检验**：
    - `npm test`（确保前端全部测试通过并覆盖新功能）；
@@ -372,4 +383,5 @@ pub fn detect_edge_multi_monitor(
    - `cargo test --manifest-path src-tauri/Cargo.toml --locked`（确保 Rust 全部测试通过）；
    - `cargo check --manifest-path src-tauri/Cargo.toml --locked`（确保后端 0 warnings 通过）。
 4. **Git 提交与远端推送**：测试全部通过后，创建符合规范的 Git 提交并推送到 GitHub 远端仓库。
+
 
