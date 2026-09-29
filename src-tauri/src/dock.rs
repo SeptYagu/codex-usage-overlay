@@ -684,6 +684,7 @@ pub fn resolve_drag_outcome(
 ///
 /// Pure receiver mapping: guarantees that the exact `outcome.anchor` coordinates are
 /// persisted to disk, and `outcome.anchor_center` and `outcome.edge` are committed to dock.
+#[allow(dead_code)]
 pub fn apply_drag_outcome_to_session<S, D>(
     outcome: &DragOutcome,
     mut save_pos: S,
@@ -694,6 +695,19 @@ pub fn apply_drag_outcome_to_session<S, D>(
 {
     save_pos(outcome.anchor.0 as f64, outcome.anchor.1 as f64);
     update_dock(outcome.anchor_center, outcome.edge);
+}
+
+pub trait DragOutcomeSessionOps {
+    fn save_position(&mut self, left: f64, top: f64);
+    fn update_dock(&mut self, anchor_center: (i32, i32), edge: Option<Edge>);
+}
+
+pub fn commit_drag_outcome_to_session<W: DragOutcomeSessionOps>(
+    ops: &mut W,
+    outcome: &DragOutcome,
+) {
+    ops.save_position(outcome.anchor.0 as f64, outcome.anchor.1 as f64);
+    ops.update_dock(outcome.anchor_center, outcome.edge);
 }
 
 pub fn restore_startup(window: &WebviewWindow, manager: &DockManager, settings: &OverlaySettings) {
@@ -814,15 +828,18 @@ pub async fn drag_ended(app: &AppHandle, state: &Arc<AppState>) {
     // The anchor is written only here, after the host-screen arbitration, the seam/
     // boundary decision and the reposition above — so what lands on disk is the
     // authoritative final coordinate, and a restart cannot drift.
-    apply_drag_outcome_to_session(
-        &outcome,
-        |left, top| state.config_manager.save_position(&WindowPosition { left, top }),
-        |center, edge| {
-            state.dock.set_anchor_center(center);
-            state.dock.finish_drag(edge);
-            state.dock.save_docked(edge);
-        },
-    );
+    struct LiveDragOps<'a>(&'a Arc<AppState>);
+    impl<'a> DragOutcomeSessionOps for LiveDragOps<'a> {
+        fn save_position(&mut self, left: f64, top: f64) {
+            self.0.config_manager.save_position(&WindowPosition { left, top });
+        }
+        fn update_dock(&mut self, anchor_center: (i32, i32), edge: Option<Edge>) {
+            self.0.dock.set_anchor_center(anchor_center);
+            self.0.dock.finish_drag(edge);
+            self.0.dock.save_docked(edge);
+        }
+    }
+    commit_drag_outcome_to_session(&mut LiveDragOps(&state), &outcome);
     emit_state(app, &state.dock);
 }
 
@@ -2217,5 +2234,31 @@ mod tests {
         );
         assert_eq!(saved_coords, (123.0, 456.0), "persisted anchor must match outcome.anchor exactly");
         assert_eq!(dock_state, ((273, 556), Some(Edge::Left)));
+    }
+
+    #[test]
+    fn commit_drag_outcome_to_session_persists_anchor_coordinates() {
+        struct MockDragOps {
+            pos: (f64, f64),
+            dock: ((i32, i32), Option<Edge>),
+        }
+        impl DragOutcomeSessionOps for MockDragOps {
+            fn save_position(&mut self, left: f64, top: f64) {
+                self.pos = (left, top);
+            }
+            fn update_dock(&mut self, anchor_center: (i32, i32), edge: Option<Edge>) {
+                self.dock = (anchor_center, edge);
+            }
+        }
+        let outcome = DragOutcome {
+            rect: PhysicalRect { x: 10, y: 20, width: 200, height: 100 },
+            anchor: (345, 678),
+            anchor_center: (445, 728),
+            edge: Some(Edge::Top),
+        };
+        let mut ops = MockDragOps { pos: (0.0, 0.0), dock: ((0, 0), None) };
+        commit_drag_outcome_to_session(&mut ops, &outcome);
+        assert_eq!(ops.pos, (345.0, 678.0));
+        assert_eq!(ops.dock, ((445, 728), Some(Edge::Top)));
     }
 }

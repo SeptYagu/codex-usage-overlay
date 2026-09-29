@@ -91,7 +91,7 @@ describe('two-column settings layout', () => {
     expect(within(footer).getByText('septwind@agent.qq.com')).toBeTruthy();
   });
 
-  it('renders all controls reachable in the right column when custom sounds are selected', async () => {
+  it('renders compact sound pickers preserving layout budget when custom sounds are selected', async () => {
     const { right } = await renderSettings({
       fiveHourResetNotification: true,
       fiveHourSoundMode: 'custom',
@@ -111,9 +111,25 @@ describe('two-column settings layout', () => {
     const clearButtons = within(right).getAllByRole('button', { name: 'Clear' });
     expect(clearButtons).toHaveLength(2);
 
-    // Verify paths are rendered with title attributes for tooltip preview
-    expect(within(right).getByText('C:\\Users\\custom\\five_hour_alert_long_path_sample.wav')).toBeTruthy();
-    expect(within(right).getByText('C:\\Users\\custom\\weekly_alert_long_path_sample.wav')).toBeTruthy();
+    // FE-M2 sentinel: SoundPicker must maintain compact footprint (truncate, py-0.5, gap-1.5)
+    // to prevent vertical overflow regression inside the fixed 486px slot.
+    for (const button of [...chooseButtons, ...previewButtons, ...clearButtons]) {
+      expect(button.className).toContain('py-0.5');
+    }
+
+    const pathParagraphs = [
+      within(right).getByText('C:\\Users\\custom\\five_hour_alert_long_path_sample.wav'),
+      within(right).getByText('C:\\Users\\custom\\weekly_alert_long_path_sample.wav'),
+    ];
+    for (const p of pathParagraphs) {
+      expect(p.className).toContain('truncate');
+      expect(p.className).toContain('font-mono');
+    }
+
+    const buttonContainers = chooseButtons.map((btn) => btn.parentElement as HTMLElement);
+    for (const container of buttonContainers) {
+      expect(container.className).toContain('gap-1.5');
+    }
   });
 
   it('keeps overlay controls in the left column and system controls in the right', async () => {

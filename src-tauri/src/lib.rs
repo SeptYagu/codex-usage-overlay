@@ -87,13 +87,17 @@ pub fn run() {
                     );
                 }
                 tauri::WindowEvent::Focused(focused) if window.label() == tray::TRAY_MENU_WINDOW_LABEL => {
-                    // Inside the post-show grace period the blur is only remembered:
-                    // the grace timer re-checks the focus state and is the single
-                    // decision point. A blur after the grace period is an ordinary
-                    // dismissal and still hides immediately.
-                    if handle_tray_menu_focus_event(*focused, || tray::on_tray_menu_blur(window.app_handle())) {
-                        let _ = window.hide();
+                    struct LiveFocusOps<'a>(&'a tauri::Window);
+                    impl<'a> TrayMenuFocusWindowOps for LiveFocusOps<'a> {
+                        fn hide(&mut self) {
+                            let _ = self.0.hide();
+                        }
                     }
+                    apply_tray_menu_focus_event(
+                        &mut LiveFocusOps(window),
+                        *focused,
+                        || tray::on_tray_menu_blur(window.app_handle()),
+                    );
                 }
                 tauri::WindowEvent::ScaleFactorChanged { .. } if window.label() == "main" => {
                     let app = window.app_handle().clone();
@@ -430,6 +434,20 @@ pub fn handle_tray_menu_focus_event(
         blur_evaluator()
     } else {
         false
+    }
+}
+
+pub trait TrayMenuFocusWindowOps {
+    fn hide(&mut self);
+}
+
+pub fn apply_tray_menu_focus_event<W: TrayMenuFocusWindowOps>(
+    ops: &mut W,
+    focused: bool,
+    blur_evaluator: impl FnOnce() -> bool,
+) {
+    if handle_tray_menu_focus_event(focused, blur_evaluator) {
+        ops.hide();
     }
 }
 
@@ -941,5 +959,28 @@ mod tests {
         // When focused becomes false, respect the blur evaluator.
         assert!(!handle_tray_menu_focus_event(false, || false));
         assert!(handle_tray_menu_focus_event(false, || true));
+    }
+
+    #[test]
+    fn apply_tray_menu_focus_event_hides_only_when_approved() {
+        struct MockFocusOps(usize);
+        impl TrayMenuFocusWindowOps for MockFocusOps {
+            fn hide(&mut self) { self.0 += 1; }
+        }
+
+        // Focused(true): never hide
+        let mut ops = MockFocusOps(0);
+        apply_tray_menu_focus_event(&mut ops, true, || true);
+        assert_eq!(ops.0, 0);
+
+        // Focused(false) with evaluator false: never hide
+        let mut ops = MockFocusOps(0);
+        apply_tray_menu_focus_event(&mut ops, false, || false);
+        assert_eq!(ops.0, 0);
+
+        // Focused(false) with evaluator true: hide exactly once
+        let mut ops = MockFocusOps(0);
+        apply_tray_menu_focus_event(&mut ops, false, || true);
+        assert_eq!(ops.0, 1);
     }
 }

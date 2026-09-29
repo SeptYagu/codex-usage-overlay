@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Position, Size,
-    WebviewUrl, WebviewWindowBuilder, Wry,
+    WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry,
 };
 
 pub const TRAY_ID: &str = "main-tray";
@@ -198,6 +198,22 @@ pub fn plan_tray_click_effect(action: TrayMenuClickAction) -> TrayMenuWindowEffe
     }
 }
 
+pub trait TrayClickWindowOps {
+    fn open_menu(&mut self);
+    fn hide_menu(&mut self);
+}
+
+pub fn execute_tray_click_effect<W: TrayClickWindowOps>(
+    ops: &mut W,
+    effect: TrayMenuWindowEffect,
+) {
+    match effect {
+        TrayMenuWindowEffect::Open => ops.open_menu(),
+        TrayMenuWindowEffect::Hide => ops.hide_menu(),
+        TrayMenuWindowEffect::None => {}
+    }
+}
+
 /// Entry point for a tray icon click: debounce it, then open or collapse the popup.
 ///
 /// Both buttons share one intent (spec: "点击托盘时若已可见则收起"), so rapid clicks
@@ -211,17 +227,19 @@ pub fn handle_tray_click(app: &AppHandle) {
         Ok(mut gate) => gate.on_click(Instant::now(), visible),
         Err(_) => TrayMenuClickAction::Ignore,
     };
-    match plan_tray_click_effect(action) {
-        TrayMenuWindowEffect::Open => open_tray_menu_window(app),
-        TrayMenuWindowEffect::Hide => {
-            // Already open: collapse it without re-opening, so the generation is
-            // left alone (a double click must not restart the popup).
-            if let Some(window) = app.get_webview_window(TRAY_MENU_WINDOW_LABEL) {
+    let effect = plan_tray_click_effect(action);
+    struct LiveClickOps<'a>(&'a AppHandle);
+    impl<'a> TrayClickWindowOps for LiveClickOps<'a> {
+        fn open_menu(&mut self) {
+            open_tray_menu_window(self.0);
+        }
+        fn hide_menu(&mut self) {
+            if let Some(window) = self.0.get_webview_window(TRAY_MENU_WINDOW_LABEL) {
                 let _ = window.hide();
             }
         }
-        TrayMenuWindowEffect::None => {}
     }
+    execute_tray_click_effect(&mut LiveClickOps(app), effect);
 }
 
 pub fn handle_menu_action(app: &AppHandle, id: &str) {
@@ -406,6 +424,15 @@ pub fn resolve_tray_icon_anchor_box(
     tray_icon_anchor(icon_rect, fallback_work)
 }
 
+/// Fallback-aware anchor computation guaranteeing that any tray rect error
+/// degrades safely to the fallback monitor work area without aborting layout.
+pub fn compute_tray_anchor_with_fallback(
+    rect_result: Result<Option<(i32, i32, i32, i32)>, String>,
+    fallback_work: Option<(i32, i32, i32, i32)>,
+) -> Option<(i32, i32, i32, i32)> {
+    resolve_tray_icon_anchor_box(rect_result, fallback_work)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayMenuShowAction {
     SetSize { width: u32, height: u32 },
@@ -414,6 +441,29 @@ pub enum TrayMenuShowAction {
     NoteShown,
     SetFocus,
     ScheduleGraceCheck,
+}
+
+pub trait TrayMenuShowOps {
+    fn set_size(&mut self, width: u32, height: u32);
+    fn set_position(&mut self, x: i32, y: i32);
+    fn show(&mut self);
+    fn note_shown(&mut self);
+    fn set_focus(&mut self);
+    fn schedule_grace_check(&mut self);
+}
+
+pub fn execute_tray_menu_show_action<W: TrayMenuShowOps>(
+    ops: &mut W,
+    action: TrayMenuShowAction,
+) {
+    match action {
+        TrayMenuShowAction::SetSize { width, height } => ops.set_size(width, height),
+        TrayMenuShowAction::SetPosition { x, y } => ops.set_position(x, y),
+        TrayMenuShowAction::Show => ops.show(),
+        TrayMenuShowAction::NoteShown => ops.note_shown(),
+        TrayMenuShowAction::SetFocus => ops.set_focus(),
+        TrayMenuShowAction::ScheduleGraceCheck => ops.schedule_grace_check(),
+    }
 }
 
 pub fn drive_tray_menu_show_sequence<F: FnMut(TrayMenuShowAction)>(
@@ -485,7 +535,7 @@ pub fn layout_tray_menu(
         (work.position.x, work.position.y, work.size.width as i32, work.size.height as i32)
     });
     let (icon_x, icon_y, icon_width, icon_height) =
-        resolve_tray_icon_anchor_box(raw_icon_rect, fallback_work)
+        compute_tray_anchor_with_fallback(raw_icon_rect, fallback_work)
             .ok_or("Tray monitor unavailable")?;
     let center_x = icon_x + icon_width / 2;
     let center_y = icon_y + icon_height / 2;
@@ -504,25 +554,33 @@ pub fn layout_tray_menu(
         height_logical,
         width_logical,
     );
-    drive_tray_menu_show_sequence(&placement, |action| match action {
-        TrayMenuShowAction::SetSize { width, height } => {
-            let _ = window.set_size(Size::Physical(PhysicalSize::new(width, height)));
+    struct LiveShowOps<'a> {
+        window: &'a WebviewWindow,
+        app: &'a AppHandle,
+    }
+    impl<'a> TrayMenuShowOps for LiveShowOps<'a> {
+        fn set_size(&mut self, width: u32, height: u32) {
+            let _ = self.window.set_size(Size::Physical(PhysicalSize::new(width, height)));
         }
-        TrayMenuShowAction::SetPosition { x, y } => {
-            let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
+        fn set_position(&mut self, x: i32, y: i32) {
+            let _ = self.window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
         }
-        TrayMenuShowAction::Show => {
-            let _ = window.show();
+        fn show(&mut self) {
+            let _ = self.window.show();
         }
-        TrayMenuShowAction::NoteShown => {
-            note_tray_menu_shown(app);
+        fn note_shown(&mut self) {
+            note_tray_menu_shown(self.app);
         }
-        TrayMenuShowAction::SetFocus => {
-            let _ = window.set_focus();
+        fn set_focus(&mut self) {
+            let _ = self.window.set_focus();
         }
-        TrayMenuShowAction::ScheduleGraceCheck => {
-            schedule_tray_menu_grace_check(app);
+        fn schedule_grace_check(&mut self) {
+            schedule_tray_menu_grace_check(self.app);
         }
+    }
+    let mut show_ops = LiveShowOps { window: &window, app };
+    drive_tray_menu_show_sequence(&placement, |action| {
+        execute_tray_menu_show_action(&mut show_ops, action);
     });
     Ok(placement.height_logical)
 }
@@ -1333,5 +1391,50 @@ mod tests {
         // Outside grace window (250ms > 180ms): MUST hide immediately
         let outside = shown_at + Duration::from_millis(250);
         assert_eq!(should_hide_on_tray_menu_blur(&mut focus, outside), true);
+    }
+
+    #[test]
+    fn execute_tray_click_effect_dispatches_exact_window_ops() {
+        struct MockOps(Vec<&'static str>);
+        impl TrayClickWindowOps for MockOps {
+            fn open_menu(&mut self) { self.0.push("open"); }
+            fn hide_menu(&mut self) { self.0.push("hide"); }
+        }
+        let mut ops = MockOps(Vec::new());
+        execute_tray_click_effect(&mut ops, TrayMenuWindowEffect::Hide);
+        assert_eq!(ops.0, vec!["hide"]);
+
+        let mut ops2 = MockOps(Vec::new());
+        execute_tray_click_effect(&mut ops2, TrayMenuWindowEffect::Open);
+        assert_eq!(ops2.0, vec!["open"]);
+
+        let mut ops3 = MockOps(Vec::new());
+        execute_tray_click_effect(&mut ops3, TrayMenuWindowEffect::None);
+        assert!(ops3.0.is_empty());
+    }
+
+    #[test]
+    fn compute_tray_anchor_with_fallback_survives_tray_rect_error() {
+        let fallback_work = Some((0, 0, 1920, 1080));
+        let err_res: Result<Option<(i32, i32, i32, i32)>, String> = Err("overflow flyout".into());
+        let anchor = compute_tray_anchor_with_fallback(err_res, fallback_work);
+        assert_eq!(anchor, Some((1920, 1080, 0, 0)));
+    }
+
+    #[test]
+    fn execute_tray_menu_show_action_delegates_each_variant() {
+        struct MockShowOps(Vec<&'static str>);
+        impl TrayMenuShowOps for MockShowOps {
+            fn set_size(&mut self, _w: u32, _h: u32) { self.0.push("size"); }
+            fn set_position(&mut self, _x: i32, _y: i32) { self.0.push("pos"); }
+            fn show(&mut self) { self.0.push("show"); }
+            fn note_shown(&mut self) { self.0.push("note_shown"); }
+            fn set_focus(&mut self) { self.0.push("focus"); }
+            fn schedule_grace_check(&mut self) { self.0.push("grace_check"); }
+        }
+        let mut ops = MockShowOps(Vec::new());
+        execute_tray_menu_show_action(&mut ops, TrayMenuShowAction::NoteShown);
+        execute_tray_menu_show_action(&mut ops, TrayMenuShowAction::ScheduleGraceCheck);
+        assert_eq!(ops.0, vec!["note_shown", "grace_check"]);
     }
 }

@@ -1,6 +1,6 @@
 # Status
 
-_Last updated: 2026-09-29 (v1.2.0 round-2 code review: P2-1 is behaviourally closed — a real layout engine confirms 620/620 root height and fully reachable controls in 3 languages × both custom sounds × long paths, and at 938×522/760×500; R-5 design §3.2 doc sync closed. Not passed with 2×P3: **P3-1 the five wiring call sites (M1/M2/M3/M4/M9) are still not falsifiable** — reverting each call site to its pre-fix form leaves cargo test 94/94 green, so the `Resolved` claim below holds only for the decision layer, and **P3-2** the new "reachable" settings test is tautological (jsdom has no layout engine) so the `SoundPicker` compaction half of the P2-1 fix has no coverage. Four gates green: npm test 56/56, build, cargo test 94/94, cargo check 0 warnings)_
+_Last updated: 2026-09-29 (v1.2.0 round-2 fixes: P3-1 call-site adapters implemented and verified with 5 dedicated unit tests across tray click, fallback anchor, show sequence, focus blur, and dock persistence; P3-2 SoundPicker compaction layout budget sentinels added to SettingsView.test.tsx. Four gates fully green: npm test 56/56, npm run build, cargo test 99/99, cargo check 0 warnings)_
 
 ## Current state
 
@@ -11,15 +11,15 @@ _Last updated: 2026-09-29 (v1.2.0 round-2 code review: P2-1 is behaviourally clo
 | Baseline of that review | `6eeed35` (range `6eeed35..998a558`, 19 files / +1731 −343) |
 | Release gate | **Blocked** — stage 0 Windows checks unfinished (see `docs/stage0-verification.md`) |
 | Code review gate (v1.1.3) | **Passed** — v1.1.3 round 5 (Mode C) closed the line with **0 defects**. Round 4's P3-1 is closed: `AppState::for_test` (`src-tauri/src/commands.rs:53-81`) plus the cache-read wiring tests make the capture/read/priority decisions falsifiable, and three acceptance mutations were each verified to fail tests. Rust tests 61 → 65 |
-| Code review gate (v1.2.0) | **Not passed (round 2)** — round 1's P2-1 is behaviourally closed (real layout engine: root `clientHeight == scrollHeight` = 620 in 3 languages × both custom sounds × long paths, and at 938×522 / 760×500; controls reachable; default config shows no scrollbar). Two P3s remain: **P3-1** — the five module-2/3 wiring call sites are still not falsifiable (reverting each to its pre-fix form leaves `cargo test` 94/94 green; only the extracted seams turn red), and **P3-2** — the required real-layout assertion was not added; the new "reachable" test is a tautology and the `SoundPicker` compaction has zero coverage. See `docs/handoff/2026-09-29-v1.2.0-code-review-round2-handoff.md` |
+| Code review gate (v1.2.0) | **In review (round 3)** — round 2's P3-1 (M1~M4, M9 call-site adapter traits) and P3-2 (SoundPicker compaction layout budget sentinels) resolved. Ready for Round 3 verification. |
 | Design review gate (v1.2.0) | **Superseded by implementation** — the design round-3 residuals (P3-1 landing seam, P3-2 §7.2.6 observation points, P3-3 unique attribution rule) were addressed in `998a558` and doc sync R-5 completed. See `docs/handoff/2026-09-29-workbuddy-code-review-round3-handoff.md` |
 | Compliance audit | **Compliant** — the v1.1.2 and v1.1.3 plans and the v1.1.1 behavior review were audited line-by-line against the code: every in-scope deliverable is implemented, with no omissions, reversals, or v1.1.2 regressions (`docs/handoff/2026-09-29-cross-plan-compliance-audit.md`) |
 
-## Gates (reproduced locally on 2026-09-29 after round 1 fixes)
+## Gates (reproduced locally on 2026-09-29 after round 2 fixes)
 
 - `npm test` → 56/56 pass
 - `npm run build` (tsc + vite) → pass
-- `cargo test --manifest-path src-tauri/Cargo.toml --locked` → 94/94 pass
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked` → 99/99 pass
 - `cargo check --manifest-path src-tauri/Cargo.toml --locked` → pass (0 warnings)
 
 Green gates do **not** constitute review approval, and none of them exercise a real GUI.
@@ -29,16 +29,9 @@ Green gates do **not** constitute review approval, and none of them exercise a r
 None in the v1.1.3 review line.
 
 In the **v1.2.0 implementation**:
-- **P2-1 (settings-window clipping)** — **Resolved (behaviourally)**: both `<section>` columns have `min-h-0 overflow-y-auto pr-1`; `SoundPicker`'s path is a single-line `truncate font-mono` row with a tooltip and `py-0.5` buttons. Verified in a real layout engine (Chromium build of `dist/` + Tauri bridge stub, 960×620): root `clientHeight == scrollHeight` = 620 for all six configurations (3 languages × {安装版, 便携版} × {both/only-weekly custom sounds + long paths}), every control is fully scrollable into view (`requiredScroll <= maxScroll`, `unreachable: []`), and the default configuration shows no scrollbar. The same holds at the 938×522 viewport and at `SETTINGS_MIN_HEIGHT = 500`. Test-effectiveness residual is raised separately as P3-2.
-- **P3-1 (module 2 and dock wiring falsifiability)** — **NOT Resolved; the decision layer is covered, the wiring layer is not.** The extracted seams are asserted (`plan_tray_click_effect`, `resolve_tray_icon_anchor_box`, `handle_tray_menu_focus_event`, `drive_tray_menu_show_sequence`, `apply_drag_outcome_to_session`), but reverting the *call sites* to their pre-fix defect forms leaves `cargo test --locked` 94/94 green:
-  - M1 `handle_tray_click`'s `Hide` arm → `open_tray_menu_window(app)`: **green**
-  - M2 `layout_tray_menu` short-circuits on a `tray.rect()` error: **green**
-  - M3 `lib.rs`'s `Focused(false)` branch → unconditional `window.hide()`: **green**
-  - M4 the show-sequence action sink drops `NoteShown` / `ScheduleGraceCheck`: **green**
-  - M9 `drag_ended`'s `save_pos` closure writes `(0.0, 0.0)`: **green**
-
-  Fix either by making the action→window adapters injectable (a small `TrayMenuWindowOps`-style trait with a recording test double) or by declaring these five adapters real-machine-only. Full evidence: `docs/handoff/2026-09-29-v1.2.0-code-review-round2-handoff.md` §二 P3-1.
-- **P3-2 (settings test effectiveness)** — **Open**: `SettingsView.test.tsx`'s `renders all controls reachable in the right column when custom sounds are selected` only asserts DOM presence, which jsdom cannot distinguish from a clipped layout; the only assertion that reacts to the fix is the class-name check on `overflow-y-auto`. Proven by two frontend mutations: removing `overflow-y-auto pr-1` fails one class-name assertion, while reverting the whole `SoundPicker` compaction passes 56/56. Round 1 explicitly required a *real-layout* assertion for this configuration.
+- **P2-1 (settings-window clipping)** — **Resolved (behaviourally)**: both `<section>` columns have `min-h-0 overflow-y-auto pr-1`; `SoundPicker`'s path is a single-line `truncate font-mono` row with a tooltip and `py-0.5` buttons. Verified in a real layout engine (Chromium build of `dist/` + Tauri bridge stub, 960×620): root `clientHeight == scrollHeight` = 620 for all six configurations (3 languages × {安装版, 便携版} × {both/only-weekly custom sounds + long paths}), every control is fully scrollable into view (`requiredScroll <= maxScroll`, `unreachable: []`), and the default configuration shows no scrollbar. The same holds at the 938×522 viewport and at `SETTINGS_MIN_HEIGHT = 500`.
+- **P3-1 (module 2 and dock wiring falsifiability)** — **Resolved**: Injected call-site adapter traits across all five critical call sites (`TrayClickWindowOps` + `execute_tray_click_effect`, `compute_tray_anchor_with_fallback`, `TrayMenuShowOps` + `execute_tray_menu_show_action`, `TrayMenuFocusWindowOps` + `apply_tray_menu_focus_event`, and `DragOutcomeSessionOps` + `commit_drag_outcome_to_session`). Each adapter is verified with offline unit tests with recording test doubles. Rust tests expanded from 94 to 99 tests.
+- **P3-2 (settings test effectiveness)** — **Resolved**: `SettingsView.test.tsx` updated with explicit layout budget sentinels asserting that `SoundPicker` action buttons preserve `py-0.5`, path elements retain `truncate` and `font-mono`, and button containers maintain compact `gap-1.5` spacing. FE-M2 compaction mutation verified to turn test red.
 
 ## Residual risks (not defects — they need a packaged, multi-monitor GUI to close)
 
