@@ -70,6 +70,8 @@ html, body, #root {
 
 .overlay-shell-pill { width: max-content; height: max-content; }
 .overlay-pill-host {
+  --pill-shift-x: 0px;
+  --pill-shift-y: 0px;
   position: relative;
   display: flex;
   width: 46px;
@@ -78,9 +80,6 @@ html, body, #root {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  border: 1px solid var(--overlay-border);
-  border-radius: 14px;
-  background: rgba(var(--overlay-surface), var(--overlay-alpha));
   color: var(--overlay-text);
   font-family: "Segoe UI", system-ui, sans-serif;
   font-variant-numeric: tabular-nums;
@@ -89,14 +88,35 @@ html, body, #root {
 }
 .overlay-pill-host[data-dock-edge="top"],
 .overlay-pill-host[data-dock-edge="bottom"] { width: 100px; height: 46px; }
+.overlay-pill-host[data-dock-edge="left"] { --pill-shift-x: -5px; }
+.overlay-pill-host[data-dock-edge="right"] { --pill-shift-x: 5px; }
+.overlay-pill-host[data-dock-edge="top"] { --pill-shift-y: -5px; }
+.overlay-pill-host[data-dock-edge="bottom"] { --pill-shift-y: 5px; }
+.overlay-pill-host::before {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 32px;
+  height: 80px;
+  box-sizing: border-box;
+  border: 1px solid var(--overlay-border);
+  border-radius: 10px;
+  background: rgba(var(--overlay-surface), var(--overlay-alpha));
+  transform: translate(calc(-50% + var(--pill-shift-x)), calc(-50% + var(--pill-shift-y)));
+  content: '';
+}
+.overlay-pill-host[data-dock-edge="top"]::before,
+.overlay-pill-host[data-dock-edge="bottom"]::before { width: 80px; height: 32px; }
 .overlay-pill-bars {
+  position: relative;
   display: flex;
   width: 24px;
   height: 72px;
   align-items: stretch;
   gap: 6px;
+  transform: translate(var(--pill-shift-x), var(--pill-shift-y));
 }
-.overlay-pill-bars.overlay-pill-rotated { transform: rotate(90deg); }
+.overlay-pill-bars.overlay-pill-rotated { transform: translate(var(--pill-shift-x), var(--pill-shift-y)) rotate(90deg); }
 .overlay-pill-track {
   position: relative;
   width: 9px;

@@ -23,8 +23,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon<Wry>, tauri::Error> {
             if let TrayIconEvent::Click { button, button_state: MouseButtonState::Up, .. } = event {
                 let app = tray.app_handle();
                 match button {
-                    MouseButton::Left => toggle_main_window(app),
-                    MouseButton::Right => open_tray_menu_window(app),
+                    MouseButton::Left | MouseButton::Right => open_tray_menu_window(app),
                     _ => {}
                 }
             }
