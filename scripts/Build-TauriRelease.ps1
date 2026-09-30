@@ -64,11 +64,34 @@ try {
     }
 } finally { $archive.Dispose() }
 
+function Read-TauriSignature([string]$SignaturePath) {
+    if (-not (Test-Path -LiteralPath $SignaturePath -PathType Leaf)) {
+        throw "Missing updater signature: $SignaturePath"
+    }
+    $encoded = [IO.File]::ReadAllText($SignaturePath).Trim()
+    if (-not $encoded) { throw "Empty updater signature: $SignaturePath" }
+    try {
+        $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded))
+        $lines = @($decoded.Trim() -split '\r?\n')
+        if ($lines.Count -ne 4 -or -not $lines[0].StartsWith('untrusted comment: ') -or
+            -not $lines[2].StartsWith('trusted comment: ')) { throw 'Invalid signature format' }
+        $packet = [Convert]::FromBase64String($lines[1])
+        $globalSignature = [Convert]::FromBase64String($lines[3])
+        if ($packet.Length -ne 74 -or $globalSignature.Length -ne 64 -or
+            $packet[0] -ne 69 -or $packet[1] -notin @(68, 100)) { throw 'Invalid signature packet' }
+    } catch {
+        throw "Malformed updater signature: $SignaturePath ($($_.Exception.Message))"
+    }
+    return $encoded
+}
+
 $tauriCli = Join-Path $repositoryRoot 'node_modules\.bin\tauri.cmd'
-$signatureOutput = & $tauriCli signer sign $zipPath --app-version $version
+& $tauriCli signer sign $zipPath --app-version $version | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Failed to sign the portable updater archive.' }
-$portableSignature = ($signatureOutput | Select-Object -Last 1).ToString().Trim()
-if (-not $portableSignature) { throw 'The portable updater signature is empty.' }
+# CLI stdout also contains human-readable instructions; the .sig file is authoritative.
+$portableSignature = Read-TauriSignature "$zipPath.sig"
+$nsisSignature = Read-TauriSignature $installerSignature
+$windowsInstallerSignature = Read-TauriSignature $msiSignature
 
 $releaseBaseUrl = "https://github.com/SeptYagu/codex-usage-overlay/releases/download/$Tag"
 $manifest = [ordered]@{
@@ -78,11 +101,11 @@ $manifest = [ordered]@{
     platforms = [ordered]@{
         'windows-x86_64-nsis' = @{
             url = "$releaseBaseUrl/$installerName"
-            signature = (Get-Content -LiteralPath $installerSignature -Raw).Trim()
+            signature = $nsisSignature
         }
         'windows-x86_64-msi' = @{
             url = "$releaseBaseUrl/$msiName"
-            signature = (Get-Content -LiteralPath $msiSignature -Raw).Trim()
+            signature = $windowsInstallerSignature
         }
         'windows-x86_64-portable' = @{
             url = "$releaseBaseUrl/$zipName"

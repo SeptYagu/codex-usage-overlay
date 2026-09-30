@@ -35,6 +35,10 @@ jobs:
         shell: pwsh
         run: npm ci
 
+      - name: Packaging Regression Tests
+        shell: pwsh
+        run: ./scripts/Test-TauriRelease.ps1
+
       - name: Frontend Typecheck & Tests
         shell: pwsh
         run: |

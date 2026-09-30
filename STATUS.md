@@ -1,15 +1,24 @@
 # Status
 
+## v1.2.1 patch — 2026-09-30
+
+- Left tray single-click immediately shows/hides the overlay; a double-click toggles once. Only right-click opens/closes the menu.
+- Portable updater manifest signatures now come from the generated .sig file with format validation; packaging regression tests cover trailing CLI instructions and invalid signatures.
+- Local validation: frontend build passed, frontend tests 56/56 passed, locked Rust tests 102/102 passed, locked cargo check passed with incremental caching disabled, and all six packaging regression cases passed.
+- Release policy for this patch: amend the previous commit and replace v1.2.1 through GitHub Actions after CI passes on the exact replacement commit, as requested by the user.
+- Interactive Windows gestures and signed-package smoke tests were not performed. The historical v1.2.0 review and manual verification gaps below remain unchanged.
+
+
 _Last updated: 2026-09-29 (v1.2.0 round-3 code review passed: 0 defects; P3-1 call-site adapters and P3-2 SoundPicker compaction sentinels fully verified by WorkBuddy adversarial review. Four gates fully green: npm test 56/56, npm run build, cargo test 98/98, cargo check 0 warnings)_
 
 ## Current state
 
 | Item | Value |
 | --- | --- |
-| Version | `1.2.0` (5 config files + `src/version.ts` unified; feature commit `998a558`) |
+| Version | `1.2.1` (package metadata, lockfiles, Tauri config, and `src/version.ts` unified) |
 | Reviewed commit | `1a5314d` (`fix(review): resolve round 2 findings (P3-1 call-site adapters, P3-2 compaction sentinels)`) — v1.2.0 line |
 | Baseline of that review | `6eeed35` (range `6eeed35..1a5314d`, 25 files / +2606 −390) |
-| Release gate | **Blocked** — stage 0 Windows checks unfinished (see `docs/stage0-verification.md`) |
+| Historical manual verification gate | **Unfinished** — stage 0 Windows checks (see `docs/stage0-verification.md`); v1.2.1 uses the automated release policy above |
 | Code review gate (v1.1.3) | **Passed** — v1.1.3 round 5 (Mode C) closed the line with **0 defects**. Round 4's P3-1 is closed: `AppState::for_test` (`src-tauri/src/commands.rs:53-81`) plus the cache-read wiring tests make the capture/read/priority decisions falsifiable, and three acceptance mutations were each verified to fail tests. Rust tests 61 → 65 |
 | Code review gate (v1.2.0) | **Passed** — v1.2.0 round 3 (Mode C) closed the line with **0 defects**. Round 2's P3-1 (M1~M4, M9 call-site adapter traits) and P3-2 (SoundPicker compaction layout budget sentinels) confirmed closed. Dead helper code cleaned up. Rust tests 94 → 98 |
 | Design review gate (v1.2.0) | **Superseded by implementation** — the design round-3 residuals (P3-1 landing seam, P3-2 §7.2.6 observation points, P3-3 unique attribution rule) were addressed in `998a558` and doc sync R-5 completed. See `docs/handoff/2026-09-29-workbuddy-code-review-round3-handoff.md` |

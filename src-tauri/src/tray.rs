@@ -22,17 +22,14 @@ const SETTINGS_MAX_HEIGHT: f64 = 1600.0;
 /// the popup stays compact in the common case and the two ends cannot disagree.
 const TRAY_MENU_MIN_WIDTH: f64 = 280.0;
 const TRAY_MENU_MAX_WIDTH: f64 = 500.0;
-/// Debounce window for tray clicks: a rapid double click (or a burst of clicks)
-/// coalesces into a single show/hide intent instead of firing a toggle per event.
+/// Debounce window for right tray clicks; left releases toggle the overlay immediately.
 pub const TRAY_MENU_CLICK_DEBOUNCE: Duration = Duration::from_millis(280);
 /// Length of the focus grace period that follows a successful `window.show()`.
 pub const TRAY_MENU_FOCUS_GRACE: Duration = Duration::from_millis(180);
 static TRAY_MENU_GENERATION: AtomicU64 = AtomicU64::new(0);
 static TRAY_MENU_LAYOUT_REVISION: AtomicU64 = AtomicU64::new(0);
 static TRAY_MENU_LAYOUT_LOCK: StdMutex<()> = StdMutex::new(());
-/// Live click debounce/Toggle state. The decision logic itself lives in
-/// `TrayMenuClickGate`, which takes its clock as a parameter and is therefore
-/// drivable from an offline unit test.
+/// Right-click debounce state, independent of left overlay gestures.
 static TRAY_MENU_CLICK_GATE: StdMutex<TrayMenuClickGate> = StdMutex::new(TrayMenuClickGate::new());
 
 /// What a gated tray click should do.
@@ -50,8 +47,7 @@ pub enum TrayMenuClickAction {
     Ignore,
 }
 
-/// 250~300 ms click debounce plus an idempotent Toggle state machine, replacing the
-/// mechanical `DoubleClick` listener.
+/// Right-click debounce plus an idempotent menu toggle state machine.
 ///
 /// Rapid clicks and double clicks coalesce into one Toggle intent. While the menu is
 /// already expanded a double click is a single deliberate collapse — it is never
@@ -76,11 +72,50 @@ impl TrayMenuClickGate {
             }
         }
         self.last_click = Some(now);
-        if menu_visible {
-            TrayMenuClickAction::Hide
-        } else {
-            TrayMenuClickAction::Open
+        tray_menu_toggle_action(menu_visible)
+    }
+}
+
+/// Windows emits Up, DoubleClick, Up for a double-click. Act on the first
+/// release immediately and consume the trailing release, without a timer.
+#[derive(Debug, Default)]
+struct TrayLeftGesture {
+    suppress_release: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TrayLeftEvent { Down, Up, DoubleClick }
+
+impl TrayLeftGesture {
+    const fn new() -> Self {
+        Self { suppress_release: false }
+    }
+
+    fn on_event(&mut self, event: TrayLeftEvent) -> bool {
+        match event {
+            TrayLeftEvent::Down => {
+                // A release outside the tray might never arrive. A fresh press
+                // starts a new gesture even if the old suppression was left set.
+                self.suppress_release = false;
+                false
+            }
+            TrayLeftEvent::DoubleClick => {
+                self.suppress_release = true;
+                false
+            }
+            TrayLeftEvent::Up => !std::mem::take(&mut self.suppress_release),
         }
+    }
+}
+
+static TRAY_LEFT_GESTURE: StdMutex<TrayLeftGesture> = StdMutex::new(TrayLeftGesture::new());
+
+fn handle_tray_left_event(app: &AppHandle, event: TrayLeftEvent) {
+    let toggle = TRAY_LEFT_GESTURE.lock().ok()
+        .is_some_and(|mut gesture| gesture.on_event(event));
+    if toggle {
+        apply_tray_menu_action(app, TrayMenuClickAction::Hide);
+        toggle_main_window(app);
     }
 }
 
@@ -169,12 +204,21 @@ pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon<Wry>, tauri::Error> {
         .icon(initial_icon)
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { button, button_state: MouseButtonState::Up, .. } = event {
-                let app = tray.app_handle();
-                match button {
-                    MouseButton::Left | MouseButton::Right => handle_tray_click(app),
-                    _ => {}
+            let app = tray.app_handle();
+            match event {
+                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Down, .. } => {
+                    handle_tray_left_event(app, TrayLeftEvent::Down);
                 }
+                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => {
+                    handle_tray_left_event(app, TrayLeftEvent::Up);
+                }
+                TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
+                    handle_tray_left_event(app, TrayLeftEvent::DoubleClick);
+                }
+                TrayIconEvent::Click { button: MouseButton::Right, button_state: MouseButtonState::Up, .. } => {
+                    handle_tray_click(app);
+                }
+                _ => {}
             }
         })
         .build(app)?;
@@ -214,19 +258,26 @@ pub fn execute_tray_click_effect<W: TrayClickWindowOps>(
     }
 }
 
-/// Entry point for a tray icon click: debounce it, then open or collapse the popup.
-///
-/// Both buttons share one intent (spec: "点击托盘时若已可见则收起"), so rapid clicks
-/// and double clicks produce at most one action.
-pub fn handle_tray_click(app: &AppHandle) {
-    let visible = app
-        .get_webview_window(TRAY_MENU_WINDOW_LABEL)
+fn tray_menu_toggle_action(visible: bool) -> TrayMenuClickAction {
+    if visible { TrayMenuClickAction::Hide } else { TrayMenuClickAction::Open }
+}
+
+fn tray_menu_visible(app: &AppHandle) -> bool {
+    app.get_webview_window(TRAY_MENU_WINDOW_LABEL)
         .and_then(|window| window.is_visible().ok())
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
+
+/// Immediate right-click toggle with burst debounce.
+pub fn handle_tray_click(app: &AppHandle) {
     let action = match TRAY_MENU_CLICK_GATE.lock() {
-        Ok(mut gate) => gate.on_click(Instant::now(), visible),
+        Ok(mut gate) => gate.on_click(Instant::now(), tray_menu_visible(app)),
         Err(_) => TrayMenuClickAction::Ignore,
     };
+    apply_tray_menu_action(app, action);
+}
+
+fn apply_tray_menu_action(app: &AppHandle, action: TrayMenuClickAction) {
     let effect = plan_tray_click_effect(action);
     struct LiveClickOps<'a>(&'a AppHandle);
     impl<'a> TrayClickWindowOps for LiveClickOps<'a> {
@@ -991,6 +1042,51 @@ fn blend_over(dst: [f64; 4], src: [f64; 4]) -> [f64; 4] {
 mod tests {
     use super::*;
     use crate::config::{ConfigManager, SettingsWindowGeometry};
+
+    #[test]
+    fn left_single_toggles_immediately_on_release() {
+        let mut gesture = TrayLeftGesture::new();
+        assert!(!gesture.on_event(TrayLeftEvent::Down));
+        assert!(gesture.on_event(TrayLeftEvent::Up));
+        // Another single requires no delay, timer, or clock advancement.
+        assert!(!gesture.on_event(TrayLeftEvent::Down));
+        assert!(gesture.on_event(TrayLeftEvent::Up));
+    }
+
+    #[test]
+    fn left_double_toggles_once_and_third_click_starts_a_new_gesture() {
+        let mut gesture = TrayLeftGesture::new();
+        let sequence = [TrayLeftEvent::Down, TrayLeftEvent::Up,
+            TrayLeftEvent::DoubleClick, TrayLeftEvent::Up];
+        let decisions: Vec<bool> = sequence.into_iter().map(|event| gesture.on_event(event)).collect();
+        assert_eq!(decisions, vec![false, true, false, false]);
+        assert!(!gesture.on_event(TrayLeftEvent::Down));
+        assert!(gesture.on_event(TrayLeftEvent::Up));
+    }
+
+    #[test]
+    fn fresh_left_press_clears_stale_double_release_suppression() {
+        let mut gesture = TrayLeftGesture::new();
+        assert!(!gesture.on_event(TrayLeftEvent::DoubleClick));
+        // The second release occurred outside the tray and was never delivered.
+        assert!(!gesture.on_event(TrayLeftEvent::Down));
+        assert!(gesture.on_event(TrayLeftEvent::Up));
+    }
+
+    #[test]
+    fn right_menu_debounce_is_independent_of_left_overlay_gestures() {
+        let start = Instant::now();
+        let mut left = TrayLeftGesture::new();
+        let mut right = TrayMenuClickGate::new();
+        assert!(left.on_event(TrayLeftEvent::Up));
+        assert_eq!(right.on_click(start, false), TrayMenuClickAction::Open);
+        assert!(!left.on_event(TrayLeftEvent::DoubleClick));
+        assert_eq!(right.on_click(start + Duration::from_millis(100), true), TrayMenuClickAction::Ignore);
+        assert!(!left.on_event(TrayLeftEvent::Up));
+        assert_eq!(right.on_click(start + TRAY_MENU_CLICK_DEBOUNCE, true), TrayMenuClickAction::Hide);
+        assert!(!left.on_event(TrayLeftEvent::Down));
+        assert!(left.on_event(TrayLeftEvent::Up));
+    }
 
     /// Models `handle_tray_click`: the gate decides, and an `Open` is what bumps
     /// `TRAY_MENU_GENERATION` in `open_tray_menu_window`. Driving the loop here keeps

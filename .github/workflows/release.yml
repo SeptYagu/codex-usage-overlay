@@ -37,6 +37,10 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Packaging Regression Tests
+        shell: pwsh
+        run: ./scripts/Test-TauriRelease.ps1
+
       - name: Test and build Tauri app
         shell: pwsh
         env:
