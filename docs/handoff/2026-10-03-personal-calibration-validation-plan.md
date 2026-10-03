@@ -237,3 +237,27 @@ existing real-history replay
 → confirmation dataset
 → production decision
 ```
+
+## 13. Frozen parameters for the first replay
+
+The first replay is frozen before reading calibration scores.
+
+Dataset: the existing frozen `real-forecasts.json` generated from 3,854 observations in 30 source files, September 27 through October 3, with last observation timestamp `1791043112`. Do not re-extract growing logs for this run.
+
+Calibration updates use only matured 5-minute forecast outcomes. One factor is maintained per source-session and quota, and that factor is applied causally to every horizon for that same session/quota. A 5-minute outcome may update the learner only when its `target_at <= current forecast at`.
+
+Parameter grid:
+
+- forgetting factor `λ ∈ {0.80, 0.90, 0.95, 0.98, 0.99}`;
+- prior strength `s ∈ {0.5, 2, 5, 10}`, initialized as `A=B=s`;
+- bounds: `[0.5,2.0]`, `[0.75,1.5]`, `[0.8,1.25]`;
+- confidence policies:
+  - `all`: `q=1`;
+  - `downweight_low`: `q=0.1` below 0.5 point information, `0.25` below 1 point, `0.5` below 2 points, otherwise `1`, using `max(predicted, observed)`;
+  - `ignore_zero_near`: `q=0` only when observed increment is zero and predicted increment is below 0.75 point, otherwise `1`.
+
+5H and Weekly select parameters independently using only the existing `earlier` 5-minute split. Among candidates whose earlier p90 is no more than 10% worse than Fixed and whose bound-hit rate is no more than 10%, select the lowest earlier MAE; deterministic tie-breaks are lower equal-session MAE, lower p90, then the serialized parameter key. If no candidate is eligible, retain `c=1` and mark selection failed.
+
+After selection, parameters are frozen. The `holdout` split is scored without retuning, although the online learner may continue causal updates from outcomes that become observable during holdout, as it would in deployment.
+
+Because holdout contains few windows and session files are intentionally not merged, this first replay is exploratory even if its directional gates pass.
