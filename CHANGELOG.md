@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Offline production-entry tray lifecycle tests and a repeatable Edge layout QA runner.
 - Offline weighted crossing-regression/idle/migration prototypes and a repeatable 240-parameter replay search with matched legacy accuracy/response evidence.
 - Offline fractional-interpolation and adaptive-window ablations with actual Weekly polling cadences, independent-observation change detection, conditional recovery and committed matched stability/response/stress summaries; [validation remains partial](docs/handoff/2026-10-03-burn-rate-adaptive-validation.md).
+- Private-log quota extraction and causal real-history forecast comparison across nine candidates, with availability, chronological checks and committed aggregate evidence; [real usage favors fixed weighting as the next candidate](docs/handoff/2026-10-03-burn-rate-real-usage-validation.md), without production integration.
 
 ### Fixed
 - Apply the saved tray mode during cold startup, read failures and settings changes without cached usage; preserve pending/error tooltips and cached data until recovery.
@@ -23,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Verification
 - Frontend: 86 tests passed; TypeScript/Vite production build passed.
-- Rust: 142 regular tests passed; separately executed fixed estimator grid generated 240 candidates / zero passing its current combined gates. Adaptive ablations produced 5676 result rows and preserve broader response/excursion regressions explicitly; locked Cargo check passed.
+- Rust: 145 regular tests passed; separately executed fixed estimator grid generated 240 candidates / zero passing its current combined gates. Adaptive ablations produced 5676 result rows and preserve broader response/excursion regressions explicitly. Real-history forecasts generated 318 eligible intervals with availability and chronological checks; locked Cargo check passed.
 - Browser: 406 offline Edge layout cases passed, including normal and 100% quota fixtures; all four tray lifecycle regression mutations were detected during initial implementation.
 
 ### Scope

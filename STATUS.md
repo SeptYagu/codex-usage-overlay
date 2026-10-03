@@ -1,5 +1,11 @@
 # Status
 
+## Real quota history validation — 2026-10-03
+
+- Causal forecasts over 3,854 local integer quota observations compare all nine offline variants. On 87 common 5H five-minute windows, MAE is 2.047 points (legacy), 1.704 (fixed weighted) and 2.258 (adaptive); later-period and equal-session comparisons also favor fixed over adaptive.
+- Preferred next integration candidate revised to fixed weighting without interpolation/adaptation. Weekly adaptive gains are tiny and do not persist in the later period. Active-session logs, integer precision and sparse long-horizon coverage limit this evidence; current Phase 5 publication gates remain unresolved.
+- [Real usage report](docs/handoff/2026-10-03-burn-rate-real-usage-validation.md), extraction/replay tools and aggregate evidence added. 145 regular Rust tests, real-history generator, locked Cargo check and data consistency checks passed. Production estimator/state and running overlay unchanged. Raw observations remain ignored locally.
+
 ## Adaptive estimator validation — 2026-10-03
 
 - Fractional interpolation and change-detected local fitting validated offline across 664 trajectories / nine variants. Matched 5H constant mean error falls from 14.26% (legacy) to 0.76%; standard acceleration/deceleration integrals improve 43.3%/28.6%.
