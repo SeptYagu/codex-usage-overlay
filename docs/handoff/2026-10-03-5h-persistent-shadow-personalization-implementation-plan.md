@@ -1,8 +1,11 @@
 # 5H Persistent Shadow Personalization — Implementation Plan
 
 Date: 2026-10-03
-Baseline: `662054d` (`test: validate personal evidence decay`)
+Algorithm baseline: `662054d` (`test: validate personal evidence decay`)
+Plan baseline: `f689e85` (`docs: add persistent 5h shadow personalization plan`)
 Scope: production-quality shadow implementation and local validation data collection; **no user-visible estimator switch**.
+
+Revision: reconciles the full 2026-10-03 estimator/personalization research chain and closes implementation gaps around causal shadow scoring, feedback-count semantics, polling-cadence compatibility, algorithm-version isolation, and crash-safe evidence collection.
 
 ## 1. Goal
 
@@ -11,6 +14,34 @@ Implement the validated 5-hour personalization algorithm in the real application
 The implementation must produce a shadow personalized 5H rate and validation evidence while leaving the current published 5H and Weekly Burn Rate behavior unchanged.
 
 The immediate product objective is not “ship the new number.” It is to collect trustworthy 10+, 20+, 50+, and 100+ feedback histories from the actual overlay lifecycle so a later decision can determine whether the shadow value is safe to publish.
+
+### 1.1 Research decision ledger
+
+This plan is the implementation endpoint of a sequence of frozen experiments. An implementer must preserve the following decisions rather than re-selecting algorithms while coding:
+
+| Stage | Evidence | Decision carried into this plan |
+| --- | --- | --- |
+| Real-history estimator comparison | 5H five-minute MAE: Legacy `2.047`, Fixed Weighted `1.704`, Adaptive `2.258`; Fixed p90 `4.112` vs Legacy `4.839` | Use Fixed Weighted as the shadow base candidate. Do not include adaptive detection or fractional interpolation. |
+| First personal calibration | 5H holdout MAE `2.0034 -> 1.7899`, but p90 `3.1148 -> 4.5125`; full-dataset MAE also worsened | Multiplicative personal bias is real enough to study, but full-strength early personalization is unsafe. |
+| Evidence-weighted personalization | With `K=8`, holdout MAE `2.0034 -> 1.9363` while p90 remains `3.1148`; all-window MAE `1.7041 -> 1.6809` | Learn immediately, but attenuate the correction by evidence trust. Keep Weekly unpersonalized. |
+| Evidence-decay validation | `rho=0.99` closely tracks a hard recent-100 window while requiring one scalar and forgetting continuously | Use exponentially decayed trust evidence as the preferred shadow design; do not implement a hard 100-item queue. |
+
+Important interpretation boundaries:
+
+- the real-history data were active-session observations, not complete all-day overlay polling;
+- no scored 5H origin had 10+ prior trusted updates, so long-lived personalization is still unvalidated;
+- the Fixed Weighted result is the preferred **shadow base candidate**, not authorization to replace the current published estimator;
+- the shadow phase exists specifically to obtain the missing persistent-lifecycle evidence without changing user-visible behavior.
+
+### 1.2 Three distinct quantities must remain separate
+
+The implementation and later reports must not conflate:
+
+1. `maturedFeedbacks`: every valid five-minute outcome that reaches maturation, including `q=0` low-information outcomes;
+2. `informativeUpdates`: matured outcomes with `q>0`; this matches the update-count concept used by the evidence-weighted validation;
+3. `evidence E`: the decayed trust scalar `E_t = 0.99E_(t-1)+q`.
+
+The “10+/20+/50+/100+ feedback history” collection target refers primarily to **informative update count before a forecast**, with matured-feedback count also reported. It must not use `E` as a literal lifetime-count bucket: with `rho=0.99` and `q<=1`, `E` approaches 100 asymptotically and does not behave like an integer recent-100 counter.
 
 ## 2. Frozen algorithm contract
 
@@ -179,6 +210,9 @@ BurnRateStateFile v2
   weekly                existing QuotaRateState
   fiveHourShadow
     algorithmVersion
+    accountGeneration
+    eventSequence
+    auditOutbox
     weighted
     personal
     pending
@@ -208,14 +242,15 @@ Recommended persisted fields:
 
 ```text
 PersonalCalibrationState
-  a: f64                 default 10
-  b: f64                 default 10
-  evidence: f64          default 0
-  realizedUpdates: u64   default 0
+  a: f64                    default 10
+  b: f64                    default 10
+  evidence: f64             default 0
+  maturedFeedbacks: u64     default 0
+  informativeUpdates: u64   default 0
   lastUpdateAt: Option<i64>
 ```
 
-`realizedUpdates` is diagnostic lifetime count only; it does not determine trust.
+`maturedFeedbacks` increments for every matured interval, including `q=0`. `informativeUpdates` increments only when `q>0`; it is the lifetime learning-age counter used for later 10+/20+/50+/100+ analysis. Neither counter determines trust; only decayed `evidence` does. `accountGeneration` and `eventSequence` live at the shadow-audit level, not inside the learner, and must never be used as model evidence.
 
 Normalize on load:
 
@@ -231,10 +266,18 @@ Persist at most one pending 5H learning interval:
 
 ```text
 PendingPersonalForecast
+  algorithmVersion
   originAt
   originUsedPercent
   originResetAt
+  originPublishedRatePerHour
   originFixedRatePerHour
+  originRawFactor
+  originTrust
+  originEffectiveFactor
+  originShadowRatePerHour
+  originEvidence
+  originInformativeUpdates
   lastValidAt
 ```
 
@@ -243,6 +286,50 @@ One pending forecast enforces the same non-overlapping outcome structure used in
 Do not keep a queue of overlapping five-minute predictions.
 
 Persistence allows a very short application restart to continue an interval causally. A restart gap that violates the feedback gap rule invalidates the pending interval on the next valid sample.
+
+The origin estimator snapshot is mandatory. The learner still trains only from the frozen Fixed Weighted prediction `p`; storing the current published rate and personalized shadow rate does **not** change learning. It exists so the matured outcome can later score three causal predictions made at the same origin:
+
+```text
+published_delta = originPublishedRatePerHour * elapsed / 3600
+fixed_delta     = originFixedRatePerHour     * elapsed / 3600
+shadow_delta    = originShadowRatePerHour    * elapsed / 3600
+```
+
+Cap each prediction independently by quota remaining at the origin before scoring it against the same observed `y`.
+
+Do not reconstruct the origin personalized prediction from target-time `A/B/E`. By maturation time the learner may already have changed; using the target-time factor would create look-ahead contamination and would make the shadow evidence unsuitable for publication decisions.
+
+### 5.4 Algorithm-version isolation and audit outbox
+
+`fiveHourShadow.algorithmVersion` is a compatibility boundary, not a decorative field.
+
+- if the persisted version exactly matches the running algorithm, resume normally;
+- if a future code version changes a frozen learner constant, confidence rule, forecast horizon, trust rule, or base-estimator semantics, it must declare an explicit migration;
+- absent an explicit compatible migration, preserve legacy quota history and the audit identity (`accountGeneration/eventSequence`) but reset incompatible personal/weighted/pending shadow state to neutral defaults rather than mixing evidence generated under different algorithms.
+
+Because the purpose of this phase is evidence collection, a crash between updating learner state and appending the diagnostic log must not silently lose a matured outcome. Keep a persisted at-least-once audit slot under `fiveHourShadow`:
+
+```text
+accountGeneration: u64
+eventSequence: u64
+auditOutbox: Option<ShadowEvidenceEvent>
+```
+
+On a matured/rejected/lifecycle event:
+
+1. require the audit slot to be empty;
+2. increment `eventSequence`;
+3. apply the state transition and place the fully formed evidence event in `auditOutbox`;
+4. atomically persist the burn-rate state;
+5. append the outbox event to the JSONL evidence log;
+6. clear the outbox and persist that clear opportunistically with the next state-changing save.
+
+Before processing any new personal-learning event, attempt to flush a retained outbox. If it still cannot be appended, keep Fixed Weighted/shadow-rate computation available but **pause personal outcome maturation and creation of new pending intervals** for that refresh. Never overwrite an unflushed audit event. Once the outbox drains, normal learning may resume; an old pending interval is then subject to the ordinary late/gap rejection rules.
+
+On startup, flush any retained outbox before processing new feedback. Duplicate appends are acceptable; every event carries `(accountGeneration,eventSequence)`, and offline analysis must de-duplicate by that key. Lost events are not acceptable when the corresponding learner state update survived.
+
+`accountGeneration` increments on confirmed account switch and is safe to log; `eventSequence` may reset only after that generation increment. Algorithm-version resets within the same account must preserve the audit sequence. Never log the raw account ID.
+
 ## 6. v1 → v2 migration
 
 The current loader rejects any schema version other than v1. Replace that all-or-nothing behavior with an explicit migration path.
@@ -265,17 +352,18 @@ For every successful raw usage sample, use this order:
 
 1. apply existing account transition handling;
 2. snapshot the pre-accept 5H quota state needed for weighted metadata transitions;
-3. run existing `accept_quota()` exactly once for 5H;
+3. run existing `accept_quota()` exactly once for 5H and retain both its production estimate and transition classification;
 4. update/normalize Fixed Weighted metadata from the before/after state;
-5. compute the current Fixed Weighted 5H rate;
-6. process an existing pending personal forecast against the current observation;
-7. if that outcome matures, update `A/B/E` before calculating the current shadow factor;
-8. calculate current `c`, `g`, effective factor, and shadow rate;
-9. after maturation/rejection, start a new pending forecast at this same observation when eligible;
-10. process Weekly using its existing path unchanged;
-11. return the unchanged production `BurnRateEstimate` plus internal shadow diagnostics for persistence/logging.
+5. if this observation caused a confirmed segment/reset/correction transition, invalidate any pending interval before it can train;
+6. otherwise process an existing pending personal forecast against the current observation using only the origin snapshot plus the current accepted observation;
+7. if that outcome matures, update `A/B/E`, `maturedFeedbacks`, and when `q>0`, `informativeUpdates`;
+8. compute the current Fixed Weighted 5H rate;
+9. calculate current `c`, `g`, effective factor, and shadow rate from the post-maturation learner state;
+10. after maturation/rejection, start a new pending forecast at this same observation when eligible, storing the complete causal origin snapshot including production, Fixed Weighted, and personalized rates;
+11. process Weekly using its existing path unchanged;
+12. return the unchanged production `BurnRateEstimate` plus internal shadow diagnostics for persistence/logging.
 
-This ordering matches the offline causal replay: outcomes with `target_at <= current_at` may train the prediction made at the current time, but never an earlier prediction.
+This ordering matches the offline causal replay: outcomes with `target_at <= current_at` may train the prediction made at the current time, but never an earlier prediction. A transition detected from the current observation can reject old pending evidence, but that observation may then become the origin of a fresh interval under the new segment.
 ## 8. Five-minute feedback lifecycle
 
 A pending interval begins only when all required origin data exist:
@@ -329,21 +417,55 @@ Missing/invalid samples do not fabricate progress. They also must not silently b
 
 Same-second duplicate refreshes should be ignored for pending progression rather than counted as new evidence.
 
-Record a rejection reason in local shadow evidence, but do not update `A`, `B`, `E`, or `realizedUpdates`.
+Record a rejection reason in local shadow evidence, but do not update `A`, `B`, `E`, `maturedFeedbacks`, or `informativeUpdates`.
+
+A raw `resetsAt` mismatch is intentionally conservative for **that pending five-minute outcome** because the frozen real-history protocol rejected such paths. It does not by itself mean an actual quota-cycle transition occurred. Preserve the existing production distinction between a future reset-boundary correction and a completed cycle: a mere metadata shift may reject the pending training interval, but must not clear long-lived `A/B/E`.
+
+### 8.3 Polling-cadence compatibility
+
+The frozen feedback protocol has a stricter continuity rule than the production burn-history tracker:
+
+```text
+personal feedback max valid-observation gap = 90 s
+5H burn-history max interpolation gap       = 10 min
+```
+
+The application can be configured for 30/60/120/300-second polling in the UI and accepts a wider 15–3600-second backend range. Therefore a 90-second feedback-gap rule cannot be silently treated as universally compatible.
+
+For this shadow implementation:
+
+- preserve the validated 90-second rule exactly;
+- 30-second and normal 60-second polling can accumulate personal feedback when fetch latency/jitter keeps consecutive accepted observations within 90 seconds;
+- 120/300-second polling, or any actual accepted-observation gap above 90 seconds, must reject the pending interval without learning;
+- do not stretch the 90-second rule based on configured cadence in this implementation, because that would create a new algorithm that has not been replay-validated;
+- the existing published Burn Rate and Fixed Weighted shadow estimator continue operating under their own gap semantics; only personal five-minute learning becomes unavailable;
+- evidence logging must make this visible through rejection reason and actual gap duration, so later analysis can quantify how much production coverage is lost.
+
+Before any future public personalization is expected to support polling above 90 seconds, run a separate frozen cadence-aware validation. That experiment may test a rule such as `configured cadence + bounded fetch/jitter allowance`, but it is not part of the present frozen algorithm.
+
+Required cadence tests:
+
+- 30-second stable polling: pending outcomes mature normally;
+- 60-second polling with bounded jitter under 90 seconds: matures normally;
+- any gap just above 90 seconds: rejects exactly once and does not train;
+- 120-second and 300-second regular polling: does not fabricate learning or corrupt state;
+- returning from a slow/gapped cadence to <=90-second accepted gaps can start fresh pending intervals without resetting long-lived personal state.
+
 ## 9. Reset, gap, account, and restart semantics
 
 These lifecycles must be intentionally different.
 
 ### Account switch
 
-A confirmed change to a different non-empty account ID clears:
+A confirmed change to a different non-empty account ID:
 
-- existing 5H/Weekly histories according to current behavior;
-- weighted shadow metadata;
-- pending personal forecast;
-- personal `A/B/E` state and diagnostic update count.
+- increments `accountGeneration` before any new-account evidence can be recorded;
+- resets per-generation `eventSequence` to zero;
+- clears existing 5H/Weekly histories according to current behavior;
+- clears weighted shadow metadata and pending personal forecast;
+- resets personal `A/B/E`, `maturedFeedbacks`, and `informativeUpdates`.
 
-No personal calibration may cross accounts.
+No personal calibration or audit identity may cross accounts. The raw account ID remains available only to the existing backend isolation logic and must never be copied into the evidence log.
 
 ### Quota reset / new 5H segment
 
@@ -352,7 +474,7 @@ A confirmed quota-cycle transition clears:
 - weighted idle metadata;
 - pending forecast.
 
-It **does not** clear personal `A/B/E`. User behavior is allowed to persist across normal 5H quota windows.
+It **does not** clear personal `A/B/E`, `maturedFeedbacks`, or `informativeUpdates`. User behavior is allowed to persist across normal 5H quota windows. `accountGeneration` also remains unchanged because a quota reset is not an account change.
 ### Long gap
 
 A gap beyond the existing 5H history max gap starts a new quota segment as today and clears weighted segment metadata/pending.
@@ -393,23 +515,24 @@ A matured outcome should contain enough information to replay the learner:
 ```text
 schemaVersion
 algorithmVersion
+accountGeneration / eventSequence
 originAt / targetAt / elapsedSeconds
 originUsed / targetUsed
-originFixedRate
-predictedDelta / observedDelta
+originPublishedRate / originFixedRate / originShadowRate
+publishedPredictedDelta / fixedPredictedDelta / shadowPredictedDelta
+observedDelta
+originRawFactor / originTrust / originEffectiveFactor
+originEvidence / originInformativeUpdates
 q
 aBefore / bBefore / evidenceBefore
 aAfter / bAfter / evidenceAfter
-rawFactor
-trust
-effectiveFactor
-shadowRate
-realizedUpdates
+maturedFeedbacksAfter / informativeUpdatesAfter
+targetRawFactor / targetTrust / targetEffectiveFactor / targetShadowRate
 ```
 
-An optional monotonically increasing local account-generation number may be logged for separation, but never the account ID itself.
+`accountGeneration` and `eventSequence` are mandatory audit keys; the raw account ID is never logged. Rejected events additionally record a stable rejection code plus relevant timing metadata such as `actualGapSeconds` when applicable. Lifecycle events record only the minimum state transition needed to interpret later evidence.
 
-This log is evidence for future validation; it is not part of the UI contract.
+Offline readers must de-duplicate at-least-once log delivery by `(accountGeneration,eventSequence)` before computing metrics. This log is evidence for future validation; it is not part of the UI contract.
 ### 10.2 Bounded retention
 
 The evidence log must not grow indefinitely.
@@ -438,7 +561,8 @@ FiveHourShadowEstimate
   trust: f64
   effectiveFactor: f64
   evidence: f64
-  realizedUpdates: u64
+  maturedFeedbacks: u64
+  informativeUpdates: u64
   outcomeEvent: Option<...>
 ```
 
@@ -459,7 +583,9 @@ Examples that require persistence:
 
 A state-save failure should retain the updated in-memory shadow state for the running process and log the persistence error exactly as current burn-rate save failures do.
 
-Do not make a shadow persistence failure turn an otherwise successful usage refresh into an application error.
+For audit consistency, do not append a newly generated outbox event to the durable JSONL file until the corresponding learner/outbox state save has succeeded. If that save fails, keep the event and learner state dirty in memory, retry persistence on subsequent refreshes, and pause additional personal outcome transitions until that state/outbox pair is durably saved. If state persistence succeeds but JSONL append fails, leave the persisted outbox populated so startup or a later refresh can retry it. This yields at-least-once evidence logging without allowing a durable log event to claim a learner update that was never durably saved or allowing multiple unpersisted learning events to accumulate behind one audit slot.
+
+Do not make a shadow persistence or diagnostic-log failure turn an otherwise successful usage refresh into an application error.
 ## 13. Required unit tests — weighted core
 
 Promoting replay code to production-safe helpers must preserve prior evidence.
@@ -485,14 +611,16 @@ Test the frozen formulas directly:
 
 - defaults are `A=B=10`, `E=0`, factor/trust neutral;
 - one known `p/y` update produces the expected `A/B`;
-- `q=0` decays `A/B/E` without adding evidence;
+- `q=0` decays `A/B/E`, increments `maturedFeedbacks`, and does **not** increment `informativeUpdates`;
+- `q>0` increments both counters exactly once;
 - raw factor clamps to `[0.75,1.5]`;
 - `E_t=0.99E+q`;
 - trust is always finite and in `[0,1]`;
 - effective factor always lies between 1 and the clamped raw factor;
-- continuous `q=1` evidence approaches `E≈100`;
+- continuous `q=1` evidence approaches `E≈100` from below while `informativeUpdates` continues past 100;
 - after 100/200/300 updates an old contribution has the expected exponential decay;
 - corrupt/non-finite learner state normalizes to neutral defaults;
+- algorithm-version mismatch resets only the incompatible shadow subtree unless an explicit migration exists;
 - long deterministic sequences do not produce NaN/Inf or numerical underflow failure.
 ## 15. Required unit tests — pending outcomes
 
@@ -503,12 +631,16 @@ Cover causal lifecycle precisely:
 - refreshes before 300s cannot train;
 - first valid target in 300–390s matures;
 - actual target elapsed time is used in `p`;
-- prediction is capped by quota remaining at origin;
+- published, Fixed Weighted, and personalized predictions are all captured from the **origin** snapshot and capped independently by quota remaining at origin;
+- maturation scores the stored origin shadow prediction; target-time factor changes cannot rewrite the origin prediction;
+- the learner's `p` remains the stored origin Fixed Weighted prediction, never the personalized prediction;
 - matured update occurs before calculating the same-time shadow estimate;
-- a mature target can immediately become the next origin;
+- a mature target can immediately become the next origin using the post-update factor;
 - intervals never overlap;
 - >90s valid-observation gap rejects;
-- reset timestamp change rejects;
+- 30s and bounded-jitter 60s cadence can mature; 120s/300s cadence cannot silently train under the frozen rule;
+- reset timestamp change rejects the interval without automatically clearing long-lived personal state;
+- confirmed segment/correction transition rejects before training;
 - decrease/correction rejects;
 - saturation rejects;
 - too-late target rejects;
@@ -523,14 +655,21 @@ Add integration coverage around the real `AppState` refresh path:
 - existing visible `CodexUsage` values remain byte/field equivalent with shadow enabled;
 - successful refresh persists shadow state when it changes;
 - failed usage read does not fabricate feedback or erase learner state;
-- account switch clears personal state before any new-account learning;
-- quota reset preserves personal `A/B/E` but clears pending/weighted segment metadata;
+- account switch increments `accountGeneration` and clears personal state/counters before any new-account learning;
+- quota reset preserves personal `A/B/E` and lifetime counters but clears pending/weighted segment metadata;
+- a future `resetsAt` metadata correction can reject pending feedback without being misclassified as an account/quota reset;
 - v1 state migrates to v2 without losing existing 5H/Weekly crossing history;
 - v2 state round-trips;
 - malformed shadow subtree does not destroy valid legacy state;
-- short restart can resume a valid pending interval;
+- algorithm-version mismatch preserves legacy quota history and audit sequence while isolating incompatible algorithm state;
+- short restart can resume a valid pending interval with the exact origin estimator snapshot intact;
 - long restart gap rejects pending but preserves `A/B/E`;
-- save failure leaves UI refresh behavior unchanged;
+- persisted audit outbox is retried after restart;
+- duplicate outbox append is harmless after de-duplication by `(accountGeneration,eventSequence)`;
+- an unflushed outbox is never overwritten by a second personal outcome;
+- state-save failure does not append an unpersisted learner event to durable evidence and pauses further personal transitions until persistence recovers;
+- evidence-log append failure leaves the persisted outbox retryable and pauses new personal outcomes while leaving visible production behavior unaffected;
+- save/log failure leaves UI refresh behavior unchanged;
 - tray/settings presentation tests remain unchanged.
 
 Frontend tests should not require modification unless an accidental public contract change occurs; such a change is a failure for this phase.
@@ -554,18 +693,48 @@ This implementation may be merged/deployed as shadow-only when:
 - Rust unit/integration tests pass;
 - existing frontend tests/build pass;
 - all frozen replay regressions pass;
-- state v1→v2 migration is covered;
-- local evidence log is bounded and contains no account ID/conversation data;
+- state v1→v2 migration and algorithm-version isolation are covered;
+- causal origin snapshots prove that published/fixed/personalized predictions can be scored later without target-time reconstruction;
+- 30/60/120/300-second cadence behavior is explicit and tested under the frozen 90-second feedback rule;
+- local evidence log is bounded, de-duplicable, crash-recoverable through the audit outbox, and contains no account ID/conversation data;
 - published UI values are demonstrably unchanged;
-- a packaged/native smoke run confirms state persists across restart.
+- a packaged/native smoke run confirms learner, pending-origin snapshot, account generation, and audit outbox behavior across restart.
 
 Do not wait for 100 real feedbacks before merging shadow collection; collecting those feedbacks is the purpose of this phase.
 
 ## 19. Later publication gate — not part of implementation
 
-A future plan may consider exposing the personalized 5H rate only after real shadow evidence contains meaningful samples in at least:
+A future publication decision must be based on the causal origin snapshots collected by this implementation, not on target-time recomputation.
+
+### 19.1 Primary matched comparison
+
+For every matured interval with all three origin predictions available, score the same observed `y` against:
 
 ```text
+current published estimator
+Fixed Weighted shadow base
+personalized shadow
+```
+
+Report at minimum:
+
+- MAE;
+- p90 absolute error;
+- signed bias;
+- wins / losses / ties on matched windows;
+- availability and rejection rate;
+- equal-day and, where a stable session grouping exists, equal-session aggregates.
+
+Do not let one estimator gain an apparent advantage by being scored on a different outcome set. Unavailable predictions remain unavailable rather than becoming zero.
+
+The personalized candidate should not be considered for publication unless it improves matched average error over its Fixed Weighted base **without material p90 degradation** and does not regress materially against the current published estimator. The exact statistical acceptance threshold must be pre-registered in the future publication plan before reading the final confirmation slice; do not choose a threshold post hoc from the collected scores.
+
+### 19.2 Learning-age reporting
+
+Bucket forecasts by `originInformativeUpdates`, not by decayed `E`:
+
+```text
+0
 1–4
 5–9
 10–19
@@ -574,15 +743,24 @@ A future plan may consider exposing the personalized 5H rate only after real sha
 100+
 ```
 
-and confirms that MAE improves without material p90 regression as trust grows.
-The later decision must also review:
+Also report `originEvidence` and trust distributions separately. This preserves the distinction between lifetime learning age and the approximately-100-feedback soft memory.
 
-- account transitions;
-- normal 5H resets;
+The key missing evidence from the current research chain is the 10+, 20+, 50+, and 100+ region. Collection should continue until those regions are genuinely represented; do not infer long-run safety from the current <=9-update replay.
+
+### 19.3 Dependence and lifecycle review
+
+Because adjacent five-minute windows from one user/day are not statistically independent, future confidence analysis should use day/session blocking or an equivalent grouped resampling method rather than treating every interval as iid evidence.
+
+The later decision must separately review:
+
+- account transitions and `accountGeneration` separation;
+- normal 5H resets and reset-metadata corrections;
 - overnight/long idle;
-- application restarts;
+- application restarts and outbox recovery;
+- polling-cadence coverage, especially the share rejected by the frozen 90-second rule;
 - behavior regime changes;
-- evidence-log coverage and rejection rate;
+- evidence-log completeness after de-duplication;
+- rejection reasons and rejection rate;
 - whether time-based decay is needed in addition to feedback-count decay.
 
 Weekly requires its own new validation before any personalization.
@@ -591,18 +769,20 @@ Weekly requires its own new validation before any personalization.
 
 Execute in this order:
 
-1. Refactor/promote Fixed Weighted shared math; prove replay parity.
-2. Add v2 state structs and v1 migration; test migration before changing refresh logic.
-3. Add personal learner math and pure unit tests.
-4. Add pending five-minute outcome engine and causal tests.
-5. Wire shadow processing into `BurnRateTracker::accept_usage()`.
-6. Add atomic persistence of the new state through the existing save path.
-7. Add bounded local shadow evidence logging.
-8. Run lifecycle/integration tests proving UI output is unchanged.
-9. Rerun every frozen replay/evidence regression.
-10. Run packaged/native restart smoke validation.
-11. Write an implementation handoff with exact test counts, state migration result, evidence-log sample schema, and any deviations.
-12. Commit and push the implementation only after the above gates pass.
+1. Freeze the revised plan and record the exact implementation baseline before touching production code.
+2. Refactor/promote Fixed Weighted shared math; prove parity with the committed `98f9bb4` real-history evidence before continuing.
+3. Add v2 state structs, explicit v1 migration, `algorithmVersion`, `accountGeneration`, counters, and audit-outbox fields; test migration/version isolation before changing refresh logic.
+4. Add personal learner math and pure unit tests, including separate matured/informative counter semantics.
+5. Add the pending five-minute engine with complete origin snapshots for published, Fixed Weighted, and personalized predictions.
+6. Add cadence-boundary tests and keep the validated 90-second personal-feedback rule unchanged; document expected 120/300-second learning unavailability rather than silently broadening it.
+7. Wire transition-aware shadow processing into `BurnRateTracker::accept_usage()`, ensuring reset/correction/account transitions reject stale pending evidence before training.
+8. Add atomic persistence and at-least-once audit-outbox delivery through the existing save path.
+9. Add bounded JSONL evidence logging and a small offline validator that de-duplicates events and verifies the three origin predictions can be causally scored.
+10. Run lifecycle/integration tests proving visible `CodexUsage`, tray, settings, notifications, and polling behavior are unchanged.
+11. Rerun every frozen replay/evidence regression using the promoted production helpers; any material score drift is a stop condition, not a new golden baseline.
+12. Run packaged/native smoke validation covering restart, pending resume/reject, account switch, quota reset, log retry, and 30/60/120/300-second cadence behavior.
+13. Write an implementation handoff with exact test counts, migration/version results, one de-identified matured-event example, one rejection example, outbox recovery result, and any deviations.
+14. Commit and push the implementation only after all gates above pass.
 
 No version bump or public release is required merely to complete the shadow implementation.
 ## 21. Non-goals
@@ -630,7 +810,9 @@ A new implementer should be able to execute this document without reopening algo
 The relevant research chain is:
 
 ```text
-2026-10-03-burn-rate-real-usage-validation.md
+2026-10-03-v1.3.1-display-controls-plan.md §8.1 weighted refinement
+→ 2026-10-03-burn-rate-adaptive-validation.md
+→ 2026-10-03-burn-rate-real-usage-validation.md
 → 2026-10-03-personal-calibration-validation.md
 → 2026-10-03-evidence-weighted-personalization-validation.md
 → 2026-10-03-personal-evidence-decay-validation.md
