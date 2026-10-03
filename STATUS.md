@@ -1,5 +1,11 @@
 # Status
 
+## Adaptive estimator validation — 2026-10-03
+
+- Fractional interpolation and change-detected local fitting validated offline across 664 trajectories / nine variants. Matched 5H constant mean error falls from 14.26% (legacy) to 0.76%; standard acceleration/deceleration integrals improve 43.3%/28.6%.
+- Broader responses remain mixed: only 35/80 5H fixtures improve; all 80 Weekly integrals improve but two excursion regressions remain. Production estimator remains unchanged; this is partial validation, not publication approval.
+- Evidence and limitations: [adaptive validation report](docs/handoff/2026-10-03-burn-rate-adaptive-validation.md). Regular Rust tests 142 passed; matrix/stress generators and locked Cargo check passed.
+
 ## Phase 5 estimator replay — 2026-10-03
 
 - Weighted local regression, conservative idle metadata and migration are implemented as offline test candidates; production estimator/schema remain unchanged.

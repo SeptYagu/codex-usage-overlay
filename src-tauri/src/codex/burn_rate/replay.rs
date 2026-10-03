@@ -1,6 +1,8 @@
 //! Offline Phase 5 candidates. No candidate changes production publication/state.
 use super::*;
 
+mod adaptive;
+
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 struct Parameters {
     half_life: f64,
@@ -142,10 +144,16 @@ impl Candidate {
         span: u32,
         p: Parameters,
     ) -> Option<f64> {
+        let accepted = self.observe(at, &snapshot, max_gap);
+        valid_used_percent(&snapshot)?;
+        self.publish(horizon, span, p, accepted)
+    }
+
+    fn observe(&mut self, at: i64, snapshot: &QuotaSnapshot, max_gap: i64) -> bool {
         // Migration happens before the incoming observation advances the baseline.
         self.normalize();
         let before = self.quota.clone();
-        accept_quota(&mut self.quota, &snapshot, at, max_gap);
+        accept_quota(&mut self.quota, snapshot, at, max_gap);
         if self.quota.segment_id != before.segment_id {
             self.upper = None;
             self.ceiling = None;
@@ -156,10 +164,12 @@ impl Candidate {
             self.upper = Some(at);
             self.ceiling = None;
         }
-        valid_used_percent(&snapshot)?;
+        self.quota.last_observed_at != before.last_observed_at
+    }
+
+    fn publish(&mut self, horizon: i64, span: u32, p: Parameters, accepted: bool) -> Option<f64> {
         let fit = weighted_fit(&self.quota, horizon, span, p)?;
         let idle = self.quota.last_observed_at?.saturating_sub(self.upper?) as f64;
-        let accepted = self.quota.last_observed_at != before.last_observed_at;
         if accepted && idle > 3600.0 / fit + EPSILON {
             let candidate = fit.min(3600.0 / idle);
             self.ceiling = Some(self.ceiling.map_or(candidate, |old| old.min(candidate)));

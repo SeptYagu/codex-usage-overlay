@@ -1,5 +1,7 @@
 # Handoff index
 
+Adaptive follow-up: [fractional interpolation and adaptive validation](2026-10-03-burn-rate-adaptive-validation.md), baseline `0eacaef`. Partial validation with nine offline variants and actual Weekly cadences; standard step improvements do not eliminate broader 5H response and Weekly excursion regressions. Production unchanged.
+
 Phase 5 follow-up: [weighted estimator implementation/replay](2026-10-03-burn-rate-estimator-replay.md), baseline `ea1cba3`. Offline candidates only; 240 parameter combinations / zero passing current combined publication gates. Includes matched legacy accuracy evidence and discussion of the raw 5% criterion. Production remains display-only.
 
 | Date | Round | Reviewed commit | Verdict | Document |
