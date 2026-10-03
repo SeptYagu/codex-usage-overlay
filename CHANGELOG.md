@@ -18,24 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced the duplicate React startup fetch with listener-first, cache-only `get_last_usage` startup hydration.
 - Increased provisional dock expansion geometry for the wider quota metadata row while keeping final sizing content-driven.
 
-### Verification
-- Automated frontend, Rust, build, and check gates are required before this implementation is committed. Interactive Windows DPI/multi-monitor layout checks remain a release smoke-test item.
-
-## [1.3.0] - 2026-10-02
-
-### Added
-- Account-level 5-hour and weekly Burn Rate estimates, shown on the second row beside each reset countdown.
-- Persistent Burn Rate tracker state with observation segments, crossing interpolation, idle decay, reset/correction handling, and account-switch isolation.
-- Cache-only startup hydration through `get_last_usage`, preserving the first backend sample without issuing a duplicate startup network request.
-
-### Changed
-- Unified manual, background, tray, and post-reset usage refreshes through one backend processing path.
-- Codex raw quota parsing now preserves `usedPercent` as `f64` plus reset/window/account metadata before rendering remaining percentages.
-- Dock expansion uses wider provisional geometry for the Burn Rate layout while final sizing remains content-driven.
+### Fixed
+- Suppress Burn Rate output when the current quota sample is unavailable or invalid while preserving valid historical estimator state for recovery.
+- Prevent delayed startup cache hydration from overwriting newer live usage events, including multiple updates within the same second and component cleanup races.
 
 ### Verification
-- Frontend tests cover Burn Rate placement/formatting, collapsed-pill exclusion, and startup cache ordering.
-- Rust tests cover estimator behavior, persistence, parsing, reset compatibility, correction handling, account switching, and existing dock/notification regressions.
+- Frontend test suite: 63 tests passed.
+- Rust test suite: 119 tests passed.
+- Production frontend build completed successfully.
+- Interactive Windows DPI/multi-monitor layout checks remain a release smoke-test item.
 
 ## [1.2.1] - 2026-09-30
 
