@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Independent, persisted 5-hour quota and Burn Rate visibility switches, enabled by default for fresh and upgraded profiles, with English/Simplified Chinese/Traditional Chinese labels.
 - Weekly-only expanded overlay, centered single-bar edge pill, and large single-ring tray presentation when 5H is hidden.
 - Offline production-entry tray lifecycle tests and a repeatable Edge layout QA runner.
+- Offline weighted crossing-regression/idle/migration prototypes and a repeatable 240-parameter replay search with matched legacy accuracy/response evidence.
 
 ### Fixed
 - Apply the saved tray mode during cold startup, read failures and settings changes without cached usage; preserve pending/error tooltips and cached data until recovery.
@@ -21,11 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Verification
 - Frontend: 86 tests passed; TypeScript/Vite production build passed.
-- Rust: 125 tests passed; locked Cargo check passed.
+- Rust: 136 tests passed; separately executed estimator grid generated 240 candidates / zero passing current publication gates; locked Cargo check passed.
 - Browser: 406 offline Edge layout cases passed, including normal and 100% quota fixtures; all four tray lifecycle regression mutations were detected during initial implementation.
 
 ### Scope
-- Selected path: display-only. The optional Phase 5 weighted estimator, idle metadata and migration are deferred to a later change pending their complete replay gates. The v1.3.0 production estimator and state schema remain unchanged.
+- Selected path: display-only. The optional Phase 5 weighted estimator, idle metadata and migration remain deferred from production after the offline parameter search failed the current combined gates. Raw accuracy standards and stability/response tradeoffs are documented in the [replay report](docs/handoff/2026-10-03-burn-rate-estimator-replay.md). The v1.3.0 production estimator and state schema remain unchanged.
 - Version bump, packaging and publication await native WebView2/tray/hover/mixed-monitor smoke checks. Browser DPI emulation and offline effects do not close that gate.
 
 ## [1.3.0] - 2026-10-02

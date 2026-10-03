@@ -1,5 +1,7 @@
 # Handoff index
 
+Phase 5 follow-up: [weighted estimator implementation/replay](2026-10-03-burn-rate-estimator-replay.md), baseline `ea1cba3`. Offline candidates only; 240 parameter combinations / zero passing current combined publication gates. Includes matched legacy accuracy evidence and discussion of the raw 5% criterion. Production remains display-only.
+
 | Date | Round | Reviewed commit | Verdict | Document |
 | --- | --- | --- | --- | --- |
 | 2026-09-28 | 1 (recheck) | `2a97264` (base `693a005`) | Not passed — 1×P1, 1×P2, 3×P3 | [2026-09-28-workbuddy-code-review-round1-handoff.md](2026-09-28-workbuddy-code-review-round1-handoff.md) |

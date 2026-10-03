@@ -1,5 +1,11 @@
 # Status
 
+## Phase 5 estimator replay — 2026-10-03
+
+- Weighted local regression, conservative idle metadata and migration are implemented as offline test candidates; production estimator/schema remain unchanged.
+- Expanded search: 240 parameter combinations, zero passing the current combined gates. Legacy itself fails the universal raw 5% bound; accuracy/response tradeoffs and possible contract revisions are recorded in the [replay report](docs/handoff/2026-10-03-burn-rate-estimator-replay.md).
+- Frontend 86 tests, production frontend build, Rust 136 tests plus the separately run grid, and locked Cargo check passed. Publication of Phase 5 remains deferred under the current plan.
+
 ## v1.3.1 display implementation — 2026-10-03
 
 - Phases 2–4 of the revised `ad8dd4f` plan implemented: independent display preferences, Weekly-only overlay/pill/tray, full tray read lifecycle, and composition-aware dock sizing.

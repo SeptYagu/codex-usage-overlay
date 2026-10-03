@@ -299,6 +299,9 @@ fn estimate_rate(
 }
 
 #[cfg(test)]
+mod replay;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::codex::RawCodexUsage;
