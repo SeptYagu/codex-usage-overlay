@@ -27,7 +27,8 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 const now = 1_800_000_000;
 const usage: CodexUsage = {
-  fiveHourRemainingPercent: 69, weekRemainingPercent: 62,
+  fiveHourRemainingPercent: 69, fiveHourBurnRatePerHour: 16.8,
+  weekRemainingPercent: 62, weekBurnRatePerHour: 0.6,
   creditsDisplay: '12.5', creditsBalance: '12.5', hasCredits: true,
   fiveHourResetsAt: now + 4 * 3600 + 29 * 60,
   weekResetsAt: now + 6 * 86400 + 5 * 3600, fetchedAt: now,
@@ -66,10 +67,14 @@ describe.each(['grouped', 'stacks'] as const)('%s layout', (overlayLayout) => {
     const five = within(screen.getByRole('group', { name: '5 HOUR' }));
     expect(five.getByText('69%')).toBeTruthy();
     expect(five.getByText('4h 29m')).toBeTruthy();
+    expect(five.getByText('16.8%/h')).toBeTruthy();
+    expect(five.getByText('16.8%/h').parentElement?.classList.contains('overlay-meta-row')).toBe(true);
     const weekly = within(screen.getByRole('group', { name: 'WEEKLY' }));
     expect(weekly.getByText('62%')).toBeTruthy();
     expect(weekly.getByText('6d 05h')).toBeTruthy();
+    expect(weekly.getByText('0.6%/h')).toBeTruthy();
     expect(within(screen.getByRole('group', { name: 'CREDITS' })).getByText('12.50')).toBeTruthy();
+    expect(within(screen.getByRole('group', { name: 'CREDITS' })).queryByText(/%\/h$/)).toBeNull();
     expect(container.querySelectorAll('.overlay-divider').length).toBe(overlayLayout === 'grouped' ? 2 : 0);
     expect(screen.queryByText('Balance') !== null).toBe(overlayLayout === 'stacks');
   });
@@ -91,7 +96,7 @@ describe.each(['grouped', 'stacks'] as const)('%s layout', (overlayLayout) => {
     render(<OverlayView settings={settings} usage={null} isLoading={true} />);
     expect(screen.getAllByText('--%').length).toBe(2);
     expect(screen.getAllByText('--h --m').length).toBe(2);
-    expect(screen.getByText('—')).toBeTruthy();
+    expect(screen.getAllByText('—')).toHaveLength(3);
     expect(screen.getByRole('status', { name: 'Refreshing usage' })).toBeTruthy();
   });
 
@@ -104,6 +109,18 @@ describe.each(['grouped', 'stacks'] as const)('%s layout', (overlayLayout) => {
     expect(tauri.setSize).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('button')).toBeNull();
   });
+});
+
+
+it('formats unavailable, tiny and bounded burn rates without semantic zero', () => {
+  const { rerender } = render(<OverlayView settings={DEFAULT_SETTINGS}
+    usage={{ ...usage, fiveHourBurnRatePerHour: null, weekBurnRatePerHour: 0.049 }} isLoading={false} />);
+  expect(within(screen.getByRole('group', { name: '5 HOUR' })).getByText('—')).toBeTruthy();
+  expect(within(screen.getByRole('group', { name: 'WEEKLY' })).getByText('<0.1%/h')).toBeTruthy();
+  rerender(<OverlayView settings={DEFAULT_SETTINGS}
+    usage={{ ...usage, fiveHourBurnRatePerHour: 1000, weekBurnRatePerHour: 0.05 }} isLoading={false} />);
+  expect(screen.getByText('>999%/h')).toBeTruthy();
+  expect(screen.getByText('0.1%/h')).toBeTruthy();
 });
 
 it('resizes after changing layout, scale, credits and translated labels', async () => {
@@ -144,6 +161,8 @@ it('shows separate quota bars and expands a collapsed pill on hover', async () =
   expect(container.querySelector('.overlay-pill-fill.overlay-low')?.getAttribute('style')).toContain('19%');
   expect(container.querySelector('.overlay-pill-fill.overlay-warning')?.getAttribute('style')).toContain('20%');
   expect(tauri.setSize).not.toHaveBeenCalled();
+  expect(screen.queryByText('16.8%/h')).toBeNull();
+  expect(screen.queryByText('0.6%/h')).toBeNull();
 
   const pill = container.querySelector('.overlay-pill-host')!;
   fireEvent.mouseEnter(pill);

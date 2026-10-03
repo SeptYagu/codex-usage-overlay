@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-10-02
+
+### Added
+- Account-level 5-hour and weekly Burn Rate estimates derived from observed quota crossings, with idle decay, long-gap segmentation, reset/correction handling, and account-switch isolation.
+- Persistent Burn Rate estimator state in `burn-rate-state.json`, including accepted observation timing and bounded crossing history.
+- Expanded-overlay Burn Rate display on the second row beside each reset countdown, with bounded `—`, `<0.1%/h`, and `>999%/h` presentation states.
+
+### Changed
+- Split raw Codex rate-limit snapshots from the UI-facing usage model so raw `usedPercent` precision remains `f64`.
+- Unified background, manual, and post-reset usage refreshes behind one backend processing path and limited the Codex client lock to app-server I/O.
+- Replaced the duplicate React startup fetch with listener-first, cache-only `get_last_usage` startup hydration.
+- Increased provisional dock expansion geometry for the wider quota metadata row while keeping final sizing content-driven.
+
+### Verification
+- Automated frontend, Rust, build, and check gates are required before this implementation is committed. Interactive Windows DPI/multi-monitor layout checks remain a release smoke-test item.
+
+## [1.3.0] - 2026-10-02
+
+### Added
+- Account-level 5-hour and weekly Burn Rate estimates, shown on the second row beside each reset countdown.
+- Persistent Burn Rate tracker state with observation segments, crossing interpolation, idle decay, reset/correction handling, and account-switch isolation.
+- Cache-only startup hydration through `get_last_usage`, preserving the first backend sample without issuing a duplicate startup network request.
+
+### Changed
+- Unified manual, background, tray, and post-reset usage refreshes through one backend processing path.
+- Codex raw quota parsing now preserves `usedPercent` as `f64` plus reset/window/account metadata before rendering remaining percentages.
+- Dock expansion uses wider provisional geometry for the Burn Rate layout while final sizing remains content-driven.
+
+### Verification
+- Frontend tests cover Burn Rate placement/formatting, collapsed-pill exclusion, and startup cache ordering.
+- Rust tests cover estimator behavior, persistence, parsing, reset compatibility, correction handling, account switching, and existing dock/notification regressions.
+
 ## [1.2.1] - 2026-09-30
 
 ### Changed

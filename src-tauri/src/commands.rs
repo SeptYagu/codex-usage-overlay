@@ -8,13 +8,15 @@ use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
-use crate::codex::{CodexClient, CodexUsage};
+use crate::codex::{BurnRateTracker, CodexClient, CodexUsage};
 use crate::config::{ConfigManager, OverlaySettings};
 use crate::notify::{PendingResetFetches, ResetStateFile};
 use crate::tray::{open_settings_window as show_settings_win, update_tray_icon, update_tray_tooltip};
 
 pub struct AppState {
     pub client: Mutex<CodexClient>,
+    pub refresh_guard: Mutex<()>,
+    pub burn_rate: Mutex<BurnRateTracker>,
     pub settings_patch: Mutex<()>,
     pub config_manager: ConfigManager,
     pub dock: crate::dock::DockManager,
@@ -55,6 +57,8 @@ impl AppState {
         let settings = config_manager.load_settings();
         Self {
             client: Mutex::new(CodexClient::new()),
+            refresh_guard: Mutex::new(()),
+            burn_rate: Mutex::new(BurnRateTracker::load(&config_manager)),
             settings_patch: Mutex::new(()),
             config_manager: config_manager.clone(),
             dock: crate::dock::DockManager::new(config_manager.clone()),
@@ -128,33 +132,68 @@ pub fn resolve_locale(language_setting: &str) -> &'static str {
     }
 }
 
-#[tauri::command]
-pub async fn fetch_usage(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<CodexUsage, String> {
-    let mut client = state.client.lock().await;
-    state.config_manager.write_status("reading", None);
+pub(crate) async fn refresh_usage(app: &AppHandle, state: &Arc<AppState>) -> Result<CodexUsage, String> {
+    let _refresh_guard = match state.refresh_guard.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            let guard = state.refresh_guard.lock().await;
+            drop(guard);
+            return state
+                .last_usage
+                .lock()
+                .await
+                .clone()
+                .ok_or_else(|| "Usage refresh completed without a usable sample".to_string());
+        }
+    };
 
-    match client.fetch_usage(Duration::from_secs(20)).await {
-        Ok(usage) => {
+    state.config_manager.write_status("reading", None);
+    let raw_result = {
+        let mut client = state.client.lock().await;
+        client.fetch_usage(Duration::from_secs(20)).await
+    };
+
+    match raw_result {
+        Ok(raw) => {
+            let estimate = {
+                let mut tracker = state.burn_rate.lock().await;
+                let estimate = tracker.accept_usage(&raw);
+                if estimate.state_changed {
+                    if let Err(error) = tracker.save(&state.config_manager) {
+                        eprintln!("Could not persist burn-rate state: {error}");
+                    }
+                }
+                estimate
+            };
+            let usage = raw.to_ui(estimate.five_hour_per_hour, estimate.weekly_per_hour);
             state.config_manager.write_status("ok", None);
-            crate::notify::process_usage_success(&app, state.inner(), &usage).await;
+            crate::notify::process_usage_success(app, state, &usage).await;
             Ok(usage)
         }
-        Err(e) => {
-            let err_msg = e.to_string();
-            state.config_manager.write_status("error", Some(&err_msg));
-            
-            let current_settings = state.settings.lock().await.clone();
-            let error_text = match resolve_locale(&current_settings.language) {
+        Err(error) => {
+            let error = error.to_string();
+            state.config_manager.write_status("error", Some(&error));
+            let settings = state.settings.lock().await.clone();
+            let error_text = match resolve_locale(&settings.language) {
                 "zh-CN" => "Codex 用量读取失败",
                 "zh-Hant" => "Codex 用量讀取失敗",
                 _ => "Failed to read Codex usage",
             };
-            update_tray_tooltip(&app, error_text);
-            update_tray_icon(&app, None, None);
-            
-            Err(err_msg)
+            update_tray_tooltip(app, error_text);
+            update_tray_icon(app, None, None);
+            Err(error)
         }
     }
+}
+
+#[tauri::command]
+pub async fn fetch_usage(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<CodexUsage, String> {
+    refresh_usage(&app, state.inner()).await
+}
+
+#[tauri::command]
+pub async fn get_last_usage(state: State<'_, Arc<AppState>>) -> Result<Option<CodexUsage>, String> {
+    Ok(state.last_usage.lock().await.clone())
 }
 
 #[tauri::command]

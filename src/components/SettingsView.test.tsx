@@ -87,7 +87,7 @@ describe('two-column settings layout', () => {
     expect(grid.contains(header)).toBe(false);
     expect(grid.contains(footer)).toBe(false);
     expect(within(header).getByRole('heading', { name: 'Settings' })).toBeTruthy();
-    expect(within(header).getByText('v1.2.1')).toBeTruthy();
+    expect(within(header).getByText('v1.3.0')).toBeTruthy();
     expect(within(footer).getByText('septwind@agent.qq.com')).toBeTruthy();
   });
 

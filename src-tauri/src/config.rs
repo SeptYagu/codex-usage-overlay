@@ -164,6 +164,10 @@ impl ConfigManager {
         self.runtime_dir.join("reset-state.json")
     }
 
+    pub fn burn_rate_state_path(&self) -> PathBuf {
+        self.runtime_dir.join("burn-rate-state.json")
+    }
+
     pub fn load_settings(&self) -> OverlaySettings {
         let path = self.settings_path();
         if path.is_file() {

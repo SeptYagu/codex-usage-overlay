@@ -28,6 +28,13 @@ function usageTone(percent: number | null | undefined): string {
   return percent >= 50 ? 'healthy' : percent >= 20 ? 'warning' : 'low';
 }
 
+export function formatBurnRate(rate: number | null | undefined): string {
+  if (rate === null || rate === undefined || !Number.isFinite(rate) || rate < 0) return '—';
+  if (rate > 999) return '>999%/h';
+  if (rate > 0 && rate < 0.05) return '<0.1%/h';
+  return `${rate.toFixed(1)}%/h`;
+}
+
 /**
  * Vertical positions of the pill's percentage grid, in percent of the bar's height.
  * Nine lines split 0~100% into ten 10% cells, so the remaining quota can be counted
@@ -173,10 +180,12 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
   const quotas = [
     { key: 'five', label: layout === 'stacks' ? t('fiveHourLabel') : '5H',
       percent: usage?.fiveHourRemainingPercent,
-      countdown: formatResetCountdown(usage?.fiveHourResetsAt) },
+      countdown: formatResetCountdown(usage?.fiveHourResetsAt),
+      burnRate: formatBurnRate(usage?.fiveHourBurnRatePerHour) },
     { key: 'week', label: layout === 'stacks' ? t('weeklyLabel') : 'WK',
       percent: usage?.weekRemainingPercent,
-      countdown: formatResetCountdown(usage?.weekResetsAt, true) },
+      countdown: formatResetCountdown(usage?.weekResetsAt, true),
+      burnRate: formatBurnRate(usage?.weekBurnRatePerHour) },
   ];
 
   if (collapsed) {
@@ -263,7 +272,10 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
                   {quota.percent === null || quota.percent === undefined ? '--%' : `${quota.percent}%`}
                 </span>
               </div>
-              <span className="overlay-countdown">{quota.countdown}</span>
+              <div className="overlay-meta-row">
+                <span className="overlay-countdown">{quota.countdown}</span>
+                <span className="overlay-burn-rate">{quota.burnRate}</span>
+              </div>
             </div>
           </React.Fragment>
         ))}

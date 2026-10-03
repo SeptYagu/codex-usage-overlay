@@ -1088,15 +1088,21 @@ fn set_full_size(window: &WebviewWindow, settings: &OverlaySettings) -> Result<(
 /// capsule. The estimate never shrinks below the current window, so a docked
 /// pill (which can be taller than the capsule) stays covered while the
 /// authoritative size is on its way.
+fn provisional_expanded_base_size(show_credits: bool) -> (f64, f64) {
+    // Burn Rate widens both quota blocks on their metadata row. This estimate is
+    // intentionally conservative only for the brief expand transition; the
+    // frontend ResizeObserver remains authoritative for the final window size.
+    (if show_credits { 340.0 } else { 280.0 }, 50.0)
+}
+
 fn provisional_size(
     current: PhysicalSize<u32>,
     scale: f64,
     show_credits: bool,
 ) -> PhysicalSize<u32> {
-    let estimated_width = ((if show_credits { 220.0 } else { 160.0 }) * scale)
-        .round()
-        .max(1.0) as u32;
-    let estimated_height = (50.0 * scale).round().max(1.0) as u32;
+    let (base_width, base_height) = provisional_expanded_base_size(show_credits);
+    let estimated_width = (base_width * scale).round().max(1.0) as u32;
+    let estimated_height = (base_height * scale).round().max(1.0) as u32;
     PhysicalSize::new(
         estimated_width.max(current.width),
         estimated_height.max(current.height),
@@ -1350,10 +1356,9 @@ fn estimated_anchor_center(
         })
         .or_else(|| window.outer_position().ok())?;
     let scale = settings.scale_percent as f64 / 100.0 * monitor_scale;
-    let width = ((if settings.show_credits { 220.0 } else { 160.0 }) * scale)
-        .round()
-        .max(1.0) as u32;
-    let height = (50.0 * scale).round().max(1.0) as u32;
+    let (base_width, base_height) = provisional_expanded_base_size(settings.show_credits);
+    let width = (base_width * scale).round().max(1.0) as u32;
+    let height = (base_height * scale).round().max(1.0) as u32;
     let clamped = clamp_position(anchor, PhysicalSize::new(width, height), work);
     Some((
         clamped

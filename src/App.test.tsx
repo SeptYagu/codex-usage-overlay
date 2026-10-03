@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import i18n, { matchSupportedLocale } from './i18n';
-import { DEFAULT_SETTINGS, OverlaySettings, SettingsEnvelope } from './types';
+import { CodexUsage, DEFAULT_SETTINGS, OverlaySettings, SettingsEnvelope } from './types';
 
 const tauri = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -241,6 +241,70 @@ describe('settings synchronization', () => {
     await screen.findByRole('slider', { name: 'Overlay Size' });
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('is_installed_version'));
     expect(screen.queryByRole('checkbox', { name: 'Start automatically on boot' })).toBeNull();
+  });
+});
+
+describe('main usage startup', () => {
+  it('registers the usage listener before reading cache and does not auto-fetch', async () => {
+    tauri.windowLabel = 'main';
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const cached: CodexUsage = {
+      fiveHourRemainingPercent: 69,
+      fiveHourBurnRatePerHour: 16.8,
+      weekRemainingPercent: 62,
+      weekBurnRatePerHour: 0.6,
+      creditsDisplay: '12.5',
+      creditsBalance: '12.5',
+      hasCredits: true,
+      fiveHourResetsAt: 1_900_000_000,
+      weekResetsAt: 1_900_500_000,
+      fetchedAt: 1_800_000_000,
+    };
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === 'get_settings') return { revision: 0, settings: DEFAULT_SETTINGS };
+      if (command === 'get_dock_state') {
+        return { docked: false, edge: null, expanded: true, hidden: false };
+      }
+      if (command === 'get_last_usage') {
+        expect(tauri.listeners.has('usage_updated')).toBe(true);
+        return cached;
+      }
+      if (command === 'fetch_usage') throw new Error('startup must not fetch');
+      return null;
+    });
+
+    render(<App />);
+    expect(await screen.findByText('69%')).toBeTruthy();
+    expect(tauri.invoke).toHaveBeenCalledWith('get_last_usage');
+    expect(tauri.invoke).not.toHaveBeenCalledWith('fetch_usage');
+  });
+
+  it('does not let an older cache response overwrite a newer live event', async () => {
+    tauri.windowLabel = 'main';
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const cached: CodexUsage = {
+      fiveHourRemainingPercent: 69, fiveHourBurnRatePerHour: 16.8,
+      weekRemainingPercent: 62, weekBurnRatePerHour: 0.6,
+      creditsDisplay: '12.5', creditsBalance: '12.5', hasCredits: true,
+      fiveHourResetsAt: 1_900_000_000, weekResetsAt: 1_900_500_000,
+      fetchedAt: 1_800_000_000,
+    };
+    const live = { ...cached, fiveHourRemainingPercent: 68, fetchedAt: cached.fetchedAt + 1 };
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === 'get_settings') return { revision: 0, settings: DEFAULT_SETTINGS };
+      if (command === 'get_dock_state') {
+        return { docked: false, edge: null, expanded: true, hidden: false };
+      }
+      if (command === 'get_last_usage') {
+        tauri.listeners.get('usage_updated')!({ payload: live });
+        return cached;
+      }
+      return null;
+    });
+
+    render(<App />);
+    expect(await screen.findByText('68%')).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText('69%')).toBeNull());
   });
 });
 

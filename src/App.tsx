@@ -58,11 +58,27 @@ export const App: React.FC = () => {
       setSettingsLoadState('ready');
     });
 
-    // Listen to usage data from backend
-    const unlistenUsage = listen<CodexUsage>('usage_updated', (event) => {
-      setUsage(event.payload);
+    // Listen first, then hydrate from cache. Guard by fetchedAt so a
+    // cache response that started just before a live event cannot overwrite it.
+    const applyUsageIfNewer = (next: CodexUsage) => {
+      setUsage((current) => (
+        current && current.fetchedAt > next.fetchedAt ? current : next
+      ));
       setIsLoading(false);
+    };
+    const unlistenUsage = listen<CodexUsage>('usage_updated', (event) => {
+      applyUsageIfNewer(event.payload);
     });
+    if (windowLabel === 'main') {
+      void unlistenUsage.then(async () => {
+        try {
+          const cached = await invoke<CodexUsage | null>('get_last_usage');
+          if (cached) applyUsageIfNewer(cached);
+        } catch (error) {
+          console.error('Failed to get cached usage:', error);
+        }
+      });
+    }
 
     const unlistenUpdate = listen<{ version: string }>('update_available', async (event) => {
       if (windowLabel !== 'main') return;
@@ -94,9 +110,6 @@ export const App: React.FC = () => {
       });
     }
 
-    // Initial usage fetch
-    if (windowLabel === 'main') handleRefresh();
-
     return () => {
       settingsLoadToken.current++;
       unlistenSettings.then((f) => f());
@@ -105,20 +118,6 @@ export const App: React.FC = () => {
       unlistenDockState.then((f) => f());
     };
   }, [loadSettings, windowLabel]);
-
-  const handleRefresh = async () => {
-    setIsLoading(true);
-    try {
-      const data = await invoke<CodexUsage>('fetch_usage');
-      if (data) {
-        setUsage(data);
-      }
-    } catch (err) {
-      console.error('Fetch usage error:', err);
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   const applySavedSettings = (envelope: SettingsEnvelope) => {
     if (envelope.revision < settingsRevision.current) return;

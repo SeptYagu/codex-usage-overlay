@@ -63,7 +63,9 @@ html, body, #root {
 .overlay-warning { color: var(--overlay-warning); }
 .overlay-low { color: var(--overlay-low); }
 .overlay-unknown { color: var(--overlay-secondary); }
-.overlay-countdown { display: block; margin-top: 5px; font-size: 11px; font-weight: 400; line-height: 1.5; color: var(--overlay-secondary); }
+.overlay-meta-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 5px; font-size: 11px; line-height: 1.5; white-space: nowrap; }
+.overlay-countdown { color: var(--overlay-secondary); font-weight: 400; }
+.overlay-burn-rate { color: var(--overlay-secondary); font-weight: 500; opacity: .92; }
 .overlay-divider { width: 1px; height: 33px; background: var(--overlay-rule); flex: 0 0 1px; opacity: .65; }
 .overlay-stacks .overlay-reading { flex-direction: column; align-items: flex-start; gap: 5px; }
 .overlay-loading { position: absolute; top: 4px; right: 4px; width: 3px; height: 3px; border-radius: 50%; background: var(--overlay-healthy); }

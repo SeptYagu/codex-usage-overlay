@@ -1,6 +1,8 @@
 export interface CodexUsage {
   fiveHourRemainingPercent: number | null;
+  fiveHourBurnRatePerHour: number | null;
   weekRemainingPercent: number | null;
+  weekBurnRatePerHour: number | null;
   creditsDisplay: string;
   creditsBalance: string | null;
   hasCredits: boolean;

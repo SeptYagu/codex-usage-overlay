@@ -13,17 +13,60 @@ use super::finder::find_codex_executable;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaSnapshot {
+    pub used_percent: Option<f64>,
+    pub resets_at: Option<i64>,
+    pub window_duration_mins: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RawCodexUsage {
+    pub account_id: Option<String>,
+    pub five_hour: QuotaSnapshot,
+    pub weekly: QuotaSnapshot,
+    pub credits_display: String,
+    pub credits_balance: Option<String>,
+    pub has_credits: bool,
+    pub fetched_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexUsage {
     pub five_hour_remaining_percent: Option<u32>,
+    pub five_hour_burn_rate_per_hour: Option<f64>,
     pub week_remaining_percent: Option<u32>,
+    pub week_burn_rate_per_hour: Option<f64>,
     pub credits_display: String,
     pub credits_balance: Option<String>,
     pub has_credits: bool,
     pub five_hour_resets_at: Option<i64>,
     pub week_resets_at: Option<i64>,
     pub fetched_at: i64,
+}
+
+impl RawCodexUsage {
+    pub fn to_ui(&self, five_hour_burn_rate_per_hour: Option<f64>, week_burn_rate_per_hour: Option<f64>) -> CodexUsage {
+        CodexUsage {
+            five_hour_remaining_percent: remaining_percent(self.five_hour.used_percent),
+            five_hour_burn_rate_per_hour,
+            week_remaining_percent: remaining_percent(self.weekly.used_percent),
+            week_burn_rate_per_hour,
+            credits_display: self.credits_display.clone(),
+            credits_balance: self.credits_balance.clone(),
+            has_credits: self.has_credits,
+            five_hour_resets_at: self.five_hour.resets_at,
+            week_resets_at: self.weekly.resets_at,
+            fetched_at: self.fetched_at,
+        }
+    }
+}
+
+fn remaining_percent(used_percent: Option<f64>) -> Option<u32> {
+    used_percent.map(|used| (100.0 - used).clamp(0.0, 100.0).round() as u32)
 }
 
 pub struct CodexClient {
@@ -71,7 +114,7 @@ impl CodexClient {
         unreachable!("each spawn attempt returns or retries once")
     }
 
-    pub async fn fetch_usage(&mut self, timeout_duration: Duration) -> Result<CodexUsage> {
+    pub async fn fetch_usage(&mut self, timeout_duration: Duration) -> Result<RawCodexUsage> {
         let mut child = self.spawn_with_recovery(find_codex_executable, |exe| {
             Command::new(exe)
                 .arg("app-server")
@@ -136,7 +179,41 @@ impl CodexClient {
     }
 }
 
-fn parse_usage_result(result: &Value) -> Result<CodexUsage> {
+fn parse_quota(value: Option<&Value>) -> QuotaSnapshot {
+    let Some(value) = value else {
+        return QuotaSnapshot::default();
+    };
+    let used_percent = value
+        .get("usedPercent")
+        .and_then(Value::as_f64)
+        .filter(|used| used.is_finite() && (0.0..=100.0).contains(used));
+    let resets_at = value.get("resetsAt").and_then(Value::as_i64);
+    let window_duration_mins = value
+        .get("windowDurationMins")
+        .and_then(Value::as_u64)
+        .and_then(|mins| u32::try_from(mins).ok());
+    QuotaSnapshot {
+        used_percent,
+        resets_at,
+        window_duration_mins,
+    }
+}
+
+fn extract_account_id(result: &Value, bucket: &Value) -> Option<String> {
+    [
+        result.get("accountId").and_then(Value::as_str),
+        result.get("account").and_then(|a| a.get("id")).and_then(Value::as_str),
+        result.get("account").and_then(|a| a.get("accountId")).and_then(Value::as_str),
+        bucket.get("accountId").and_then(Value::as_str),
+        bucket.get("account").and_then(|a| a.get("id")).and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|value| !value.trim().is_empty())
+    .map(ToOwned::to_owned)
+}
+
+fn parse_usage_result(result: &Value) -> Result<RawCodexUsage> {
     let bucket = if let Some(by_limit) = result.get("rateLimitsByLimitId") {
         by_limit.get("codex").or_else(|| result.get("rateLimits"))
     } else {
@@ -144,18 +221,8 @@ fn parse_usage_result(result: &Value) -> Result<CodexUsage> {
     };
 
     let bucket = bucket.ok_or_else(|| anyhow!("未在返回结果中找到 rateLimits 数据"))?;
-
-    let five_hour_remaining = bucket.get("primary").and_then(|p| {
-        p.get("usedPercent")
-            .and_then(|u| u.as_f64())
-            .map(|u| (100.0 - u).clamp(0.0, 100.0).round() as u32)
-    });
-
-    let week_remaining = bucket.get("secondary").and_then(|s| {
-        s.get("usedPercent")
-            .and_then(|u| u.as_f64())
-            .map(|u| (100.0 - u).clamp(0.0, 100.0).round() as u32)
-    });
+    let five_hour = parse_quota(bucket.get("primary"));
+    let weekly = parse_quota(bucket.get("secondary"));
 
     let mut credits_display = "—".to_string();
     let mut credits_balance = None;
@@ -181,29 +248,18 @@ fn parse_usage_result(result: &Value) -> Result<CodexUsage> {
         }
     }
 
-    let five_hour_resets_at = bucket
-        .get("primary")
-        .and_then(|p| p.get("resetsAt"))
-        .and_then(|r| r.as_i64());
-
-    let week_resets_at = bucket
-        .get("secondary")
-        .and_then(|s| s.get("resetsAt"))
-        .and_then(|r| r.as_i64());
-
     let fetched_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
 
-    Ok(CodexUsage {
-        five_hour_remaining_percent: five_hour_remaining,
-        week_remaining_percent: week_remaining,
+    Ok(RawCodexUsage {
+        account_id: extract_account_id(result, bucket),
+        five_hour,
+        weekly,
         credits_display,
         credits_balance,
         has_credits,
-        five_hour_resets_at,
-        week_resets_at,
         fetched_at,
     })
 }
@@ -380,17 +436,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_usage_result_with_bucket() {
+    fn parsing_preserves_raw_precision_metadata_and_account_identity() {
         let mock_result = json!({
+            "account": { "id": "acct-123" },
             "rateLimitsByLimitId": {
                 "codex": {
                     "primary": {
-                        "usedPercent": 35.0,
-                        "resetsAt": 1790536584
+                        "usedPercent": 35.25,
+                        "resetsAt": 1790536584,
+                        "windowDurationMins": 300
                     },
                     "secondary": {
-                        "usedPercent": 80.0,
-                        "resetsAt": 1791077732
+                        "usedPercent": 80,
+                        "resetsAt": 1791077732,
+                        "windowDurationMins": 10080
                     },
                     "credits": {
                         "hasCredits": true,
@@ -402,38 +461,51 @@ mod tests {
         });
 
         let parsed = parse_usage_result(&mock_result).expect("Should parse successfully");
-        assert_eq!(parsed.five_hour_remaining_percent, Some(65));
-        assert_eq!(parsed.week_remaining_percent, Some(20));
-        assert_eq!(parsed.credits_display, "12.50");
-        assert_eq!(parsed.credits_balance, Some("12.50".to_string()));
-        assert_eq!(parsed.has_credits, true);
-        assert_eq!(parsed.five_hour_resets_at, Some(1790536584));
-        assert_eq!(parsed.week_resets_at, Some(1791077732));
+        assert_eq!(parsed.account_id.as_deref(), Some("acct-123"));
+        assert_eq!(parsed.five_hour.used_percent, Some(35.25));
+        assert_eq!(parsed.weekly.used_percent, Some(80.0));
+        assert_eq!(parsed.five_hour.window_duration_mins, Some(300));
+        assert_eq!(parsed.weekly.window_duration_mins, Some(10080));
+        assert_eq!(parsed.five_hour.resets_at, Some(1790536584));
+        assert_eq!(parsed.weekly.resets_at, Some(1791077732));
+        let ui = parsed.to_ui(None, None);
+        assert_eq!(ui.five_hour_remaining_percent, Some(65));
+        assert_eq!(ui.week_remaining_percent, Some(20));
+        assert_eq!(ui.credits_display, "12.50");
+        assert_eq!(ui.credits_balance, Some("12.50".to_string()));
     }
 
     #[test]
-    fn test_parse_usage_result_unlimited_credits() {
+    fn invalid_quota_values_are_rejected_independently_and_credits_survive() {
         let mock_result = json!({
             "rateLimits": {
-                "primary": {
-                    "usedPercent": 0.0,
-                    "resetsAt": 1790536584
-                },
-                "secondary": {
-                    "usedPercent": 100.0,
-                    "resetsAt": 1791077732
-                },
-                "credits": {
-                    "hasCredits": true,
-                    "unlimited": true
-                }
+                "primary": { "usedPercent": 101.0, "resetsAt": 1790536584 },
+                "secondary": { "usedPercent": -1.0, "resetsAt": 1791077732 },
+                "credits": { "hasCredits": true, "unlimited": true }
             }
         });
 
         let parsed = parse_usage_result(&mock_result).expect("Should parse successfully");
-        assert_eq!(parsed.five_hour_remaining_percent, Some(100));
-        assert_eq!(parsed.week_remaining_percent, Some(0));
+        assert_eq!(parsed.five_hour.used_percent, None);
+        assert_eq!(parsed.weekly.used_percent, None);
         assert_eq!(parsed.credits_display, "∞");
-        assert_eq!(parsed.has_credits, true);
+        assert!(parsed.has_credits);
+        let ui = parsed.to_ui(None, None);
+        assert_eq!(ui.five_hour_remaining_percent, None);
+        assert_eq!(ui.week_remaining_percent, None);
+    }
+
+    #[test]
+    fn missing_quota_and_account_fields_are_safe() {
+        let parsed = parse_usage_result(&json!({
+            "rateLimits": {
+                "credits": { "hasCredits": false, "balance": "0" }
+            }
+        }))
+        .unwrap();
+        assert_eq!(parsed.account_id, None);
+        assert_eq!(parsed.five_hour, QuotaSnapshot::default());
+        assert_eq!(parsed.weekly, QuotaSnapshot::default());
+        assert_eq!(parsed.credits_display, "0");
     }
 }

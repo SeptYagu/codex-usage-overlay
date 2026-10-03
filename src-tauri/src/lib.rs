@@ -13,7 +13,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Listener, Manager};
 use tokio::sync::Mutex;
 
-use codex::CodexClient;
+use codex::{BurnRateTracker, CodexClient};
 use commands::AppState;
 use config::ConfigManager;
 use tray::setup_tray;
@@ -25,6 +25,8 @@ pub fn run() {
 
     let app_state = Arc::new(AppState {
         client: Mutex::new(CodexClient::new()),
+        refresh_guard: Mutex::new(()),
+        burn_rate: Mutex::new(BurnRateTracker::load(&config_manager)),
         settings_patch: Mutex::new(()),
         config_manager: config_manager.clone(),
         dock: dock::DockManager::new(config_manager.clone()),
@@ -129,6 +131,7 @@ pub fn run() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::fetch_usage,
+            commands::get_last_usage,
             commands::get_settings,
             commands::patch_settings,
             commands::open_settings_window,
@@ -452,21 +455,7 @@ pub fn apply_tray_menu_focus_event<W: TrayMenuFocusWindowOps>(
 }
 
 pub(crate) async fn fetch_usage_background(handle: &AppHandle, state: &Arc<AppState>) {
-    let mut client = state.client.lock().await;
-    state.config_manager.write_status("reading", None);
-
-    match client.fetch_usage(Duration::from_secs(20)).await {
-        Ok(usage) => {
-            state.config_manager.write_status("ok", None);
-            notify::process_usage_success(handle, state, &usage).await;
-        }
-        Err(e) => {
-            let err_msg = e.to_string();
-            state.config_manager.write_status("error", Some(&err_msg));
-            tray::update_tray_tooltip(handle, "Codex 用量读取失败");
-            tray::update_tray_icon(handle, None, None);
-        }
-    }
+    let _ = commands::refresh_usage(handle, state).await;
 }
 
 #[cfg(test)]
