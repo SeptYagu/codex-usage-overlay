@@ -115,6 +115,7 @@ html, body, #root {
   width: 24px;
   height: 72px;
   align-items: stretch;
+  justify-content: center;
   gap: 6px;
   transform: translate(var(--pill-shift-x), var(--pill-shift-y));
 }

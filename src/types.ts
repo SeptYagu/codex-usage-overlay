@@ -16,6 +16,8 @@ export interface OverlaySettings {
   scalePercent: number;
   backgroundTransparencyPercent: number;
   showCredits: boolean;
+  showFiveHourQuota: boolean;
+  showBurnRate: boolean;
   refreshIntervalSeconds: number;
   language: string;
   autoStart: boolean;
@@ -52,6 +54,8 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   scalePercent: 175,
   backgroundTransparencyPercent: 23,
   showCredits: true,
+  showFiveHourQuota: true,
+  showBurnRate: true,
   refreshIntervalSeconds: 60,
   language: 'auto',
   autoStart: true,

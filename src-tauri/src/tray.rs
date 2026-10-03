@@ -7,6 +7,93 @@ use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Position, Size,
     WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry,
 };
+use crate::codex::CodexUsage;
+use crate::config::OverlaySettings;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TrayReadStatus {
+    #[default]
+    Pending,
+    Success,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayQuotaMode {
+    FiveHourAndWeekly,
+    WeeklyOnly,
+}
+
+pub struct TrayPresentation {
+    pub icon: tauri::image::Image<'static>,
+    pub tooltip: String,
+}
+
+/// The same effect boundary is used by startup and live updates. Offline tests
+/// replace the native effects without starting an event loop or fetching usage.
+pub trait TrayPresentationSink {
+    fn present(&self, presentation: TrayPresentation);
+    fn app_handle(&self) -> Option<&AppHandle>;
+}
+
+impl TrayPresentationSink for AppHandle {
+    fn present(&self, presentation: TrayPresentation) {
+        if let Some(tray) = self.tray_by_id(TRAY_ID) {
+            let _ = tray.set_icon(Some(presentation.icon));
+            update_tray_tooltip(self, &presentation.tooltip);
+        }
+    }
+
+    fn app_handle(&self) -> Option<&AppHandle> { Some(self) }
+}
+
+pub fn tray_presentation(
+    settings: &OverlaySettings,
+    usage: Option<&CodexUsage>,
+    status: TrayReadStatus,
+) -> TrayPresentation {
+    let mode = if settings.show_five_hour_quota {
+        TrayQuotaMode::FiveHourAndWeekly
+    } else {
+        TrayQuotaMode::WeeklyOnly
+    };
+    let visible_usage = if status == TrayReadStatus::Success { usage } else { None };
+    let tooltip = match status {
+        TrayReadStatus::Pending => "Codex Usage Overlay".to_string(),
+        TrayReadStatus::Error => match crate::commands::resolve_locale(&settings.language) {
+            "zh-CN" => "Codex 用量读取失败",
+            "zh-Hant" => "Codex 用量讀取失敗",
+            _ => "Failed to read Codex usage",
+        }.to_string(),
+        TrayReadStatus::Success => {
+            let percent = |p: Option<u32>| p.map(|p| p.to_string()).unwrap_or_else(|| "--".into());
+            let mut parts = Vec::new();
+            if settings.show_five_hour_quota {
+                parts.push(format!("5H {}%", percent(visible_usage.and_then(|u| u.five_hour_remaining_percent))));
+            }
+            parts.push(format!("WK {}%", percent(visible_usage.and_then(|u| u.week_remaining_percent))));
+            if settings.show_credits {
+                parts.push(format!("CR {}", visible_usage.map(|u| u.credits_display.as_str()).unwrap_or("—")));
+            }
+            parts.join(" | ")
+        }
+    };
+    TrayPresentation {
+        icon: generate_quota_icon(mode,
+            visible_usage.and_then(|u| u.five_hour_remaining_percent).map(|p| p as f64),
+            visible_usage.and_then(|u| u.week_remaining_percent).map(|p| p as f64)),
+        tooltip,
+    }
+}
+
+/// Lock settings first in every presentation entry point so refresh/settings
+/// races cannot repaint a saved new preference with an older snapshot.
+pub async fn repaint_tray<S: TrayPresentationSink>(sink: &S, state: &crate::commands::AppState) {
+    let settings = state.settings.lock().await;
+    let status = state.tray_read_status.lock().await;
+    let usage = state.last_usage.lock().await;
+    sink.present(tray_presentation(&settings, usage.as_ref(), *status));
+}
 
 pub const TRAY_ID: &str = "main-tray";
 /// Label of the tray popup webview window.
@@ -195,35 +282,47 @@ impl TrayMenuFocusState {
 }
 
 
-pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon<Wry>, tauri::Error> {
-    // Initial dual-ring gauge icon
-    let initial_icon = generate_dual_ring_icon(None, None);
+pub trait TrayStartupSink {
+    type Output;
+    fn create_tray(&self, presentation: TrayPresentation) -> Self::Output;
+}
 
-    let tray = TrayIconBuilder::with_id(TRAY_ID)
-        .tooltip("Codex Usage Overlay")
-        .icon(initial_icon)
-        .show_menu_on_left_click(false)
-        .on_tray_icon_event(|tray, event| {
-            let app = tray.app_handle();
-            match event {
-                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Down, .. } => {
-                    handle_tray_left_event(app, TrayLeftEvent::Down);
-                }
-                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => {
-                    handle_tray_left_event(app, TrayLeftEvent::Up);
-                }
-                TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
-                    handle_tray_left_event(app, TrayLeftEvent::DoubleClick);
-                }
-                TrayIconEvent::Click { button: MouseButton::Right, button_state: MouseButtonState::Up, .. } => {
-                    handle_tray_click(app);
-                }
-                _ => {}
-            }
-        })
-        .build(app)?;
+pub fn setup_tray<S: TrayStartupSink>(sink: &S, settings: &OverlaySettings) -> S::Output {
+    sink.create_tray(tray_presentation(settings, None, TrayReadStatus::Pending))
+}
 
-    Ok(tray)
+impl TrayStartupSink for AppHandle {
+    type Output = Result<TrayIcon<Wry>, tauri::Error>;
+
+    fn create_tray(&self, presentation: TrayPresentation) -> Self::Output {
+        let app = self;
+
+        let tray = TrayIconBuilder::with_id(TRAY_ID)
+            .tooltip(presentation.tooltip)
+            .icon(presentation.icon)
+            .show_menu_on_left_click(false)
+            .on_tray_icon_event(|tray, event| {
+                let app = tray.app_handle();
+                match event {
+                    TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Down, .. } => {
+                        handle_tray_left_event(app, TrayLeftEvent::Down);
+                    }
+                    TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => {
+                        handle_tray_left_event(app, TrayLeftEvent::Up);
+                    }
+                    TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
+                        handle_tray_left_event(app, TrayLeftEvent::DoubleClick);
+                    }
+                    TrayIconEvent::Click { button: MouseButton::Right, button_state: MouseButtonState::Up, .. } => {
+                        handle_tray_click(app);
+                    }
+                    _ => {}
+                }
+            })
+            .build(app)?;
+
+        Ok(tray)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -885,23 +984,13 @@ pub fn plan_settings_geometry(
 
 pub fn update_tray_tooltip(app: &AppHandle, text: &str) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let truncated = if text.len() > 63 {
-            &text[..63]
-        } else {
-            text
-        };
+        let truncated: String = text.chars().take(63).collect();
         let _ = tray.set_tooltip(Some(truncated));
     }
 }
 
-pub fn update_tray_icon(app: &AppHandle, five_hour_pct: Option<f64>, week_pct: Option<f64>) {
-    if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let icon = generate_dual_ring_icon(five_hour_pct, week_pct);
-        let _ = tray.set_icon(Some(icon));
-    }
-}
-
-pub fn generate_dual_ring_icon(
+pub fn generate_quota_icon(
+    mode: TrayQuotaMode,
     five_hour_pct: Option<f64>,
     week_pct: Option<f64>,
 ) -> tauri::image::Image<'static> {
@@ -918,6 +1007,7 @@ pub fn generate_dual_ring_icon(
                     let sample = sample_pixel(
                         x as f64 + sx,
                         y as f64 + sy,
+                        mode,
                         five_hour_pct,
                         week_pct,
                     );
@@ -940,6 +1030,7 @@ pub fn generate_dual_ring_icon(
 fn sample_pixel(
     x: f64,
     y: f64,
+    mode: TrayQuotaMode,
     five_hour_pct: Option<f64>,
     week_pct: Option<f64>,
 ) -> [f64; 4] {
@@ -978,15 +1069,17 @@ fn sample_pixel(
         color = [50.0, 58.0, 72.0, 255.0 * plate_alpha];
     }
 
+    // Weekly-only promotes Weekly to the large primary track.
+    let primary_pct = if mode == TrayQuotaMode::WeeklyOnly { week_pct } else { five_hour_pct };
     // Outer ring: radius 12.0, width 2.4 (from 10.8 to 13.2)
     if r >= 10.8 && r <= 13.2 {
-        let max_angle = match five_hour_pct {
+        let max_angle = match primary_pct {
             Some(p) => 2.0 * std::f64::consts::PI * (p.clamp(0.0, 100.0) / 100.0),
             None => 0.0,
         };
-        let is_active = five_hour_pct.is_some() && cw_angle <= max_angle;
+        let is_active = primary_pct.is_some() && cw_angle <= max_angle;
         let c = if is_active {
-            get_color_for_percent(five_hour_pct)
+            get_color_for_percent(primary_pct)
         } else {
             [48.0, 54.0, 68.0, 220.0] // Inactive / depleted track
         };
@@ -994,7 +1087,7 @@ fn sample_pixel(
     }
 
     // Inner ring: radius 7.5, width 2.2 (from 6.4 to 8.6)
-    if r >= 6.4 && r <= 8.6 {
+    if mode == TrayQuotaMode::FiveHourAndWeekly && r >= 6.4 && r <= 8.6 {
         let max_angle = match week_pct {
             Some(p) => 2.0 * std::f64::consts::PI * (p.clamp(0.0, 100.0) / 100.0),
             None => 0.0,
@@ -1042,6 +1135,150 @@ fn blend_over(dst: [f64; 4], src: [f64; 4]) -> [f64; 4] {
 mod tests {
     use super::*;
     use crate::config::{ConfigManager, SettingsWindowGeometry};
+
+    #[derive(Default)]
+    struct OfflineTray {
+        frames: StdMutex<Vec<TrayPresentation>>,
+        next_usage: StdMutex<Option<Result<crate::codex::RawCodexUsage, String>>>,
+        reads: AtomicU64,
+    }
+
+    impl TrayPresentationSink for OfflineTray {
+        fn present(&self, presentation: TrayPresentation) {
+            self.frames.lock().unwrap().push(presentation);
+        }
+        fn app_handle(&self) -> Option<&AppHandle> { None }
+    }
+
+    impl crate::commands::UsageSource for OfflineTray {
+        async fn read_usage(&self, _: &crate::commands::AppState) -> Result<crate::codex::RawCodexUsage, String> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.next_usage.lock().unwrap().take().expect("display changes must not fetch usage")
+        }
+    }
+
+    impl TrayStartupSink for OfflineTray {
+        type Output = ();
+        fn create_tray(&self, presentation: TrayPresentation) { self.present(presentation); }
+    }
+
+    impl OfflineTray {
+        fn assert_frame(&self, dual: bool, five: Option<f64>, week: Option<f64>, tooltip: &str) {
+            let mut frames = self.frames.lock().unwrap();
+            assert_eq!(frames.len(), 1, "each production entry must repaint exactly once");
+            let frame = frames.pop().unwrap();
+            assert_eq!(frame.tooltip, tooltip);
+            let mode = if dual { TrayQuotaMode::FiveHourAndWeekly } else { TrayQuotaMode::WeeklyOnly };
+            assert_eq!(frame.icon.rgba(), generate_quota_icon(mode, five, week).rgba());
+        }
+    }
+
+    #[test]
+    fn weekly_only_pixels_have_large_weekly_track_and_no_inner_track() {
+        // Coordinate probes avoid relying only on renderer-to-renderer equality.
+        for percent in [None, Some(0.0), Some(19.0), Some(20.0), Some(50.0), Some(100.0)] {
+            let icon = generate_quota_icon(TrayQuotaMode::WeeklyOnly, Some(100.0), percent);
+            let pixel = |x: usize, y: usize| &icon.rgba()[(y * 32 + x) * 4..(y * 32 + x) * 4 + 4];
+            assert_eq!(pixel(23, 15), &[27, 30, 38, 255], "former inner ring must be plate");
+            let outer = pixel(16, 3);
+            let expected = if percent.is_some_and(|p| p > 0.0) {
+                get_color_for_percent(percent).map(|v| v as u8)
+            } else {
+                blend_over([27.0, 30.0, 38.0, 255.0], [48.0, 54.0, 68.0, 220.0]).map(|v| v.round() as u8)
+            };
+            assert_eq!(outer, &expected);
+        }
+        let dual = generate_quota_icon(TrayQuotaMode::FiveHourAndWeekly, None, None);
+        assert_ne!(&dual.rgba()[(15 * 32 + 23) * 4..(15 * 32 + 23) * 4 + 4], &[27, 30, 38, 255]);
+    }
+
+    #[test]
+    fn production_display_lifecycle_repaints_startup_success_failure_and_settings_without_fetch() {
+        tauri::async_runtime::block_on(async {
+            for initial_dual in [false, true] {
+                let dir = std::env::temp_dir().join(format!("codex-display-lifecycle-{}-{}", std::process::id(), initial_dual));
+                let config = ConfigManager::with_runtime_dir(dir.clone());
+                let initial = OverlaySettings { show_five_hour_quota: initial_dual, language: "en-US".into(), ..Default::default() };
+                config.save_settings_checked(&initial).unwrap();
+                let state = Arc::new(crate::commands::AppState::for_test(config.clone()));
+                let sink = OfflineTray::default();
+                // This is the actual startup entry, including persisted false.
+                setup_tray(&sink, &config.load_settings());
+                sink.assert_frame(initial_dual, None, None, "Codex Usage Overlay");
+                for dual in [!initial_dual, initial_dual] {
+                    crate::commands::apply_settings_patch(&sink, &state, serde_json::json!({"showFiveHourQuota": dual}), false).await.unwrap();
+                    sink.assert_frame(dual, None, None, "Codex Usage Overlay");
+                }
+                // First failure and toggles without cached usage.
+                *sink.next_usage.lock().unwrap() = Some(Err("offline read failure".into()));
+                assert!(crate::commands::refresh_usage(&sink, &state).await.is_err());
+                sink.assert_frame(initial_dual, None, None, "Failed to read Codex usage");
+                crate::commands::apply_settings_patch(&sink, &state, serde_json::json!({"showFiveHourQuota": !initial_dual, "language": "zh-CN"}), false).await.unwrap();
+                sink.assert_frame(!initial_dual, None, None, "Codex 用量读取失败");
+                assert!(state.last_usage.lock().await.is_none());
+
+                let raw = crate::codex::RawCodexUsage {
+                    account_id: Some("offline-test-account".into()),
+                    five_hour: crate::codex::QuotaSnapshot { used_percent: Some(20.0), resets_at: Some(50000), window_duration_mins: Some(300) },
+                    weekly: crate::codex::QuotaSnapshot { used_percent: Some(70.0), resets_at: Some(90000), window_duration_mins: Some(10080) },
+                    credits_display: "12.50".into(), credits_balance: Some("12.50".into()), has_credits: true, fetched_at: 10000,
+                };
+                // Warm real crossing history while 5H presentation is hidden
+                // in one branch. Acceptance/persistence must remain independent.
+                let mut usage = raw.to_ui(None, None);
+                for step in 0..=3 {
+                    let mut sample = raw.clone();
+                    sample.fetched_at = 9820 + step * 60;
+                    sample.five_hour.used_percent = Some(17.0 + step as f64);
+                    sample.weekly.used_percent = Some(67.0 + step as f64);
+                    *sink.next_usage.lock().unwrap() = Some(Ok(sample));
+                    usage = crate::commands::refresh_usage(&sink, &state).await.unwrap();
+                    let five = (83 - step) as f64;
+                    let week = (33 - step) as f64;
+                    let text = format!("{}WK {}% | CR 12.50", if !initial_dual { format!("5H {}% | ", five) } else { String::new() }, week);
+                    sink.assert_frame(!initial_dual, Some(five), Some(week), &text);
+                }
+                assert!(usage.five_hour_burn_rate_per_hour.is_some_and(|r| r > 0.0));
+                assert!(usage.week_burn_rate_per_hour.is_some_and(|r| r > 0.0));
+                let history_before = std::fs::read(config.burn_rate_state_path()).unwrap();
+                let reads_before = sink.reads.load(Ordering::SeqCst);
+                for dual in [true, false] {
+                    for credits in [true, false] {
+                        for burn in [true, false] {
+                            let before = std::fs::read(config.burn_rate_state_path()).unwrap();
+                            crate::commands::apply_settings_patch(&sink, &state, serde_json::json!({"showFiveHourQuota": dual, "showBurnRate": burn, "showCredits": credits}), false).await.unwrap();
+                            let text = format!("{}WK 30%{}", if dual { "5H 80% | " } else { "" }, if credits { " | CR 12.50" } else { "" });
+                            sink.assert_frame(dual, Some(80.0), Some(30.0), &text);
+                            assert_eq!(*state.last_usage.lock().await, Some(usage.clone()));
+                            state.burn_rate.lock().await.save(&config).unwrap();
+                            assert_eq!(std::fs::read(config.burn_rate_state_path()).unwrap(), before);
+                            assert_eq!(sink.reads.load(Ordering::SeqCst), reads_before);
+                            let saved = config.load_settings();
+                            assert_eq!(saved.show_five_hour_quota, dual);
+                            assert_eq!(saved.show_burn_rate, burn);
+                            assert!(saved.five_hour_reset_notification);
+                            assert_eq!(saved.refresh_interval_seconds, 60);
+                        }
+                    }
+                }
+                // Failure after success must keep cache but use unavailable tracks.
+                *sink.next_usage.lock().unwrap() = Some(Err("offline read failure".into()));
+                assert!(crate::commands::refresh_usage(&sink, &state).await.is_err());
+                sink.assert_frame(false, None, None, "Codex 用量读取失败");
+                for dual in [true, false] {
+                    crate::commands::apply_settings_patch(&sink, &state, serde_json::json!({"showFiveHourQuota": dual, "language": "zh-Hant"}), false).await.unwrap();
+                    sink.assert_frame(dual, None, None, "Codex 用量讀取失敗");
+                    assert_eq!(*state.last_usage.lock().await, Some(usage.clone()));
+                }
+                let missing = CodexUsage { week_remaining_percent: None, ..usage };
+                crate::notify::process_usage_success(&sink, &state, &missing).await;
+                sink.assert_frame(false, Some(80.0), None, "WK --%");
+                state.burn_rate.lock().await.save(&config).unwrap();
+                assert_eq!(std::fs::read(config.burn_rate_state_path()).unwrap(), history_before);
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        });
+    }
 
     #[test]
     fn left_single_toggles_immediately_on_release() {

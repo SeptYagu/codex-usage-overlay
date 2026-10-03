@@ -189,3 +189,24 @@ describe('percentage grid interaction', () => {
     expect(onPatchSettings.mock.calls[0][0]).toEqual({ showPercentageGrid: false });
   });
 });
+
+
+it.each([
+  ['en-US', 'Show 5-hour quota', 'Show Burn Rate (%/h)'],
+  ['zh-CN', '显示 5 小时额度', '显示消耗速度（%/h）'],
+  ['zh-Hant', '顯示 5 小時額度', '顯示消耗速度（%/h）'],
+])('sends independent display patches in %s', async (language, fiveLabel, rateLabel) => {
+  await i18n.changeLanguage(language);
+  const { left, right, onPatchSettings, rerender } = await renderSettings();
+  const five = within(left).getByRole('checkbox', { name: fiveLabel }) as HTMLInputElement;
+  const rate = within(left).getByRole('checkbox', { name: rateLabel }) as HTMLInputElement;
+  expect(five.checked).toBe(true);
+  expect(rate.checked).toBe(true);
+  fireEvent.click(five);
+  expect(onPatchSettings).toHaveBeenLastCalledWith({ showFiveHourQuota: false }, false);
+  rerender(<SettingsView settings={{ ...DEFAULT_SETTINGS, showFiveHourQuota: false }} onPatchSettings={onPatchSettings} />);
+  expect(rate.disabled).toBe(false);
+  fireEvent.click(rate);
+  expect(onPatchSettings).toHaveBeenLastCalledWith({ showBurnRate: false }, false);
+  expect(within(right).getAllByRole('checkbox').every((box) => (box as HTMLInputElement).disabled === false)).toBe(true);
+});

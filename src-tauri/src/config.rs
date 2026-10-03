@@ -31,6 +31,10 @@ pub struct OverlaySettings {
     pub background_transparency_percent: u32,
     #[serde(default = "default_true")]
     pub show_credits: bool,
+    #[serde(default = "default_true")]
+    pub show_five_hour_quota: bool,
+    #[serde(default = "default_true")]
+    pub show_burn_rate: bool,
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_seconds: u32,
     #[serde(default = "default_language")]
@@ -76,6 +80,8 @@ impl Default for OverlaySettings {
             scale_percent: default_scale(),
             background_transparency_percent: default_transparency(),
             show_credits: default_true(),
+            show_five_hour_quota: default_true(),
+            show_burn_rate: default_true(),
             refresh_interval_seconds: default_refresh_interval(),
             language: default_language(),
             auto_start: default_true(),
@@ -319,6 +325,10 @@ mod tests {
         let settings: OverlaySettings = serde_json::from_value(legacy_settings()).unwrap();
         assert_eq!(settings.overlay_layout, OverlayLayout::Grouped);
         assert_preferences(&settings);
+        assert!(settings.show_five_hour_quota);
+        assert!(settings.show_burn_rate);
+        assert!(OverlaySettings::default().show_five_hour_quota);
+        assert!(OverlaySettings::default().show_burn_rate);
         assert_eq!(OverlaySettings::default().overlay_layout, OverlayLayout::Grouped);
         assert!(settings.five_hour_reset_notification);
         assert!(settings.weekly_reset_notification);

@@ -42,7 +42,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     onPatchSettings({ [key]: value }, key === 'scalePercent' || key === 'backgroundTransparencyPercent');
   };
 
-  const toggleRow = 'flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60 hover:bg-slate-200/60 dark:hover:bg-slate-800 cursor-pointer transition-colors';
+  const toggleRow = 'flex items-center justify-between p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800/60 hover:bg-slate-200/60 dark:hover:bg-slate-800 cursor-pointer transition-colors';
   const checkbox = 'w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 accent-cyan-500 cursor-pointer';
 
   return (
@@ -58,7 +58,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {/* Two columns */}
       <div className="grid flex-1 min-h-0 grid-cols-2 gap-5 pt-4">
         {/* Left column: overlay appearance, size and interaction */}
-        <section aria-label={t('windowSettings')} className="min-h-0 space-y-2.5 overflow-y-auto pr-1">
+        <section aria-label={t('windowSettings')} className="min-h-0 space-y-1.5 overflow-y-auto pr-1">
           <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
             <label htmlFor="overlay-layout" className="text-sm font-medium">{t('overlayLayout')}</label>
             <select
@@ -123,11 +123,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
 
           <label className={toggleRow}>
+            <span className="text-sm font-medium">{t('showFiveHourQuota')}</span>
+            <input
+              type="checkbox"
+              checked={settings.showFiveHourQuota}
+              onChange={(e) => updateField('showFiveHourQuota', e.target.checked)}
+              className={checkbox}
+            />
+          </label>
+
+          <label className={toggleRow}>
             <span className="text-sm font-medium">{t('showCredits')}</span>
             <input
               type="checkbox"
               checked={settings.showCredits}
               onChange={(e) => updateField('showCredits', e.target.checked)}
+              className={checkbox}
+            />
+          </label>
+
+          <label className={toggleRow}>
+            <span className="text-sm font-medium">{t('showBurnRate')}</span>
+            <input
+              type="checkbox"
+              checked={settings.showBurnRate}
+              onChange={(e) => updateField('showBurnRate', e.target.checked)}
               className={checkbox}
             />
           </label>

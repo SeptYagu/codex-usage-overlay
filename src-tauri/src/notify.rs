@@ -8,7 +8,7 @@ use tauri::{async_runtime::JoinHandle, AppHandle, Emitter};
 use crate::codex::CodexUsage;
 use crate::commands::AppState;
 use crate::config::{ConfigManager, SoundMode};
-use crate::tray::{update_tray_icon, update_tray_tooltip};
+use crate::tray::{TrayPresentationSink, TrayReadStatus};
 
 const POST_RESET_GRACE_SECS: i64 = 30;
 
@@ -141,60 +141,48 @@ fn advance_cycle(
     }
 }
 
-pub async fn process_usage_success(app: &AppHandle, state: &Arc<AppState>, usage: &CodexUsage) {
-    *state.last_usage.lock().await = Some(usage.clone());
-    let settings = state.settings.lock().await.clone();
-    let five = usage
-        .five_hour_remaining_percent
-        .map(|percent| percent.to_string())
-        .unwrap_or_else(|| "--".to_string());
-    let week = usage
-        .week_remaining_percent
-        .map(|percent| percent.to_string())
-        .unwrap_or_else(|| "--".to_string());
-    let tooltip = if settings.show_credits {
-        format!("5H {five}% | WK {week}% | CR {}", usage.credits_display)
-    } else {
-        format!("5H {five}% | WK {week}%")
+pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Arc<AppState>, usage: &CodexUsage) {
+    let settings = {
+        let settings = state.settings.lock().await;
+        let mut status = state.tray_read_status.lock().await;
+        let mut cached = state.last_usage.lock().await;
+        *cached = Some(usage.clone());
+        *status = TrayReadStatus::Success;
+        sink.present(crate::tray::tray_presentation(&settings, cached.as_ref(), *status));
+        settings.clone()
     };
-    update_tray_tooltip(app, &tooltip);
-    update_tray_icon(
-        app,
-        usage
-            .five_hour_remaining_percent
-            .map(|percent| percent as f64),
-        usage.week_remaining_percent.map(|percent| percent as f64),
-    );
-    let _ = app.emit("usage_updated", usage);
-    crate::dock::keep_docked_in_work_area(app, state).await;
+    if let Some(app) = sink.app_handle() {
+        let _ = app.emit("usage_updated", usage);
+        crate::dock::keep_docked_in_work_area(app, state).await;
 
-    if let Err(error) = maybe_notify_cycle(
-        app,
-        state,
-        QuotaKind::FiveHour,
-        usage.five_hour_resets_at,
-        settings.five_hour_reset_notification,
-        settings.five_hour_sound_mode,
-        settings.five_hour_sound_path.clone(),
-        &settings.language,
-    )
-    .await
-    {
-        record_notify_error(app, state, QuotaKind::FiveHour, error).await;
-    }
-    if let Err(error) = maybe_notify_cycle(
-        app,
-        state,
-        QuotaKind::Week,
-        usage.week_resets_at,
-        settings.weekly_reset_notification,
-        settings.weekly_sound_mode,
-        settings.weekly_sound_path.clone(),
-        &settings.language,
-    )
-    .await
-    {
-        record_notify_error(app, state, QuotaKind::Week, error).await;
+        if let Err(error) = maybe_notify_cycle(
+            app,
+            state,
+            QuotaKind::FiveHour,
+            usage.five_hour_resets_at,
+            settings.five_hour_reset_notification,
+            settings.five_hour_sound_mode,
+            settings.five_hour_sound_path.clone(),
+            &settings.language,
+        )
+        .await
+        {
+            record_notify_error(app, state, QuotaKind::FiveHour, error).await;
+        }
+        if let Err(error) = maybe_notify_cycle(
+            app,
+            state,
+            QuotaKind::Week,
+            usage.week_resets_at,
+            settings.weekly_reset_notification,
+            settings.weekly_sound_mode,
+            settings.weekly_sound_path.clone(),
+            &settings.language,
+        )
+        .await
+        {
+            record_notify_error(app, state, QuotaKind::Week, error).await;
+        }
     }
 }
 

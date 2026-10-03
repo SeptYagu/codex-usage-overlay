@@ -137,7 +137,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
       lastSizeRef.current = { width: 0, height: 0 };
     }
     void fitCapsuleSize();
-  }, [scale, layout, settings.showCredits, settings.language, usage, fitCapsuleSize, dprComp, dockState, sizeInvalidation]);
+  }, [scale, layout, settings.showCredits, settings.showFiveHourQuota, settings.showBurnRate, settings.language, usage, fitCapsuleSize, dprComp, dockState, sizeInvalidation]);
 
   useEffect(() => {
     const el = rootRef.current;
@@ -177,7 +177,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
     if (dockState?.docked) void invoke('dock_mouse_leave').catch((err) => console.error(err));
   };
 
-  const quotas = [
+  const visibleQuotas = [
     { key: 'five', label: layout === 'stacks' ? t('fiveHourLabel') : '5H',
       percent: usage?.fiveHourRemainingPercent,
       countdown: formatResetCountdown(usage?.fiveHourResetsAt),
@@ -186,7 +186,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
       percent: usage?.weekRemainingPercent,
       countdown: formatResetCountdown(usage?.weekResetsAt, true),
       burnRate: formatBurnRate(usage?.weekBurnRatePerHour) },
-  ];
+  ].filter((quota) => quota.key !== 'five' || settings.showFiveHourQuota);
 
   if (collapsed) {
     const edge = dockState?.edge ?? 'left';
@@ -197,7 +197,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
           className="overlay-surface overlay-pill-host"
           data-dock-edge={edge}
           role="group"
-          aria-label={`${t('fiveHourLabel')} and ${t('weeklyLabel')}`}
+          aria-label={visibleQuotas.map((quota) => quota.key === 'five' ? t('fiveHourLabel') : t('weeklyLabel')).join(' / ')}
           onMouseEnter={handleMouseEnter}
           onMouseLeave={handleMouseLeave}
           onContextMenu={handleContextMenu}
@@ -207,7 +207,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
           } as React.CSSProperties}
         >
           <div className={`overlay-pill-bars ${edge === 'top' || edge === 'bottom' ? 'overlay-pill-rotated' : ''}`}>
-            {quotas.map((quota) => {
+            {visibleQuotas.map((quota) => {
               const percent = quota.percent === null || quota.percent === undefined
                 ? null : Math.max(0, Math.min(100, quota.percent));
               return (
@@ -262,7 +262,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
         } as React.CSSProperties}
         className={`overlay-surface overlay-capsule overlay-${layout}`}
       >
-        {quotas.map((quota, index) => (
+        {visibleQuotas.map((quota, index) => (
           <React.Fragment key={quota.key}>
             {index > 0 && layout === 'grouped' && <span aria-hidden="true" className="overlay-divider" />}
             <div className="overlay-quota" role="group" aria-label={quota.key === 'five' ? t('fiveHourLabel') : t('weeklyLabel')}>
@@ -274,7 +274,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
               </div>
               <div className="overlay-meta-row">
                 <span className="overlay-countdown">{quota.countdown}</span>
-                <span className="overlay-burn-rate">{quota.burnRate}</span>
+                {settings.showBurnRate && <span className="overlay-burn-rate">{quota.burnRate}</span>}
               </div>
             </div>
           </React.Fragment>

@@ -8,10 +8,10 @@ use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
-use crate::codex::{BurnRateTracker, CodexClient, CodexUsage};
+use crate::codex::{BurnRateTracker, CodexClient, CodexUsage, RawCodexUsage};
 use crate::config::{ConfigManager, OverlaySettings};
 use crate::notify::{PendingResetFetches, ResetStateFile};
-use crate::tray::{open_settings_window as show_settings_win, update_tray_icon, update_tray_tooltip};
+use crate::tray::{open_settings_window as show_settings_win, TrayPresentationSink, TrayReadStatus};
 
 pub struct AppState {
     pub client: Mutex<CodexClient>,
@@ -21,6 +21,7 @@ pub struct AppState {
     pub config_manager: ConfigManager,
     pub dock: crate::dock::DockManager,
     pub last_usage: Mutex<Option<CodexUsage>>,
+    pub tray_read_status: Mutex<TrayReadStatus>,
     pub settings: Mutex<OverlaySettings>,
     pub settings_revision: AtomicU64,
     /// Last settings-window geometry observed while the window was on screen and
@@ -63,6 +64,7 @@ impl AppState {
             config_manager: config_manager.clone(),
             dock: crate::dock::DockManager::new(config_manager.clone()),
             last_usage: Mutex::new(None),
+            tray_read_status: Mutex::new(TrayReadStatus::Pending),
             settings: Mutex::new(settings),
             settings_revision: AtomicU64::new(0),
             last_valid_settings_geometry: StdMutex::new(None),
@@ -132,7 +134,20 @@ pub fn resolve_locale(language_setting: &str) -> &'static str {
     }
 }
 
-pub(crate) async fn refresh_usage(app: &AppHandle, state: &Arc<AppState>) -> Result<CodexUsage, String> {
+/// Inject only the usage fetch at the production refresh boundary. The guard,
+/// acceptance, persistence, error and success paths remain the real pipeline.
+pub(crate) trait UsageSource: TrayPresentationSink {
+    fn read_usage(&self, state: &AppState) -> impl std::future::Future<Output = Result<RawCodexUsage, String>> + Send;
+}
+
+impl UsageSource for AppHandle {
+    async fn read_usage(&self, state: &AppState) -> Result<RawCodexUsage, String> {
+        let mut client = state.client.lock().await;
+        client.fetch_usage(Duration::from_secs(20)).await.map_err(|error| error.to_string())
+    }
+}
+
+pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState>) -> Result<CodexUsage, String> {
     let _refresh_guard = match state.refresh_guard.try_lock() {
         Ok(guard) => guard,
         Err(_) => {
@@ -148,10 +163,7 @@ pub(crate) async fn refresh_usage(app: &AppHandle, state: &Arc<AppState>) -> Res
     };
 
     state.config_manager.write_status("reading", None);
-    let raw_result = {
-        let mut client = state.client.lock().await;
-        client.fetch_usage(Duration::from_secs(20)).await
-    };
+    let raw_result = sink.read_usage(state).await;
 
     match raw_result {
         Ok(raw) => {
@@ -167,23 +179,33 @@ pub(crate) async fn refresh_usage(app: &AppHandle, state: &Arc<AppState>) -> Res
             };
             let usage = raw.to_ui(estimate.five_hour_per_hour, estimate.weekly_per_hour);
             state.config_manager.write_status("ok", None);
-            crate::notify::process_usage_success(app, state, &usage).await;
+            crate::notify::process_usage_success(sink, state, &usage).await;
             Ok(usage)
         }
         Err(error) => {
             let error = error.to_string();
             state.config_manager.write_status("error", Some(&error));
-            let settings = state.settings.lock().await.clone();
-            let error_text = match resolve_locale(&settings.language) {
-                "zh-CN" => "Codex 用量读取失败",
-                "zh-Hant" => "Codex 用量讀取失敗",
-                _ => "Failed to read Codex usage",
-            };
-            update_tray_tooltip(app, error_text);
-            update_tray_icon(app, None, None);
+            process_usage_error(sink, state).await;
             Err(error)
         }
     }
+}
+
+/// Failure preserves cached usage and only changes presentation read status.
+pub(crate) async fn process_usage_error<S: TrayPresentationSink>(sink: &S, state: &AppState) {
+    let settings = state.settings.lock().await;
+    let mut status = state.tray_read_status.lock().await;
+    *status = TrayReadStatus::Error;
+    sink.present(crate::tray::tray_presentation(&settings, None, *status));
+}
+
+pub(crate) fn overlay_geometry_changed(previous: &OverlaySettings, next: &OverlaySettings) -> bool {
+    previous.scale_percent != next.scale_percent
+        || previous.show_credits != next.show_credits
+        || previous.show_five_hour_quota != next.show_five_hour_quota
+        || previous.show_burn_rate != next.show_burn_rate
+        || previous.overlay_layout != next.overlay_layout
+        || previous.language != next.language
 }
 
 #[tauri::command]
@@ -227,7 +249,8 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "scalePercent" => value.as_u64().is_some_and(|n| (100..=250).contains(&n) && n % 5 == 0),
             "backgroundTransparencyPercent" => value.as_u64().is_some_and(|n| n <= 80 && n % 5 == 0),
             "showCredits" | "autoCheckUpdates" | "autoInstallUpdates" | "fiveHourResetNotification"
-            | "weeklyResetNotification" | "autoEdgeHide" | "mousePassthrough" | "showPercentageGrid" => value.is_boolean(),
+            | "weeklyResetNotification" | "autoEdgeHide" | "mousePassthrough" | "showPercentageGrid"
+            | "showFiveHourQuota" | "showBurnRate" => value.is_boolean(),
             "autoStart" => allow_auto_start && value.is_boolean(),
             "refreshIntervalSeconds" => value.as_u64().is_some_and(|n| (15..=3600).contains(&n)),
             "language" => matches!(value.as_str(), Some("auto" | "en-US" | "zh-CN" | "zh-Hant")),
@@ -389,8 +412,8 @@ mod settings_patch_tests {
     }
 }
 
-async fn apply_settings_patch(
-    app: &AppHandle,
+pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
+    sink: &S,
     state: &Arc<AppState>,
     patch: Value,
     allow_auto_start: bool,
@@ -429,64 +452,63 @@ async fn apply_settings_patch(
             was_auto_edge_hide,
             was_mouse_passthrough != next.mouse_passthrough,
             was_mouse_passthrough,
-            previous_settings.scale_percent != next.scale_percent
-                || previous_settings.show_credits != next.show_credits
-                || previous_settings.overlay_layout != next.overlay_layout
-                || previous_settings.language != next.language,
+            overlay_geometry_changed(&previous_settings, &next),
         )
     };
 
-    if auto_edge_hide_changed {
-        if let Err(error) = crate::dock::auto_hide_changed(
-            app,
-            state,
-            envelope.settings.auto_edge_hide,
-        )
-        .await
-        {
-            let rollback = {
-                let mut settings = state.settings.lock().await;
-                let mut reverted = settings.clone();
-                reverted.auto_edge_hide = previous_auto_edge_hide;
-                let persistence_error = state
-                    .config_manager
-                    .save_settings_checked(&reverted)
-                    .err();
-                *settings = reverted.clone();
-                let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
-                (SettingsEnvelope { revision, settings: reverted }, persistence_error)
-            };
-            let _ = app.emit("settings_updated", &rollback.0);
-            return Err(match rollback.1 {
-                Some(write_error) => format!(
-                    "Could not update docked overlay: {error}; could not persist rollback: {write_error}"
-                ),
-                None => format!("Could not update docked overlay: {error}"),
-            });
+    if let Some(app) = sink.app_handle() {
+        if auto_edge_hide_changed {
+            if let Err(error) = crate::dock::auto_hide_changed(
+                app,
+                state,
+                envelope.settings.auto_edge_hide,
+            )
+            .await
+            {
+                let rollback = {
+                    let mut settings = state.settings.lock().await;
+                    let mut reverted = settings.clone();
+                    reverted.auto_edge_hide = previous_auto_edge_hide;
+                    let persistence_error = state
+                        .config_manager
+                        .save_settings_checked(&reverted)
+                        .err();
+                    *settings = reverted.clone();
+                    let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
+                    (SettingsEnvelope { revision, settings: reverted }, persistence_error)
+                };
+                let _ = app.emit("settings_updated", &rollback.0);
+                return Err(match rollback.1 {
+                    Some(write_error) => format!(
+                        "Could not update docked overlay: {error}; could not persist rollback: {write_error}"
+                    ),
+                    None => format!("Could not update docked overlay: {error}"),
+                });
+            }
         }
-    }
-    if mouse_passthrough_changed {
-        if let Err(error) = set_main_mouse_passthrough(app, envelope.settings.mouse_passthrough) {
-            let rollback = {
-                let mut settings = state.settings.lock().await;
-                let mut reverted = settings.clone();
-                reverted.mouse_passthrough = previous_mouse_passthrough;
-                let persistence_error = state.config_manager.save_settings_checked(&reverted).err();
-                *settings = reverted.clone();
-                let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
-                (SettingsEnvelope { revision, settings: reverted }, persistence_error)
-            };
-            let _ = app.emit("settings_updated", &rollback.0);
-            return Err(match rollback.1 {
-                Some(write_error) => format!(
-                    "Could not change mouse passthrough: {error}; could not persist rollback: {write_error}"
-                ),
-                None => format!("Could not change mouse passthrough: {error}"),
-            });
+        if mouse_passthrough_changed {
+            if let Err(error) = set_main_mouse_passthrough(app, envelope.settings.mouse_passthrough) {
+                let rollback = {
+                    let mut settings = state.settings.lock().await;
+                    let mut reverted = settings.clone();
+                    reverted.mouse_passthrough = previous_mouse_passthrough;
+                    let persistence_error = state.config_manager.save_settings_checked(&reverted).err();
+                    *settings = reverted.clone();
+                    let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
+                    (SettingsEnvelope { revision, settings: reverted }, persistence_error)
+                };
+                let _ = app.emit("settings_updated", &rollback.0);
+                return Err(match rollback.1 {
+                    Some(write_error) => format!(
+                        "Could not change mouse passthrough: {error}; could not persist rollback: {write_error}"
+                    ),
+                    None => format!("Could not change mouse passthrough: {error}"),
+                });
+            }
         }
-    }
-    if geometry_changed {
-        crate::dock::keep_docked_in_work_area(app, state).await;
+        if geometry_changed {
+            crate::dock::keep_docked_in_work_area(app, state).await;
+        }
     }
     let new_settings = &envelope.settings;
     if !new_settings.auto_install_updates {
@@ -495,49 +517,28 @@ async fn apply_settings_patch(
         }
     }
 
-    // Update tray tooltip if we have last usage
-    if let Some(usage) = state.last_usage.lock().await.as_ref() {
-        let five = usage.five_hour_remaining_percent.map(|p| p.to_string()).unwrap_or_else(|| "--".to_string());
-        let week = usage.week_remaining_percent.map(|p| p.to_string()).unwrap_or_else(|| "--".to_string());
-        let tooltip = if new_settings.show_credits {
-            format!("5H {}% | WK {}% | CR {}", five, week, usage.credits_display)
-        } else {
-            format!("5H {}% | WK {}%", five, week)
-        };
-        update_tray_tooltip(app, &tooltip);
-        update_tray_icon(
-            app,
-            usage.five_hour_remaining_percent.map(|p| p as f64),
-            usage.week_remaining_percent.map(|p| p as f64),
-        );
-    } else {
-        // Update error text if in error state
-        let error_text = match resolve_locale(&new_settings.language) {
-            "zh-CN" => "Codex 用量读取失败",
-            "zh-Hant" => "Codex 用量讀取失敗",
-            _ => "Failed to read Codex usage",
-        };
-        update_tray_tooltip(app, error_text);
-    }
+    crate::tray::repaint_tray(sink, state).await;
 
-    // Update settings window title
-    if let Some(settings_win) = app.get_webview_window("settings") {
-        let title = match resolve_locale(&new_settings.language) {
-            "zh-CN" => "设置",
-            "zh-Hant" => "設定",
-            _ => "Settings",
-        };
-        let _ = settings_win.set_title(title);
-    }
+    if let Some(app) = sink.app_handle() {
+        // Update settings window title
+        if let Some(settings_win) = app.get_webview_window("settings") {
+            let title = match resolve_locale(&new_settings.language) {
+                "zh-CN" => "设置",
+                "zh-Hant" => "設定",
+                _ => "Settings",
+            };
+            let _ = settings_win.set_title(title);
+        }
 
-    // Broadcast updated settings to all windows
-    let _ = app.emit("settings_updated", &envelope);
-    if auto_check_just_enabled || auto_install_just_enabled {
-        let app_for_check = app.clone();
-        let state_for_check = state.clone();
-        tauri::async_runtime::spawn(async move {
-            check_and_notify_auto_update(&app_for_check, &state_for_check).await;
-        });
+        // Broadcast updated settings to all windows
+        let _ = app.emit("settings_updated", &envelope);
+        if auto_check_just_enabled || auto_install_just_enabled {
+            let app_for_check = app.clone();
+            let state_for_check = state.clone();
+            tauri::async_runtime::spawn(async move {
+                check_and_notify_auto_update(&app_for_check, &state_for_check).await;
+            });
+        }
     }
     Ok(envelope)
 }
@@ -1047,6 +1048,23 @@ pub(crate) fn install_prepared_update_on_exit(app: &AppHandle, state: &AppState)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_patches_require_booleans_and_invalidate_geometry() {
+        for key in ["showFiveHourQuota", "showBurnRate"] {
+            for value in [serde_json::json!(true), serde_json::json!(false)] {
+                assert!(validate_settings_patch(&serde_json::json!({key: value}), false).is_ok());
+            }
+            for value in [serde_json::json!("false"), serde_json::json!(0), Value::Null, serde_json::json!([])] {
+                assert!(validate_settings_patch(&serde_json::json!({key: value}), false).is_err());
+            }
+            let previous = OverlaySettings::default();
+            let mut next = previous.clone();
+            merge_settings_patch(&mut next, &serde_json::json!({key: false})).unwrap();
+            assert!(overlay_geometry_changed(&previous, &next));
+            assert!(!overlay_geometry_changed(&next, &next));
+        }
+    }
 
     #[test]
     fn test_match_supported_locale() {

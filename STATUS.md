@@ -1,5 +1,12 @@
 # Status
 
+## v1.3.1 display implementation — 2026-10-03
+
+- Phases 2–4 of the revised `ad8dd4f` plan implemented: independent display preferences, Weekly-only overlay/pill/tray, full tray read lifecycle, and composition-aware dock sizing.
+- Display-only path selected; optional estimator refinement deferred, with v1.3.0 estimator/schema preserved.
+- Automated/browser verification and native release limitations: [implementation handoff](docs/handoff/2026-10-03-v1.3.1-display-controls-implementation.md).
+- No version bump, packaging or publication; native WebView2/tray/hover/mixed-monitor smoke checks and independent implementation review remain pending.
+
 ## v1.2.1 patch — 2026-09-30
 
 - Left tray single-click immediately shows/hides the overlay; a double-click toggles once. Only right-click opens/closes the menu.

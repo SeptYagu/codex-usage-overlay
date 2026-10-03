@@ -37,6 +37,8 @@ const savedSettings: OverlaySettings = {
   scalePercent: 220,
   backgroundTransparencyPercent: 50,
   showCredits: false,
+  showFiveHourQuota: true,
+  showBurnRate: true,
   refreshIntervalSeconds: 300,
   language: 'en-US',
   overlayLayout: 'stacks',

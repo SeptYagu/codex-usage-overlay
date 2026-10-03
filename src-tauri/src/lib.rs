@@ -31,6 +31,7 @@ pub fn run() {
         config_manager: config_manager.clone(),
         dock: dock::DockManager::new(config_manager.clone()),
         last_usage: Mutex::new(None),
+        tray_read_status: Mutex::new(tray::TrayReadStatus::Pending),
         settings: Mutex::new(initial_settings.clone()),
         settings_revision: AtomicU64::new(0),
         last_valid_settings_geometry: std::sync::Mutex::new(None),
@@ -160,7 +161,7 @@ pub fn run() {
         ])
         .setup(move |app| {
             // Setup system tray
-            let tray_ready = match setup_tray(app.handle()) {
+            let tray_ready = match setup_tray(app.handle(), &initial_settings) {
                 Ok(_) => true,
                 Err(error) => {
                     eprintln!("Could not start system tray: {error}");
@@ -973,3 +974,13 @@ mod tests {
         assert_eq!(ops.0, 1);
     }
 }
+
+// Tauri embeds the application manifest only in binaries. Production-entry unit
+// tests also link TaskDialogIndirect; request Common Controls v6 for their own
+// executable without adding a second manifest to the application/updater.
+#[cfg(all(test, target_os = "windows", target_env = "msvc"))]
+core::arch::global_asm!(
+    r#".section .drectve
+    .ascii " /MANIFESTDEPENDENCY:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\" "
+    "#
+);

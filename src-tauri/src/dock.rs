@@ -1076,7 +1076,7 @@ fn set_full_size(window: &WebviewWindow, settings: &OverlaySettings) -> Result<(
     let current = window
         .outer_size()
         .unwrap_or_else(|_| PhysicalSize::new(0, 0));
-    let size = provisional_size(current, scale, settings.show_credits);
+    let size = provisional_size(current, scale, settings);
     window
         .set_size(Size::Physical(size))
         .map_err(|error| error.to_string())?;
@@ -1088,19 +1088,28 @@ fn set_full_size(window: &WebviewWindow, settings: &OverlaySettings) -> Result<(
 /// capsule. The estimate never shrinks below the current window, so a docked
 /// pill (which can be taller than the capsule) stays covered while the
 /// authoritative size is on its way.
-fn provisional_expanded_base_size(show_credits: bool) -> (f64, f64) {
-    // Burn Rate widens both quota blocks on their metadata row. This estimate is
-    // intentionally conservative only for the brief expand transition; the
-    // frontend ResizeObserver remains authoritative for the final window size.
-    (if show_credits { 340.0 } else { 280.0 }, 50.0)
+fn provisional_expanded_base_size(settings: &OverlaySettings) -> (f64, f64) {
+    // Retain v1.3.0's conservative 140px quota budget. Browser layout
+    // measurements require 100px for credit including its divider/gaps.
+    // Countdown-only blocks need 100px. Stacks add padding/gaps and a
+    // vertically stacked reading, so reserve extra width and height.
+    // ResizeObserver remains authoritative once the content is measured.
+    let quotas = if settings.show_five_hour_quota { 2.0 } else { 1.0 };
+    let quota_width = if settings.show_burn_rate { 140.0 } else { 100.0 };
+    let width = quotas * quota_width + if settings.show_credits { 100.0 } else { 0.0 };
+    if settings.overlay_layout == crate::config::OverlayLayout::Stacks {
+        (width + 40.0, 100.0)
+    } else {
+        (width, 70.0)
+    }
 }
 
 fn provisional_size(
     current: PhysicalSize<u32>,
     scale: f64,
-    show_credits: bool,
+    settings: &OverlaySettings,
 ) -> PhysicalSize<u32> {
-    let (base_width, base_height) = provisional_expanded_base_size(show_credits);
+    let (base_width, base_height) = provisional_expanded_base_size(settings);
     let estimated_width = (base_width * scale).round().max(1.0) as u32;
     let estimated_height = (base_height * scale).round().max(1.0) as u32;
     PhysicalSize::new(
@@ -1356,7 +1365,7 @@ fn estimated_anchor_center(
         })
         .or_else(|| window.outer_position().ok())?;
     let scale = settings.scale_percent as f64 / 100.0 * monitor_scale;
-    let (base_width, base_height) = provisional_expanded_base_size(settings.show_credits);
+    let (base_width, base_height) = provisional_expanded_base_size(settings);
     let width = (base_width * scale).round().max(1.0) as u32;
     let height = (base_height * scale).round().max(1.0) as u32;
     let clamped = clamp_position(anchor, PhysicalSize::new(width, height), work);
@@ -1559,6 +1568,47 @@ mod tests {
     /// A single-monitor desktop: every edge of `work` is a physical outer boundary.
     fn solo(work: PhysicalRect, scale: f64) -> Vec<(PhysicalRect, f64)> {
         vec![(work, scale)]
+    }
+
+    #[test]
+    fn display_compositions_cover_measured_content_and_pill_on_all_edges_and_scales() {
+        // Worst CSS dimensions measured in Edge across en-US/zh-CN/zh-Hant,
+        // default quota/rate/credit fixture. These are content bounds, not a
+        // restatement of the provisional sizing formula.
+        let measured = [
+            (true, true, true, 324.74, 318.42),
+            (true, true, false, 225.27, 237.27),
+            (true, false, true, 284.32, 232.96),
+            (true, false, false, 184.85, 151.82),
+            (false, true, true, 210.05, 201.72),
+            (false, true, false, 110.58, 120.58),
+            (false, false, true, 195.97, 163.53),
+            (false, false, false, 96.50, 82.38),
+        ];
+        let work = PhysicalRect { x: 0, y: 0, width: 3840, height: 2160 };
+        let anchor = (1920, 1080);
+        for (five, burn, credits, grouped, stacks) in measured {
+            for layout in [crate::config::OverlayLayout::Grouped, crate::config::OverlayLayout::Stacks] {
+                let settings = OverlaySettings {
+                    show_five_hour_quota: five, show_burn_rate: burn, show_credits: credits,
+                    overlay_layout: layout.clone(), ..Default::default()
+                };
+                let (width, height) = provisional_expanded_base_size(&settings);
+                let stacked = layout == crate::config::OverlayLayout::Stacks;
+                assert!(width >= if stacked { stacks } else { grouped });
+                assert!(height >= if stacked { 99.64 } else { 69.0 });
+                for scale_percent in [100, 250] {
+                    for monitor_scale in [1.0, 1.75, 2.5] {
+                        for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
+                            let pill = pill_geometry(edge, work, monitor_scale, scale_percent, anchor);
+                            let size = provisional_size(PhysicalSize::new(pill.width, pill.height),
+                                monitor_scale * scale_percent as f64 / 100.0, &settings);
+                            assert!(contains(transition_rect(edge, work, size, anchor), pill));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1870,7 +1920,7 @@ mod tests {
                 let size = provisional_size(
                     PhysicalSize::new(pill.width, pill.height),
                     content_scale,
-                    true,
+                    &OverlaySettings::default(),
                 );
                 let rect = transition_rect(edge, wa, size, anchor);
                 assert!(

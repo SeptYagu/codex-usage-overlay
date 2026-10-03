@@ -328,3 +328,75 @@ it('updates countdowns without a new usage payload', async () => {
   await act(async () => { vi.advanceTimersByTime(1000); });
   expect(screen.getByText('4h 28m')).toBeTruthy();
 });
+
+
+describe.each(['en-US', 'zh-CN', 'zh-Hant'])('display preferences in %s', (language) => {
+  it.each(['grouped', 'stacks'] as const)('covers every visibility combination in %s', async (overlayLayout) => {
+    await i18n.changeLanguage(language);
+    const { container, rerender } = render(<OverlayView settings={DEFAULT_SETTINGS} usage={usage} isLoading={false} />);
+    for (const showFiveHourQuota of [true, false]) {
+      for (const showBurnRate of [true, false]) {
+        for (const showCredits of [true, false]) {
+          rerender(<OverlayView settings={{ ...DEFAULT_SETTINGS, overlayLayout, showFiveHourQuota, showBurnRate, showCredits }} usage={usage} isLoading={false} />);
+          expect(screen.queryByRole('group', { name: i18n.t('fiveHourLabel') }) !== null).toBe(showFiveHourQuota);
+          const weekly = within(screen.getByRole('group', { name: i18n.t('weeklyLabel') }));
+          expect(weekly.getByText('62%')).toBeTruthy();
+          expect(weekly.getByText('6d 05h')).toBeTruthy();
+          expect(weekly.queryByText('0.6%/h') !== null).toBe(showBurnRate);
+          expect(screen.queryByRole('group', { name: i18n.t('creditsLabel') }) !== null).toBe(showCredits);
+          expect(container.querySelectorAll('.overlay-burn-rate')).toHaveLength(showBurnRate ? (showFiveHourQuota ? 2 : 1) : 0);
+          expect(container.querySelectorAll('.overlay-divider')).toHaveLength(overlayLayout === 'grouped' ? Number(showFiveHourQuota) + Number(showCredits) : 0);
+        }
+      }
+    }
+    // Restoring visibility uses the same cached DTO immediately.
+    rerender(<OverlayView settings={DEFAULT_SETTINGS} usage={usage} isLoading={false} />);
+    expect(screen.getByText('16.8%/h')).toBeTruthy();
+    expect(usage.fiveHourRemainingPercent).toBe(69);
+  });
+
+  it.each(['left', 'right', 'top', 'bottom'] as const)('shows only the Weekly bar at the %s edge', async (edge) => {
+    await i18n.changeLanguage(language);
+    const dockState = { docked: true, edge, expanded: false, hidden: false };
+    const settings = { ...DEFAULT_SETTINGS, showFiveHourQuota: false, showPercentageGrid: true };
+    const { container, rerender } = render(<OverlayView settings={settings} usage={usage} isLoading={false} dockState={dockState} />);
+    expect(screen.getAllByRole('progressbar')).toHaveLength(1);
+    expect(screen.getByRole('progressbar', { name: i18n.t('weeklyLabel') }).getAttribute('aria-valuenow')).toBe('62');
+    expect(screen.queryByRole('progressbar', { name: i18n.t('fiveHourLabel') })).toBeNull();
+    expect(screen.getByRole('group').getAttribute('aria-label')).toBe(i18n.t('weeklyLabel'));
+    expect(container.querySelectorAll('.overlay-pill-tick')).toHaveLength(9);
+    expect(container.querySelector('.overlay-pill-bars')?.classList.contains('overlay-pill-rotated')).toBe(edge === 'top' || edge === 'bottom');
+    fireEvent.mouseEnter(container.querySelector('.overlay-pill-host')!);
+    fireEvent.mouseLeave(container.querySelector('.overlay-pill-host')!);
+    expect(tauri.invoke).toHaveBeenCalledWith('dock_mouse_enter');
+    expect(tauri.invoke).toHaveBeenCalledWith('dock_mouse_leave');
+    rerender(<OverlayView settings={settings} usage={null} isLoading={true} dockState={dockState} />);
+    expect(screen.getAllByRole('progressbar')).toHaveLength(1);
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuetext')).toBe(i18n.t('unknown'));
+    rerender(<OverlayView settings={{ ...settings, showFiveHourQuota: true }} usage={usage} isLoading={false} dockState={dockState} />);
+    expect(screen.getAllByRole('progressbar')).toHaveLength(2);
+  });
+});
+
+it('hides unknown Burn Rate placeholders with the entire rate span', () => {
+  const { container } = render(<OverlayView settings={{ ...DEFAULT_SETTINGS, showBurnRate: false, showFiveHourQuota: false, showCredits: false }} usage={null} isLoading={true} />);
+  expect(container.querySelector('.overlay-burn-rate')).toBeNull();
+  expect(screen.queryByText('—')).toBeNull();
+  expect(screen.getAllByText('--%')).toHaveLength(1);
+});
+
+
+it('remeasures docked content immediately when either display preference changes', async () => {
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    return { width: 100 + this.querySelectorAll('.overlay-quota').length * 50 + this.querySelectorAll('.overlay-burn-rate').length * 20, height: 69 } as DOMRect;
+  });
+  const dockState = { docked: true, edge: 'right' as const, expanded: true, hidden: false };
+  const { rerender } = render(<OverlayView settings={DEFAULT_SETTINGS} usage={usage} isLoading={false} dockState={dockState} />);
+  await waitFor(() => expect(tauri.setSize).toHaveBeenLastCalledWith(expect.objectContaining({ width: 240, height: 69 })));
+  rerender(<OverlayView settings={{ ...DEFAULT_SETTINGS, showBurnRate: false }} usage={usage} isLoading={false} dockState={dockState} />);
+  await waitFor(() => expect(tauri.setSize).toHaveBeenLastCalledWith(expect.objectContaining({ width: 200, height: 69 })));
+  rerender(<OverlayView settings={{ ...DEFAULT_SETTINGS, showBurnRate: false, showFiveHourQuota: false }} usage={usage} isLoading={false} dockState={dockState} />);
+  await waitFor(() => expect(tauri.setSize).toHaveBeenLastCalledWith(expect.objectContaining({ width: 150, height: 69 })));
+  expect(tauri.invoke).toHaveBeenCalledWith('dock_window_resized');
+  expect(tauri.invoke).not.toHaveBeenCalledWith('fetch_usage');
+});

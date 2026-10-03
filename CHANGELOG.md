@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v1.3.1 display controls
+
+### Added
+- Independent, persisted 5-hour quota and Burn Rate visibility switches, enabled by default for fresh and upgraded profiles, with English/Simplified Chinese/Traditional Chinese labels.
+- Weekly-only expanded overlay, centered single-bar edge pill, and large single-ring tray presentation when 5H is hidden.
+- Offline production-entry tray lifecycle tests and a repeatable Edge layout QA runner.
+
+### Fixed
+- Apply the saved tray mode during cold startup, read failures and settings changes without cached usage; preserve pending/error tooltips and cached data until recovery.
+- Repaint display preferences immediately without fetching usage; invalidate dock geometry for either switch and size temporary expansion from the visible composition.
+- Increase temporary grouped height and credit width budgets to cover measured content, and keep all default settings controls visible at 960x620.
+
+### Verification
+- Frontend: 86 tests passed; TypeScript/Vite production build passed.
+- Rust: 123 tests passed; locked Cargo check passed.
+- Browser: 214 offline Edge layout cases passed; all four tray lifecycle regression mutations were detected.
+
+### Scope
+- Selected path: display-only. The optional Phase 5 weighted estimator, idle metadata and migration are deferred to a later change pending their complete replay gates. The v1.3.0 production estimator and state schema remain unchanged.
+- Version bump, packaging and publication await native WebView2/tray/hover/mixed-monitor smoke checks. Browser DPI emulation and offline effects do not close that gate.
+
 ## [1.3.0] - 2026-10-02
 
 ### Added
