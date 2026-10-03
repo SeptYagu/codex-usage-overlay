@@ -110,8 +110,10 @@ impl BurnRateTracker {
         );
 
         BurnRateEstimate {
-            five_hour_per_hour: estimate_rate(&self.state.five_hour, FIVE_HOUR_HORIZON_SECS, 2),
-            weekly_per_hour: estimate_rate(&self.state.weekly, WEEKLY_HORIZON_SECS, 1),
+            five_hour_per_hour: valid_used_percent(&usage.five_hour)
+                .and_then(|_| estimate_rate(&self.state.five_hour, FIVE_HOUR_HORIZON_SECS, 2)),
+            weekly_per_hour: valid_used_percent(&usage.weekly)
+                .and_then(|_| estimate_rate(&self.state.weekly, WEEKLY_HORIZON_SECS, 1)),
             state_changed: changed,
         }
     }
@@ -136,16 +138,17 @@ impl BurnRateTracker {
     }
 }
 
+fn valid_used_percent(snapshot: &QuotaSnapshot) -> Option<f64> {
+    snapshot.used_percent.filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
+}
+
 fn accept_quota(
     state: &mut QuotaRateState,
     snapshot: &QuotaSnapshot,
     observed_at: i64,
     max_gap_secs: i64,
 ) -> bool {
-    let Some(current) = snapshot
-        .used_percent
-        .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
-    else {
+    let Some(current) = valid_used_percent(snapshot) else {
         return false;
     };
 
@@ -498,6 +501,84 @@ mod tests {
         prune_crossings(&mut state);
         assert_eq!(state.crossings.len(), MAX_CROSSINGS);
         assert_eq!(state.crossings[0].level, 36);
+    }
+
+    #[test]
+    fn invalid_quota_is_unavailable_without_affecting_other_quota_or_history() {
+        for invalid in [None, Some(f64::NAN), Some(f64::INFINITY), Some(f64::NEG_INFINITY), Some(-0.1), Some(100.1)] {
+            for invalid_five_hour in [true, false] {
+                let mut tracker = BurnRateTracker::from_state(BurnRateStateFile::default());
+                tracker.accept_usage(&usage(1000, 10.0, 10.0));
+                let established = tracker.accept_usage(&usage(1060, 13.0, 12.0));
+                assert!(established.five_hour_per_hour.is_some());
+                assert!(established.weekly_per_hour.is_some());
+                let saved = tracker.state.clone();
+                let mut incoming = usage(1120, 13.0, 12.0);
+                if invalid_five_hour {
+                    incoming.five_hour.used_percent = invalid;
+                } else {
+                    incoming.weekly.used_percent = invalid;
+                }
+                let estimate = tracker.accept_usage(&incoming);
+                if invalid_five_hour {
+                    assert_eq!(estimate.five_hour_per_hour, None);
+                    assert!(estimate.weekly_per_hour.is_some());
+                    assert_eq!(tracker.state.five_hour, saved.five_hour);
+                    assert_eq!(tracker.state.weekly.last_observed_at, Some(1120));
+                } else {
+                    assert_eq!(estimate.weekly_per_hour, None);
+                    assert!(estimate.five_hour_per_hour.is_some());
+                    assert_eq!(tracker.state.weekly, saved.weekly);
+                    assert_eq!(tracker.state.five_hour.last_observed_at, Some(1120));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_missing_samples_never_publish_rates_even_after_evidence_horizons() {
+        let mut tracker = BurnRateTracker::from_state(BurnRateStateFile::default());
+        tracker.accept_usage(&usage(1000, 10.0, 10.0));
+        tracker.accept_usage(&usage(1060, 13.0, 12.0));
+        let saved = tracker.state.clone();
+        for at in [1120, 4000, 100_000] {
+            let mut missing = usage(at, 13.0, 12.0);
+            missing.five_hour = QuotaSnapshot::default();
+            missing.weekly = QuotaSnapshot::default();
+            let estimate = tracker.accept_usage(&missing);
+            assert_eq!(estimate.five_hour_per_hour, None);
+            assert_eq!(estimate.weekly_per_hour, None);
+            assert!(!estimate.state_changed);
+            assert_eq!(tracker.state, saved);
+        }
+    }
+
+    #[test]
+    fn valid_recovery_reuses_recent_history_and_rebaselines_after_long_gap() {
+        for gap in [180, WEEKLY_MAX_GAP_SECS + 1] {
+            let mut tracker = BurnRateTracker::from_state(BurnRateStateFile::default());
+            tracker.accept_usage(&usage(1000, 10.0, 10.0));
+            tracker.accept_usage(&usage(1060, 13.0, 12.0));
+            let saved = tracker.state.clone();
+            let mut missing = usage(1120, 13.0, 12.0);
+            missing.five_hour.used_percent = None;
+            missing.weekly.used_percent = None;
+            tracker.accept_usage(&missing);
+            let recovered = tracker.accept_usage(&usage(1060 + gap, 13.0, 12.0));
+            if gap == 180 {
+                assert!(recovered.five_hour_per_hour.is_some());
+                assert!(recovered.weekly_per_hour.is_some());
+                assert_eq!(tracker.state.five_hour.crossings, saved.five_hour.crossings);
+                assert_eq!(tracker.state.weekly.crossings, saved.weekly.crossings);
+            } else {
+                assert_eq!(recovered.five_hour_per_hour, None);
+                assert_eq!(recovered.weekly_per_hour, None);
+                assert!(tracker.state.five_hour.crossings.is_empty());
+                assert!(tracker.state.weekly.crossings.is_empty());
+                assert!(tracker.state.five_hour.segment_id > saved.five_hour.segment_id);
+                assert!(tracker.state.weekly.segment_id > saved.weekly.segment_id);
+            }
+        }
     }
 
     #[test]

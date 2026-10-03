@@ -10,6 +10,7 @@ const tauri = vi.hoisted(() => ({
   setTitle: vi.fn(async () => {}),
   setSize: vi.fn(async () => {}),
   windowLabel: 'settings',
+  usageRegistration: null as Promise<void> | null,
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: tauri.invoke }));
@@ -26,6 +27,7 @@ vi.mock('@tauri-apps/api/window', () => ({
 vi.mock('@tauri-apps/api/event', () => ({
   listen: async (name: string, callback: (event: { payload: unknown }) => void) => {
     tauri.listeners.set(name, callback);
+    if (name === 'usage_updated' && tauri.usageRegistration) await tauri.usageRegistration;
     return () => { tauri.listeners.delete(name); };
   },
 }));
@@ -52,6 +54,7 @@ let serverRevision: number;
 
 beforeEach(async () => {
   tauri.windowLabel = 'settings';
+  tauri.usageRegistration = null;
   tauri.invoke.mockReset();
   tauri.listeners.clear();
   serverSettings = { ...savedSettings };
@@ -245,21 +248,20 @@ describe('settings synchronization', () => {
 });
 
 describe('main usage startup', () => {
-  it('registers the usage listener before reading cache and does not auto-fetch', async () => {
+  const cached: CodexUsage = {
+    fiveHourRemainingPercent: 69, fiveHourBurnRatePerHour: 16.8,
+    weekRemainingPercent: 62, weekBurnRatePerHour: 0.6,
+    creditsDisplay: '12.5', creditsBalance: '12.5', hasCredits: true,
+    fiveHourResetsAt: 1_900_000_000, weekResetsAt: 1_900_500_000,
+    fetchedAt: 1_800_000_000,
+  };
+
+  beforeEach(() => {
     tauri.windowLabel = 'main';
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
-    const cached: CodexUsage = {
-      fiveHourRemainingPercent: 69,
-      fiveHourBurnRatePerHour: 16.8,
-      weekRemainingPercent: 62,
-      weekBurnRatePerHour: 0.6,
-      creditsDisplay: '12.5',
-      creditsBalance: '12.5',
-      hasCredits: true,
-      fiveHourResetsAt: 1_900_000_000,
-      weekResetsAt: 1_900_500_000,
-      fetchedAt: 1_800_000_000,
-    };
+  });
+
+  function mockCache(response: CodexUsage | null | Promise<CodexUsage | null>) {
     tauri.invoke.mockImplementation(async (command: string) => {
       if (command === 'get_settings') return { revision: 0, settings: DEFAULT_SETTINGS };
       if (command === 'get_dock_state') {
@@ -267,44 +269,68 @@ describe('main usage startup', () => {
       }
       if (command === 'get_last_usage') {
         expect(tauri.listeners.has('usage_updated')).toBe(true);
-        return cached;
+        return response;
       }
       if (command === 'fetch_usage') throw new Error('startup must not fetch');
       return null;
     });
+  }
 
+  it('registers the usage listener before reading cache and does not auto-fetch', async () => {
+    mockCache(cached);
     render(<App />);
     expect(await screen.findByText('69%')).toBeTruthy();
     expect(tauri.invoke).toHaveBeenCalledWith('get_last_usage');
     expect(tauri.invoke).not.toHaveBeenCalledWith('fetch_usage');
   });
 
-  it('does not let an older cache response overwrite a newer live event', async () => {
-    tauri.windowLabel = 'main';
-    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
-    const cached: CodexUsage = {
-      fiveHourRemainingPercent: 69, fiveHourBurnRatePerHour: 16.8,
-      weekRemainingPercent: 62, weekBurnRatePerHour: 0.6,
-      creditsDisplay: '12.5', creditsBalance: '12.5', hasCredits: true,
-      fiveHourResetsAt: 1_900_000_000, weekResetsAt: 1_900_500_000,
-      fetchedAt: 1_800_000_000,
-    };
-    const live = { ...cached, fiveHourRemainingPercent: 68, fetchedAt: cached.fetchedAt + 1 };
-    tauri.invoke.mockImplementation(async (command: string) => {
-      if (command === 'get_settings') return { revision: 0, settings: DEFAULT_SETTINGS };
-      if (command === 'get_dock_state') {
-        return { docked: false, edge: null, expanded: true, hidden: false };
-      }
-      if (command === 'get_last_usage') {
-        tauri.listeners.get('usage_updated')!({ payload: live });
-        return cached;
-      }
-      return null;
-    });
-
+  it.each([0, 1])('keeps a live event over delayed cache with timestamp difference %i', async (difference) => {
+    const cache = deferred<CodexUsage | null>();
+    mockCache(cache.promise);
     render(<App />);
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('get_last_usage'));
+    const live = { ...cached, fiveHourRemainingPercent: 68, fetchedAt: cached.fetchedAt + difference };
+    act(() => tauri.listeners.get('usage_updated')!({ payload: live }));
     expect(await screen.findByText('68%')).toBeTruthy();
-    await waitFor(() => expect(screen.queryByText('69%')).toBeNull());
+    await act(async () => cache.resolve(cached));
+    expect(screen.getByText('68%')).toBeTruthy();
+    expect(screen.queryByText('69%')).toBeNull();
+  });
+
+  it('accepts successive live events in the same second and rejects older samples', async () => {
+    mockCache(cached);
+    render(<App />);
+    await screen.findByText('69%');
+    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fiveHourRemainingPercent: 68 } }));
+    expect(screen.getByText('68%')).toBeTruthy();
+    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fiveHourRemainingPercent: 67 } }));
+    expect(screen.getByText('67%')).toBeTruthy();
+    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fetchedAt: cached.fetchedAt - 1 } }));
+    expect(screen.getByText('67%')).toBeTruthy();
+    expect(screen.queryByText('69%')).toBeNull();
+  });
+
+  it('does not start cache hydration after cleanup while registration is pending', async () => {
+    const registration = deferred<void>();
+    tauri.usageRegistration = registration.promise;
+    mockCache(cached);
+    const view = render(<App />);
+    view.unmount();
+    await act(async () => registration.resolve());
+    expect(tauri.invoke).not.toHaveBeenCalledWith('get_last_usage');
+    expect(tauri.listeners.has('usage_updated')).toBe(false);
+  });
+
+  it('allows a pending cache response to finish safely after cleanup', async () => {
+    const cache = deferred<CodexUsage | null>();
+    mockCache(cache.promise);
+    const view = render(<App />);
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('get_last_usage'));
+    view.unmount();
+    await act(async () => cache.resolve(cached));
+    expect(tauri.listeners.has('usage_updated')).toBe(false);
+    expect(view.container.childElementCount).toBe(0);
+    expect(tauri.invoke.mock.calls.filter(([command]) => command === 'get_last_usage')).toHaveLength(1);
   });
 });
 

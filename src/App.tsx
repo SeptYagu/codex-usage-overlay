@@ -25,6 +25,7 @@ export const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [dockState, setDockState] = useState<DockStateInfo | null>(null);
   const dockStateRevision = useRef(0);
+  const usageEventRevision = useRef(0);
 
   const loadSettings = useCallback(async () => {
     const token = ++settingsLoadToken.current;
@@ -46,6 +47,7 @@ export const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    let active = true;
     loadSettings();
 
     // Listen to settings update from other windows or tray
@@ -58,8 +60,8 @@ export const App: React.FC = () => {
       setSettingsLoadState('ready');
     });
 
-    // Listen first, then hydrate from cache. Guard by fetchedAt so a
-    // cache response that started just before a live event cannot overwrite it.
+    // Register first, then hydrate only if no live event arrived during the
+    // cache request. fetchedAt alone cannot order samples within the same second.
     const applyUsageIfNewer = (next: CodexUsage) => {
       setUsage((current) => (
         current && current.fetchedAt > next.fetchedAt ? current : next
@@ -67,13 +69,19 @@ export const App: React.FC = () => {
       setIsLoading(false);
     };
     const unlistenUsage = listen<CodexUsage>('usage_updated', (event) => {
+      if (!active) return;
+      usageEventRevision.current++;
       applyUsageIfNewer(event.payload);
     });
     if (windowLabel === 'main') {
       void unlistenUsage.then(async () => {
+        if (!active) return;
+        const revision = usageEventRevision.current;
         try {
           const cached = await invoke<CodexUsage | null>('get_last_usage');
-          if (cached) applyUsageIfNewer(cached);
+          if (active && usageEventRevision.current === revision && cached) {
+            applyUsageIfNewer(cached);
+          }
         } catch (error) {
           console.error('Failed to get cached usage:', error);
         }
@@ -111,6 +119,7 @@ export const App: React.FC = () => {
     }
 
     return () => {
+      active = false;
       settingsLoadToken.current++;
       unlistenSettings.then((f) => f());
       unlistenUsage.then((f) => f());
