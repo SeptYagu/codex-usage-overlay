@@ -16,11 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Apply the saved tray mode during cold startup, read failures and settings changes without cached usage; preserve pending/error tooltips and cached data until recovery.
 - Repaint display preferences immediately without fetching usage; invalidate dock geometry for either switch and size temporary expansion from the visible composition.
 - Increase temporary grouped height and credit width budgets to cover measured content, and keep all default settings controls visible at 960x620.
+- Preserve the collapsed pill's session anchor across display switches and background refreshes, clamping the actual pill to the selected work area.
+- Reserve 120px per quota when Burn Rate is hidden so 100% readings fit during expansion; include full-quota fixtures in browser QA.
 
 ### Verification
 - Frontend: 86 tests passed; TypeScript/Vite production build passed.
-- Rust: 123 tests passed; locked Cargo check passed.
-- Browser: 214 offline Edge layout cases passed; all four tray lifecycle regression mutations were detected.
+- Rust: 125 tests passed; locked Cargo check passed.
+- Browser: 406 offline Edge layout cases passed, including normal and 100% quota fixtures; all four tray lifecycle regression mutations were detected during initial implementation.
 
 ### Scope
 - Selected path: display-only. The optional Phase 5 weighted estimator, idle metadata and migration are deferred to a later change pending their complete replay gates. The v1.3.0 production estimator and state schema remain unchanged.

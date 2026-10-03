@@ -993,21 +993,26 @@ pub async fn keep_docked_in_work_area(app: &AppHandle, state: &Arc<AppState>) {
                 eprintln!("Could not reposition expanded overlay: {error}");
             }
         } else {
-            let (work, scale) = match work_area(&window) {
+            let anchor = state.dock.anchor_center();
+            let (work, scale) = match work_area_for_point(
+                &window,
+                anchor.map(|(x, y)| (x as f64, y as f64)),
+            ) {
                 Some(geometry) => geometry,
                 None => return,
             };
-            let center = estimated_anchor_center(&window, &state.dock, &settings, work, scale);
-            if let Some(center) = center {
-                state.dock.set_anchor_center(center);
-            }
-            if let Err(error) = apply_pill(
-                &window,
+            let rect = collapsed_pill_geometry(
+                &state.dock,
                 edge,
                 &settings,
-                center.unwrap_or_else(|| window_center(&window)),
-            ) {
+                work,
+                scale,
+                window_center(&window),
+            );
+            if let Err(error) = apply_pill_rect(&window, rect) {
                 eprintln!("Could not reposition docked overlay: {error}");
+            } else {
+                state.dock.set_anchor_center(center_of(rect));
             }
         }
     }
@@ -1051,6 +1056,10 @@ fn apply_pill(
         work_area_for_point(window, Some((anchor_center.0 as f64, anchor_center.1 as f64)))
             .ok_or_else(|| "Monitor work area unavailable".to_string())?;
     let rect = pill_geometry(edge, work, scale, settings.scale_percent, anchor_center);
+    apply_pill_rect(window, rect)
+}
+
+fn apply_pill_rect(window: &WebviewWindow, rect: PhysicalRect) -> Result<(), String> {
     window
         .set_size(Size::Physical(PhysicalSize::new(rect.width, rect.height)))
         .map_err(|error| error.to_string())?;
@@ -1091,11 +1100,12 @@ fn set_full_size(window: &WebviewWindow, settings: &OverlaySettings) -> Result<(
 fn provisional_expanded_base_size(settings: &OverlaySettings) -> (f64, f64) {
     // Retain v1.3.0's conservative 140px quota budget. Browser layout
     // measurements require 100px for credit including its divider/gaps.
-    // Countdown-only blocks need 100px. Stacks add padding/gaps and a
+    // Countdown-only blocks reserve 120px to cover 100% readings (a single
+    // grouped Weekly block measures 108.58px). Stacks add padding/gaps and a
     // vertically stacked reading, so reserve extra width and height.
     // ResizeObserver remains authoritative once the content is measured.
     let quotas = if settings.show_five_hour_quota { 2.0 } else { 1.0 };
-    let quota_width = if settings.show_burn_rate { 140.0 } else { 100.0 };
+    let quota_width = if settings.show_burn_rate { 140.0 } else { 120.0 };
     let width = quotas * quota_width + if settings.show_credits { 100.0 } else { 0.0 };
     if settings.overlay_layout == crate::config::OverlayLayout::Stacks {
         (width + 40.0, 100.0)
@@ -1350,33 +1360,19 @@ fn window_center(window: &WebviewWindow) -> (i32, i32) {
     }
 }
 
-fn estimated_anchor_center(
-    window: &WebviewWindow,
+/// Display composition affects the expanded capsule only. Keep the collapsed
+/// pill at its session anchor and clamp its actual geometry to the work area.
+/// The current pill centre is the fallback for an uninitialized session.
+fn collapsed_pill_geometry(
     manager: &DockManager,
+    edge: Edge,
     settings: &OverlaySettings,
     work: PhysicalRect,
     monitor_scale: f64,
-) -> Option<(i32, i32)> {
-    let anchor = manager
-        .config
-        .load_position()
-        .map(|position| {
-            PhysicalPosition::new(position.left.round() as i32, position.top.round() as i32)
-        })
-        .or_else(|| window.outer_position().ok())?;
-    let scale = settings.scale_percent as f64 / 100.0 * monitor_scale;
-    let (base_width, base_height) = provisional_expanded_base_size(settings);
-    let width = (base_width * scale).round().max(1.0) as u32;
-    let height = (base_height * scale).round().max(1.0) as u32;
-    let clamped = clamp_position(anchor, PhysicalSize::new(width, height), work);
-    Some((
-        clamped
-            .x
-            .saturating_add((width / 2).min(i32::MAX as u32) as i32),
-        clamped
-            .y
-            .saturating_add((height / 2).min(i32::MAX as u32) as i32),
-    ))
+    current_center: (i32, i32),
+) -> PhysicalRect {
+    pill_geometry(edge, work, monitor_scale, settings.scale_percent,
+        manager.anchor_center().unwrap_or(current_center))
 }
 
 fn clamp_position(
@@ -1571,19 +1567,69 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_pill_stays_at_its_anchor_across_display_changes_and_refreshes() {
+        let manager = DockManager::new(ConfigManager::with_runtime_dir(
+            std::env::temp_dir().join(format!("codex-pill-anchor-{}", std::process::id()))));
+        let work = PhysicalRect { x: 0, y: 0, width: 3840, height: 2160 };
+        for monitor_scale in [1.0, 1.75, 2.5] {
+            for scale_percent in [100, 175, 250] {
+                for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
+                    // This session anchor differs from the fallback/window centre
+                    // and from any estimated expanded-capsule centre.
+                    let initial = pill_geometry(edge, work, monitor_scale, scale_percent, (832, 600));
+                    manager.set_anchor_center(center_of(initial));
+                    for five in [true, false] {
+                        for burn in [true, false] {
+                            for credits in [true, false] {
+                                for layout in [crate::config::OverlayLayout::Grouped, crate::config::OverlayLayout::Stacks] {
+                                    let settings = OverlaySettings {
+                                        scale_percent, show_five_hour_quota: five,
+                                        show_burn_rate: burn, show_credits: credits,
+                                        overlay_layout: layout, ..Default::default()
+                                    };
+                                    for _ in 0..2 {
+                                        let rect = collapsed_pill_geometry(&manager, edge, &settings,
+                                            work, monitor_scale, (500, 100));
+                                        assert_eq!(rect, initial);
+                                        manager.set_anchor_center(center_of(rect));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn collapsed_pill_falls_back_to_current_center_and_clamps_on_monitor_changes() {
+        let manager = DockManager::new(ConfigManager::with_runtime_dir(
+            std::env::temp_dir().join(format!("codex-pill-fallback-{}", std::process::id()))));
+        let settings = OverlaySettings::default();
+        let work = PhysicalRect { x: 0, y: 0, width: 1920, height: 1080 };
+        let rect = collapsed_pill_geometry(&manager, Edge::Top, &settings, work, 1.0, (832, 40));
+        assert_eq!(rect.x, 745);
+        manager.set_anchor_center((3000, 600));
+        let clamped = collapsed_pill_geometry(&manager, Edge::Top, &settings, work, 1.0, (832, 40));
+        assert_eq!(clamped.x, 1745);
+        assert!(contains(work, clamped));
+    }
+
+    #[test]
     fn display_compositions_cover_measured_content_and_pill_on_all_edges_and_scales() {
         // Worst CSS dimensions measured in Edge across en-US/zh-CN/zh-Hant,
-        // default quota/rate/credit fixture. These are content bounds, not a
+        // default fixture plus 100% readings. These are content bounds, not a
         // restatement of the provisional sizing formula.
         let measured = [
             (true, true, true, 324.74, 318.42),
             (true, true, false, 225.27, 237.27),
-            (true, false, true, 284.32, 232.96),
-            (true, false, false, 184.85, 151.82),
+            (true, false, true, 308.47, 257.05),
+            (true, false, false, 209.0, 175.91),
             (false, true, true, 210.05, 201.72),
             (false, true, false, 110.58, 120.58),
-            (false, false, true, 195.97, 163.53),
-            (false, false, false, 96.50, 82.38),
+            (false, false, true, 208.05, 175.60),
+            (false, false, false, 108.58, 94.46),
         ];
         let work = PhysicalRect { x: 0, y: 0, width: 3840, height: 2160 };
         let anchor = (1920, 1080);
@@ -1832,9 +1878,8 @@ mod tests {
         assert!(monitor_contains(a, clamped.anchor.0 as f64, clamped.anchor.1 as f64));
         assert_eq!(clamped.anchor_center, center_of(clamped.rect));
 
-        // Folded release: the persisted anchor is still the corrected expanded
-        // coordinate (what `estimated_anchor_center` re-derives from on the next
-        // refresh), and the recorded centre is the pill's own final centre.
+        // Folded release: the persisted anchor is the corrected expanded
+        // coordinate for startup; live refreshes retain the pill's final centre.
         let folded = resolve_drag_outcome(overshot, a, 1.0, &monitors, true, 175);
         assert_eq!(folded.anchor, (0, 400));
         assert_ne!(folded.anchor, (overshot.x, overshot.y));

@@ -30,23 +30,24 @@ const fs = require('node:fs');
             const page = await context.newPage();
             await page.goto('http://127.0.0.1:1427/scripts/display-controls-qa/index.html', { waitUntil: 'domcontentloaded', timeout: 60000 });
             await page.waitForFunction(() => window.qa);
-            for (const language of ['en-US', 'zh-CN', 'zh-Hant'])
+            for (const fixture of ['normal', 'full'])
+              for (const language of ['en-US', 'zh-CN', 'zh-Hant'])
                 for (const overlayLayout of ['grouped', 'stacks'])
                     for (const five of [true, false])
                         for (const burn of [true, false])
                             for (const credit of [true, false])
                                 for (const scale of [100, 250]) {
                                     const settings = { language, overlayLayout, showFiveHourQuota: five, showBurnRate: burn, showCredits: credit, scalePercent: scale };
-                                    await page.evaluate(s => window.qa.render(s), settings);
+                                    await page.evaluate(({ settings, fixture }) => window.qa.render(settings, null, false, 'overlay', fixture), { settings, fixture });
                                     const metrics = await page.evaluate(() => { const e = document.querySelector('.overlay-capsule'); const r = e.getBoundingClientRect(); return { width: r.width, height: r.height, groups: document.querySelectorAll('.overlay-quota').length, dividers: document.querySelectorAll('.overlay-divider').length, rateSpans: document.querySelectorAll('.overlay-burn-rate').length, clipped: [...e.querySelectorAll('span')].some(s => { const a = s.getBoundingClientRect(); return a.right > r.right + .1 || a.bottom > r.bottom + .1; }) }; });
-                                    const baseWidth = (five ? 2 : 1) * (burn ? 140 : 100) + (credit ? 100 : 0) + (overlayLayout === 'stacks' ? 40 : 0);
+                                    const baseWidth = (five ? 2 : 1) * (burn ? 140 : 120) + (credit ? 100 : 0) + (overlayLayout === 'stacks' ? 40 : 0);
                                     const baseHeight = overlayLayout === 'stacks' ? 100 : 70;
-                                    const item = { ...settings, dpr, ...metrics, baseWidth, baseHeight };
+                                    const item = { fixture, ...settings, dpr, ...metrics, baseWidth, baseHeight };
                                     results.push(item);
                                     if (metrics.width > baseWidth * scale / 100 + 1 || metrics.height > baseHeight * scale / 100 + 1 || metrics.clipped)
                                         failures.push(item);
                                     if (dpr === 1 && language === 'en-US' && scale === 100 && credit && burn)
-                                        await page.locator('.overlay-capsule').screenshot({ path: `output/display-qa/${overlayLayout}-${five ? 'dual' : 'weekly'}.png` });
+                                        await page.locator('.overlay-capsule').screenshot({ path: `output/display-qa/${overlayLayout}-${five ? 'dual' : 'weekly'}-${fixture}.png` });
                                 }
             for (const edge of ['left', 'right', 'top', 'bottom'])
                 for (const missing of [false, true]) {
