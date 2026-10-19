@@ -1,5 +1,17 @@
 # Status
 
+## 5H shadow personalization implementation — 2026-10-20
+
+- The 5-hour burn-rate estimator now carries an invisible personalization stack that collects causal feedback for a later publication decision. Nothing user-visible changed: the overlay, the pill, the tray, the notifications, the settings, the polling cadence and the frontend DTO are untouched, and the frontend suite is unchanged.
+- The Fixed Weighted candidate was promoted from the offline replay code into `src-tauri/src/codex/burn_rate/weighted.rs`, and the replay suite now imports it. The regenerated real-history forecast matches the pre-refactor baseline in all 318 rows with a **maximum prediction deviation of 0**, and the 13 committed evidence files stay byte-identical.
+- New `personal.rs` holds the frozen learner (`A0=B0=10`, `lambda=0.99`, `c=clamp(A/B,0.75,1.50)`, `E` decayed, `g=E/(E+8)`) and the five-minute pending interval with a complete causal origin snapshot. New `shadow.rs` holds the v2 state subtree, the algorithm-version isolation and the at-least-once audit outbox.
+- The burn-rate state schema moved from v1 to v2. A v1 file keeps its 5H and Weekly crossing history and gains a neutral shadow subtree; a malformed shadow subtree keeps the recoverable quota history; an algorithm-version mismatch keeps the history and the audit identity and resets only the incompatible learner state.
+- The matured outcome scores the three predictions that were stored at the origin (published, Fixed Weighted, personalized), each capped by the quota remaining at the origin. The learner always trains on the Fixed Weighted prediction. A reset-correction, a decrease, a saturation, a gap over the frozen 90 seconds, a confirmed segment transition and a backward timestamp all reject the interval without touching the long-lived `A/B/E`.
+- The personal transitions are paused while an audit event is waiting for the durable log, and a retained event is flushed on the next startup. The local evidence log is bounded to 10,000 events, carries no account identifier, and a save or log failure never fails a usage refresh.
+- Rust **276** regular tests passed (4 pre-existing ignored replay tests unchanged), frontend 95 passed, the production build passed, the packaging regression passed, and the locked Cargo check is clean with zero warnings.
+- The packaged and native smoke validation of the plan could **not** be performed on this machine; the restart, pending resume/reject, account switch, quota reset, log retry and the 30/60/120/300-second cadence behavior are covered by the automated tests only.
+- [Implementation handoff](docs/handoff/2026-10-20-5h-shadow-personalization-implementation.md) records the test counts, the migration and isolation results, two de-identified evidence records, the outbox recovery result and the nine implementation-level deviations.
+
 ## v1.3.1 smart pause implementation — 2026-10-19
 
 - The confirmed smart pause plan is implemented: a cooperative `暂停` request is sent to the running Codex session through the desktop client's own control plane, and a 5-hour trigger asks Codex to schedule a one-time task that sends `继续` two minutes after the reset. The feature is opt-in and off by default.

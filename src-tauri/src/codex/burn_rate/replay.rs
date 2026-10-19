@@ -3,57 +3,13 @@ use super::*;
 
 mod adaptive;
 
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-struct Parameters {
-    half_life: f64,
-    window: i64,
-}
+use super::weighted::{weighted_fit, WeightedParameters, WeightedShadowState};
 
-fn weighted_fit(state: &QuotaRateState, horizon: i64, span: u32, p: Parameters) -> Option<f64> {
-    if !p.half_life.is_finite() || p.half_life <= 0.0 || p.window <= 0 {
-        return None;
-    }
-    let end = state.last_observed_at?;
-    let events: Vec<_> = state
-        .crossings
-        .iter()
-        .filter(|e| {
-            e.segment_id == state.segment_id
-                && e.observed_at <= end
-                && end.saturating_sub(e.observed_at) <= horizon
-        })
-        .collect();
-    let newest = *events.last()?;
-    // Locality is relative to the newest crossing; accepted idle must not erase
-    // an otherwise eligible fit before its hard evidence horizon expires.
-    let local: Vec<_> = events
-        .into_iter()
-        .filter(|e| newest.observed_at.saturating_sub(e.observed_at) <= p.window)
-        .collect();
-    if newest.level.saturating_sub(local.first()?.level) < span {
-        return None;
-    }
-    let points: Vec<_> = local
-        .iter()
-        .map(|e| {
-            let t = e.observed_at.saturating_sub(newest.observed_at) as f64;
-            (t, e.level as f64, (t / p.half_life).exp2())
-        })
-        .collect();
-    let sum: f64 = points.iter().map(|v| v.2).sum();
-    let mean_t = points.iter().map(|v| v.0 * v.2).sum::<f64>() / sum;
-    let mean_l = points.iter().map(|v| v.1 * v.2).sum::<f64>() / sum;
-    let covariance = points
-        .iter()
-        .map(|v| v.2 * (v.0 - mean_t) * (v.1 - mean_l))
-        .sum::<f64>();
-    let variance = points
-        .iter()
-        .map(|v| v.2 * (v.0 - mean_t).powi(2))
-        .sum::<f64>();
-    let rate = covariance / variance * 3600.0;
-    (variance.is_finite() && variance > 0.0 && rate.is_finite() && rate > 0.0).then_some(rate)
-}
+/// The weighting parameters of the offline candidates.
+///
+/// The fit itself is the production helper, so the committed evidence keeps
+/// testing the code the application runs.
+type Parameters = WeightedParameters;
 
 fn tolerant_optional<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
@@ -83,33 +39,24 @@ struct Candidate {
 }
 
 impl Candidate {
-    fn normalize(&mut self) -> bool {
-        let before = (self.upper, self.ceiling);
-        let newest = self
-            .quota
-            .crossings
-            .iter()
-            .rev()
-            .find(|e| e.segment_id == self.quota.segment_id);
-        match (newest, self.quota.last_observed_at) {
-            (Some(event), Some(end)) if event.observed_at <= end => {
-                if !self
-                    .upper
-                    .is_some_and(|bound| event.observed_at <= bound && bound <= end)
-                {
-                    self.upper = Some(end);
-                    self.ceiling = None;
-                }
-                if self.ceiling.is_some_and(|v| !v.is_finite() || v <= 0.0) {
-                    self.ceiling = None;
-                }
-            }
-            _ => {
-                self.upper = None;
-                self.ceiling = None;
-            }
+    /// The production metadata behind the offline candidate fields.
+    fn metadata(&self) -> WeightedShadowState {
+        WeightedShadowState {
+            last_crossing_observation_at: self.upper,
+            idle_rate_ceiling: self.ceiling,
         }
-        before != (self.upper, self.ceiling)
+    }
+
+    fn adopt_metadata(&mut self, metadata: WeightedShadowState) {
+        self.upper = metadata.last_crossing_observation_at;
+        self.ceiling = metadata.idle_rate_ceiling;
+    }
+
+    fn normalize(&mut self) -> bool {
+        let mut metadata = self.metadata();
+        let changed = metadata.normalize(&self.quota);
+        self.adopt_metadata(metadata);
+        changed
     }
 
     fn accept(
@@ -154,29 +101,17 @@ impl Candidate {
         self.normalize();
         let before = self.quota.clone();
         accept_quota(&mut self.quota, snapshot, at, max_gap);
-        if self.quota.segment_id != before.segment_id {
-            self.upper = None;
-            self.ceiling = None;
-        }
-        if self.quota.crossings.last().is_some()
-            && self.quota.crossings.last() != before.crossings.last()
-        {
-            self.upper = Some(at);
-            self.ceiling = None;
-        }
+        let mut metadata = self.metadata();
+        metadata.apply_transition(&before, &self.quota, at);
+        self.adopt_metadata(metadata);
         self.quota.last_observed_at != before.last_observed_at
     }
 
     fn publish(&mut self, horizon: i64, span: u32, p: Parameters, accepted: bool) -> Option<f64> {
-        let fit = weighted_fit(&self.quota, horizon, span, p)?;
-        let idle = self.quota.last_observed_at?.saturating_sub(self.upper?) as f64;
-        if accepted && idle > 3600.0 / fit + EPSILON {
-            let candidate = fit.min(3600.0 / idle);
-            self.ceiling = Some(self.ceiling.map_or(candidate, |old| old.min(candidate)));
-        } else if accepted && self.ceiling.is_some() {
-            self.ceiling = self.ceiling.map(|old| old.min(fit));
-        }
-        Some(self.ceiling.map_or(fit, |c| c.min(fit)))
+        let mut metadata = self.metadata();
+        let rate = metadata.publish(&self.quota, horizon, span, p, accepted);
+        self.adopt_metadata(metadata);
+        rate
     }
 }
 

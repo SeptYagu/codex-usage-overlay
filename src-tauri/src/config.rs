@@ -192,6 +192,14 @@ impl ConfigManager {
         self.runtime_dir.join("burn-rate-state.json")
     }
 
+    /// The local shadow evidence log.
+    ///
+    /// It is diagnostic evidence for the local learner, not telemetry: it is
+    /// never uploaded or transmitted.
+    pub fn shadow_evidence_path(&self) -> PathBuf {
+        self.runtime_dir.join("burn-rate-shadow-evidence.jsonl")
+    }
+
     pub fn load_settings(&self) -> OverlaySettings {
         let path = self.settings_path();
         if path.is_file() {

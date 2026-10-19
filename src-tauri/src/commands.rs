@@ -177,10 +177,15 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
             let estimate = {
                 let mut tracker = state.burn_rate.lock().await;
                 let estimate = tracker.accept_usage(&raw);
-                if estimate.state_changed {
+                if estimate.state_changed || tracker.is_dirty() {
                     if let Err(error) = tracker.save(&state.config_manager) {
                         eprintln!("Could not persist burn-rate state: {error}");
                     }
+                }
+                // The shadow audit event may only reach the evidence log once
+                // the learner state behind it is durable.
+                if let Err(error) = tracker.flush_audit_outbox(&state.config_manager) {
+                    eprintln!("Could not append shadow evidence: {error}");
                 }
                 estimate
             };
