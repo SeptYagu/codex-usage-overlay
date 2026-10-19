@@ -19,6 +19,7 @@
 - Two reported findings did not reproduce and are recorded as such: a session listed with two host ids is sent to once, and the cycle-less key of a missing `resetsAt` is a documented residual risk (R-8) rather than a defect.
 - The synthetic `turnId` was traced through the installed client: the schema only requires a non-empty string, the envelope's `turnId` is read only by the `wait_threads` completion matching and a call de-duplication key, and the send path routes by the target `threadId` and `hostId`. The read-only handshake with a synthetic turn id was accepted live, so the risk is small — but only a real delivery closes it completely.
 - After the fixes: Rust **201** regular tests passed (4 pre-existing ignored replay tests unchanged), frontend 95 passed, the production build passed, and the locked Cargo check is clean with zero warnings.
+- **Published.** `v1.3.1` is tagged at `6d5d0a1` and published as the latest GitHub release: the signed NSIS installer, the signed MSI, the signed portable archive, their `.sig` files, the `latest.json` updater manifest and `SHA256SUMS.txt`. The release workflow ran green on windows-latest (13m36s), including the packaging regression, the frontend and Rust suites, and the signed Tauri build. `1.3.0` stays the rollback baseline.
 
 ## Real quota history validation — 2026-10-03
 
@@ -54,7 +55,7 @@
 - Interactive Windows gestures and signed-package smoke tests were not performed. The historical v1.2.0 review and manual verification gaps below remain unchanged.
 
 
-_Last updated: 2026-10-19 (v1.3.1 display controls and the smart pause implementation landed, and the smart pause implementation passed an independent review round whose findings are all fixed. The v1.2.0 round-3 review remains the last independently reviewed *release* line: 0 defects. Four gates fully green: npm test 95/95, npm run build, cargo test 201/201, cargo check 0 warnings. The bridge handshake was verified read-only against the live Codex client; a real delivery and the signed package are not verified.)_
+_Last updated: 2026-10-19 (v1.3.1 published: the display controls and the smart pause implementation are in, the smart pause implementation passed an independent review round whose findings are all fixed, and `v1.3.1` is tagged and released. The v1.2.0 round-3 review remains the last independently reviewed *release* line: 0 defects. Four gates fully green: npm test 95/95, npm run build, cargo test 201/201, cargo check 0 warnings. The bridge handshake was verified read-only against the live Codex client; a real delivery and the signed package smoke test are not verified.)_
 
 ## Current state
 
