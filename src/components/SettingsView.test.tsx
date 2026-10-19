@@ -87,7 +87,7 @@ describe('two-column settings layout', () => {
     expect(grid.contains(header)).toBe(false);
     expect(grid.contains(footer)).toBe(false);
     expect(within(header).getByRole('heading', { name: 'Settings' })).toBeTruthy();
-    expect(within(header).getByText('v1.3.0')).toBeTruthy();
+    expect(within(header).getByText('v1.3.1')).toBeTruthy();
     expect(within(footer).getByText('septwind@agent.qq.com')).toBeTruthy();
   });
 
@@ -188,6 +188,107 @@ describe('percentage grid interaction', () => {
     expect(onPatchSettings).toHaveBeenCalledTimes(1);
     expect(onPatchSettings.mock.calls[0][0]).toEqual({ showPercentageGrid: false });
   });
+});
+
+
+describe('smart pause settings', () => {
+  it('renders the auto-pause controls in the right column only', async () => {
+    const { left, right } = await renderSettings();
+
+    within(right).getByRole('checkbox', { name: 'Pause Codex when quota runs low' });
+    within(right).getByRole('slider', { name: '5-hour quota threshold' });
+    within(right).getByRole('slider', { name: 'Weekly quota threshold' });
+
+    expect(within(left).queryByRole('checkbox', { name: 'Pause Codex when quota runs low' })).toBeNull();
+    expect(within(left).queryByRole('slider', { name: '5-hour quota threshold' })).toBeNull();
+    expect(within(left).queryByRole('slider', { name: 'Weekly quota threshold' })).toBeNull();
+  });
+
+  it('keeps the master switch off by default and saves it immediately', async () => {
+    const { right, onPatchSettings } = await renderSettings();
+    const toggle = within(right).getByRole('checkbox', { name: 'Pause Codex when quota runs low' }) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+
+    fireEvent.click(toggle);
+
+    expect(onPatchSettings).toHaveBeenCalledTimes(1);
+    // Only the master switch is patched; no threshold rides along.
+    expect(onPatchSettings.mock.calls[0][0]).toEqual({ autoPauseOnLowQuota: true });
+    // Immediate save: the call is not routed through the debounced slider path.
+    expect(onPatchSettings.mock.calls[0][1]).toBeFalsy();
+  });
+
+  it('disables both threshold sliders while the master switch is off', async () => {
+    const { right, onPatchSettings, rerender } = await renderSettings();
+    const five = within(right).getByRole('slider', { name: '5-hour quota threshold' }) as HTMLInputElement;
+    const weekly = within(right).getByRole('slider', { name: 'Weekly quota threshold' }) as HTMLInputElement;
+
+    expect(five.disabled).toBe(true);
+    expect(weekly.disabled).toBe(true);
+
+    rerender(<SettingsView settings={{ ...DEFAULT_SETTINGS, autoPauseOnLowQuota: true }} onPatchSettings={onPatchSettings} />);
+
+    const enabledFive = within(right).getByRole('slider', { name: '5-hour quota threshold' }) as HTMLInputElement;
+    const enabledWeekly = within(right).getByRole('slider', { name: 'Weekly quota threshold' }) as HTMLInputElement;
+    expect(enabledFive.disabled).toBe(false);
+    expect(enabledWeekly.disabled).toBe(false);
+  });
+
+  it('patches the 5-hour threshold through the debounced slider path', async () => {
+    const { right, onPatchSettings } = await renderSettings({ autoPauseOnLowQuota: true });
+    const five = within(right).getByRole('slider', { name: '5-hour quota threshold' });
+
+    fireEvent.change(five, { target: { value: '7' } });
+
+    expect(onPatchSettings).toHaveBeenCalledTimes(1);
+    expect(onPatchSettings.mock.calls[0][0]).toEqual({ autoPauseFiveHourThresholdPercent: 7 });
+    expect(onPatchSettings.mock.calls[0][1]).toBe(true);
+  });
+
+  it('patches the weekly threshold through the debounced slider path', async () => {
+    const { right, onPatchSettings } = await renderSettings({ autoPauseOnLowQuota: true });
+    const weekly = within(right).getByRole('slider', { name: 'Weekly quota threshold' });
+
+    fireEvent.change(weekly, { target: { value: '4' } });
+
+    expect(onPatchSettings).toHaveBeenCalledTimes(1);
+    expect(onPatchSettings.mock.calls[0][0]).toEqual({ autoPauseWeeklyThresholdPercent: 4 });
+    expect(onPatchSettings.mock.calls[0][1]).toBe(true);
+  });
+
+  it('renders the current threshold percentages and the hint', async () => {
+    const { right } = await renderSettings();
+
+    expect(within(right).getByText('5%')).toBeTruthy();
+    expect(within(right).getByText('2%')).toBeTruthy();
+    expect(within(right).getByText(/Sends a pause request to your active Codex session/)).toBeTruthy();
+  });
+});
+
+
+it.each([
+  ['en-US', 'Pause Codex when quota runs low', '5-hour quota threshold', 'Weekly quota threshold'],
+  ['zh-CN', '额度不足时暂停 Codex', '5 小时额度阈值', '每周额度阈值'],
+  ['zh-Hant', '額度不足時暫停 Codex', '5 小時額度閾值', '每週額度閾值'],
+])('exposes localized auto-pause control names in %s', async (language, toggleName, fiveName, weeklyName) => {
+  await i18n.changeLanguage(language);
+  const { right, onPatchSettings } = await renderSettings();
+
+  const toggle = within(right).getByRole('checkbox', { name: toggleName }) as HTMLInputElement;
+  expect(toggle.checked).toBe(false);
+  fireEvent.click(toggle);
+  expect(onPatchSettings).toHaveBeenCalledTimes(1);
+  expect(onPatchSettings.mock.calls[0][0]).toEqual({ autoPauseOnLowQuota: true });
+
+  const five = within(right).getByRole('slider', { name: fiveName }) as HTMLInputElement;
+  const weekly = within(right).getByRole('slider', { name: weeklyName }) as HTMLInputElement;
+  expect(five.disabled).toBe(true);
+  expect(weekly.disabled).toBe(true);
+
+  // The accessible name must follow the active locale instead of staying English.
+  if (language !== 'en-US') {
+    expect(within(right).queryByRole('checkbox', { name: 'Pause Codex when quota runs low' })).toBeNull();
+  }
 });
 
 

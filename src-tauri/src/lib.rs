@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod dock;
 mod notify;
+mod pause_control;
 mod tray;
 #[cfg(windows)]
 mod audio;
@@ -47,6 +48,7 @@ pub fn run() {
         last_auto_notified_version: Mutex::new(None),
         reset_state: Mutex::new(notify::load_reset_state(&config_manager)),
         pending_reset_fetches: Mutex::new(notify::PendingResetFetches::default()),
+        auto_pause: std::sync::Mutex::new(pause_control::AutoPauseController::new()),
         #[cfg(windows)]
         audio: std::sync::OnceLock::new(),
     });
@@ -134,6 +136,7 @@ pub fn run() {
             commands::fetch_usage,
             commands::get_last_usage,
             commands::get_settings,
+            commands::get_auto_pause_status,
             commands::patch_settings,
             commands::open_settings_window,
             commands::is_installed_version,

@@ -32,6 +32,9 @@ export interface OverlaySettings {
   autoEdgeHide: boolean;
   mousePassthrough: boolean;
   showPercentageGrid: boolean;
+  autoPauseOnLowQuota: boolean;
+  autoPauseFiveHourThresholdPercent: number;
+  autoPauseWeeklyThresholdPercent: number;
 }
 
 export interface SettingsEnvelope {
@@ -70,6 +73,10 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   autoEdgeHide: false,
   mousePassthrough: false,
   showPercentageGrid: false,
+  // Smart pause is opt-in: an upgrade must never silently arm the feature.
+  autoPauseOnLowQuota: false,
+  autoPauseFiveHourThresholdPercent: 5,
+  autoPauseWeeklyThresholdPercent: 2,
 };
 
 export interface UsageStatus {

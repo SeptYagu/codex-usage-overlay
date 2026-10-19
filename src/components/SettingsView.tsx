@@ -45,6 +45,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const toggleRow = 'flex items-center justify-between p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800/60 hover:bg-slate-200/60 dark:hover:bg-slate-800 cursor-pointer transition-colors';
   const checkbox = 'w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 accent-cyan-500 cursor-pointer';
 
+  // The smart-pause thresholds only apply while the master switch is on.
+  const autoPauseDisabled = !settings.autoPauseOnLowQuota;
+
   return (
     <div className="h-screen overflow-hidden bg-[#F5F6F8] dark:bg-slate-900 text-slate-800 dark:text-slate-100 p-5 flex flex-col font-sans select-none">
       {/* Header — full width */}
@@ -204,6 +207,66 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <option value="120">{t('min2')}</option>
               <option value="300">{t('min5')}</option>
             </select>
+          </div>
+
+          {/* Smart pause: asks the running Codex session to pause when the quota runs low */}
+          <div className="space-y-2.5 rounded-lg border border-slate-200 dark:border-slate-700 p-2.5">
+            <label className={toggleRow}>
+              <span className="text-sm font-medium">{t('autoPauseOnLowQuota')}</span>
+              <input
+                type="checkbox"
+                aria-label={t('autoPauseOnLowQuota')}
+                checked={settings.autoPauseOnLowQuota}
+                onChange={(e) => onPatchSettings({ autoPauseOnLowQuota: e.target.checked })}
+                className={checkbox}
+              />
+            </label>
+
+            <div className={`space-y-2.5 ${autoPauseDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}>
+              <div className="space-y-1">
+                <div className="flex justify-between items-center text-sm font-semibold">
+                  <span>{t('autoPauseFiveHourThreshold')}</span>
+                  <span className="font-mono text-cyan-600 dark:text-cyan-400 text-sm">
+                    {settings.autoPauseFiveHourThresholdPercent}%
+                  </span>
+                </div>
+                <input
+                  aria-label={t('autoPauseFiveHourThreshold')}
+                  type="range"
+                  min="1"
+                  max="15"
+                  step="1"
+                  disabled={autoPauseDisabled}
+                  value={settings.autoPauseFiveHourThresholdPercent}
+                  onChange={(e) => onPatchSettings({ autoPauseFiveHourThresholdPercent: parseInt(e.target.value, 10) }, true)}
+                  className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:cursor-not-allowed"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex justify-between items-center text-sm font-semibold">
+                  <span>{t('autoPauseWeeklyThreshold')}</span>
+                  <span className="font-mono text-cyan-600 dark:text-cyan-400 text-sm">
+                    {settings.autoPauseWeeklyThresholdPercent}%
+                  </span>
+                </div>
+                <input
+                  aria-label={t('autoPauseWeeklyThreshold')}
+                  type="range"
+                  min="1"
+                  max="10"
+                  step="1"
+                  disabled={autoPauseDisabled}
+                  value={settings.autoPauseWeeklyThresholdPercent}
+                  onChange={(e) => onPatchSettings({ autoPauseWeeklyThresholdPercent: parseInt(e.target.value, 10) }, true)}
+                  className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:cursor-not-allowed"
+                />
+              </div>
+            </div>
+
+            <p className="px-1 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+              {t('autoPauseHint')}
+            </p>
           </div>
 
           {/* Autostart (only meaningful for installed builds) */}

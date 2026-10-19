@@ -45,6 +45,12 @@ pub struct AppState {
     pub last_auto_notified_version: Mutex<Option<String>>,
     pub reset_state: Mutex<ResetStateFile>,
     pub pending_reset_fetches: Mutex<PendingResetFetches>,
+    /// The auto-pause ledger, the queued sample and the bridge transport.
+    ///
+    /// It is a standard mutex on purpose: the critical sections only exchange
+    /// short-lived in-memory state, so the delivery worker never holds it
+    /// across an await and never blocks the quota read.
+    pub auto_pause: StdMutex<crate::pause_control::AutoPauseController>,
     #[cfg(windows)]
     pub audio: OnceLock<crate::audio::AudioHandle>,
 }
@@ -80,6 +86,7 @@ impl AppState {
             last_auto_notified_version: Mutex::new(None),
             reset_state: Mutex::new(crate::notify::load_reset_state(&config_manager)),
             pending_reset_fetches: Mutex::new(PendingResetFetches::default()),
+            auto_pause: StdMutex::new(crate::pause_control::AutoPauseController::new()),
             #[cfg(windows)]
             audio: OnceLock::new(),
         }
@@ -180,6 +187,13 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
             let usage = raw.to_ui(estimate.five_hour_per_hour, estimate.weekly_per_hour);
             state.config_manager.write_status("ok", None);
             crate::notify::process_usage_success(sink, state, &usage).await;
+            // The account identity is copied before the UI model is built,
+            // because `CodexUsage` does not carry it. The auto-pause path needs
+            // it to build an unambiguous de-duplication key, and a sample
+            // without one never triggers a delivery.
+            let account_id = raw.account_id.clone();
+            let settings = state.settings.lock().await.clone();
+            crate::pause_control::schedule(state, settings, usage.clone(), account_id);
             Ok(usage)
         }
         Err(error) => {
@@ -229,6 +243,23 @@ pub async fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsEnv
     })
 }
 
+/// The auto-pause status the settings window reads.
+///
+/// It reports whether a bridge candidate answered the `list_threads`
+/// handshake and how many pause requests were positively confirmed. It never
+/// claims a delivery that the bridge did not confirm.
+#[tauri::command]
+pub async fn get_auto_pause_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::pause_control::AutoPauseStatus, String> {
+    let enabled = state.settings.lock().await.auto_pause_on_low_quota;
+    let controller = state
+        .auto_pause
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Ok(controller.status(enabled))
+}
+
 #[tauri::command]
 pub async fn patch_settings(
     patch: Value,
@@ -250,8 +281,10 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "backgroundTransparencyPercent" => value.as_u64().is_some_and(|n| n <= 80 && n % 5 == 0),
             "showCredits" | "autoCheckUpdates" | "autoInstallUpdates" | "fiveHourResetNotification"
             | "weeklyResetNotification" | "autoEdgeHide" | "mousePassthrough" | "showPercentageGrid"
-            | "showFiveHourQuota" | "showBurnRate" => value.is_boolean(),
+            | "showFiveHourQuota" | "showBurnRate" | "autoPauseOnLowQuota" => value.is_boolean(),
             "autoStart" => allow_auto_start && value.is_boolean(),
+            "autoPauseFiveHourThresholdPercent" => value.as_u64().is_some_and(|n| (1..=15).contains(&n)),
+            "autoPauseWeeklyThresholdPercent" => value.as_u64().is_some_and(|n| (1..=10).contains(&n)),
             "refreshIntervalSeconds" => value.as_u64().is_some_and(|n| (15..=3600).contains(&n)),
             "language" => matches!(value.as_str(), Some("auto" | "en-US" | "zh-CN" | "zh-Hant")),
             "fiveHourSoundMode" | "weeklySoundMode" => matches!(value.as_str(), Some("windows" | "custom")),
@@ -1100,6 +1133,497 @@ mod tests {
         assert_eq!(resolve_locale("zh-CN"), "zh-CN");
         assert_eq!(resolve_locale("zh-Hant"), "zh-Hant");
         assert_eq!(resolve_locale("en-US"), "en-US");
+    }
+}
+
+/// The auto-pause wiring tests.
+///
+/// They drive the *production* refresh path — `refresh_usage` — and observe the
+/// bridge through the injectable transport, so they prove that the successful
+/// sample really reaches the scheduler and not just the pure decision
+/// functions.
+#[cfg(test)]
+mod auto_pause_tests {
+    use super::*;
+    use crate::codex::{QuotaSnapshot, RawCodexUsage};
+    use crate::config::ConfigManager;
+    use crate::pause_control::testing::ScriptedTransport;
+    use crate::pause_control::BridgeDiscovery;
+    use std::sync::Arc;
+
+    const FETCHED_AT: i64 = 1_700_000_000;
+    const CALLER_THREAD: &str = "123e4567-e89b-12d3-a456-426614174000";
+    const PIPE: &str = "codex-app-tools-123e4567-e89b-12d3-a456-426614174000";
+
+    /// A tray sink that records nothing and needs no event loop.
+    struct OfflineSink {
+        outcome: StdMutex<Option<Result<RawCodexUsage, String>>>,
+        reads: AtomicU64,
+    }
+
+    impl OfflineSink {
+        fn with_usage(usage: RawCodexUsage) -> Self {
+            Self {
+                outcome: StdMutex::new(Some(Ok(usage))),
+                reads: AtomicU64::new(0),
+            }
+        }
+
+        fn failing(message: &str) -> Self {
+            Self {
+                outcome: StdMutex::new(Some(Err(message.to_string()))),
+                reads: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl TrayPresentationSink for OfflineSink {
+        fn present(&self, _presentation: crate::tray::TrayPresentation) {}
+        fn app_handle(&self) -> Option<&AppHandle> {
+            None
+        }
+    }
+
+    impl UsageSource for OfflineSink {
+        async fn read_usage(&self, _: &AppState) -> Result<RawCodexUsage, String> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.outcome
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("the scripted outcome must be present")
+        }
+    }
+
+    /// A sample whose 5-hour window is below the threshold.
+    fn low_quota_usage(account_id: Option<&str>) -> RawCodexUsage {
+        RawCodexUsage {
+            account_id: account_id.map(ToOwned::to_owned),
+            five_hour: QuotaSnapshot {
+                used_percent: Some(97.0),
+                resets_at: Some(FETCHED_AT + 3_600),
+                window_duration_mins: Some(300),
+            },
+            weekly: QuotaSnapshot {
+                used_percent: Some(50.0),
+                resets_at: Some(FETCHED_AT + 86_400),
+                window_duration_mins: Some(10_080),
+            },
+            credits_display: "—".to_string(),
+            credits_balance: None,
+            has_credits: false,
+            fetched_at: FETCHED_AT,
+        }
+    }
+
+    fn temp_state(tag: &str) -> (Arc<AppState>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-usage-overlay-auto-pause-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        (
+            Arc::new(AppState::for_test(ConfigManager::with_runtime_dir(dir.clone()))),
+            dir,
+        )
+    }
+
+    /// Builds a state whose auto-pause path is switched on and wired to a
+    /// scripted bridge.
+    async fn armed_state(tag: &str) -> (Arc<AppState>, Arc<ScriptedTransport>, std::path::PathBuf) {
+        let (state, dir) = temp_state(tag);
+        {
+            let mut settings = state.settings.lock().await;
+            settings.auto_pause_on_low_quota = true;
+            settings.auto_pause_five_hour_threshold_percent = 5;
+            settings.auto_pause_weekly_threshold_percent = 2;
+        }
+
+        let transport = Arc::new(ScriptedTransport::new());
+        {
+            let mut controller = state.auto_pause.lock().unwrap();
+            controller.set_transport(transport.clone());
+            controller.set_discovery(BridgeDiscovery {
+                explicit_pipe_path: None,
+                pipe_names: vec![PIPE.to_string()],
+                caller_thread_ids: vec![CALLER_THREAD.to_string()],
+            });
+            controller.set_worker_spawner(Arc::new(|state| {
+                tokio::spawn(async move {
+                    crate::pause_control::run_delivery_worker(state).await;
+                });
+            }));
+        }
+        (state, transport, dir)
+    }
+
+    /// Waits until the scripted bridge recorded at least one call.
+    async fn wait_for_calls(transport: &ScriptedTransport) {
+        for _ in 0..200 {
+            if !transport.calls().is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The scheduled pause request the plan fixes for a 5-hour trigger.
+    const EXPECTED_SCHEDULED_MESSAGE: &str = "\u{6682}\u{505C}\u{FF0C}\u{8BBE}\u{7F6E}\u{4E00}\u{6B21}\u{6027}\u{5B9A}\u{65F6}\u{4EFB}\u{52A1}\u{FF0C}\u{5728}1h 0min +2min\u{540E}\u{53D1}\u{9001}\u{2018}\u{7EE7}\u{7EED}\u{2019}\u{4E24}\u{4E2A}\u{5B57}";
+
+    #[tokio::test]
+    async fn a_successful_refresh_reaches_the_bridge_with_the_scheduled_pause() {
+        let (state, transport, dir) = armed_state("wiring-success").await;
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+
+        let usage = refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        assert_eq!(usage.five_hour_remaining_percent, Some(3));
+        assert_eq!(sink.reads.load(Ordering::SeqCst), 1);
+
+        wait_for_calls(&transport).await;
+
+        // The handshake ran against the discovered pipe with the caller
+        // identity, and the pause request carried the fixed message.
+        let calls = transport.calls();
+        let handshake = calls
+            .iter()
+            .find(|call| call.tool_name == "list_threads")
+            .expect("the handshake must run");
+        assert_eq!(handshake.pipe, PIPE);
+        assert_eq!(handshake.caller_thread_id, CALLER_THREAD);
+        assert_eq!(handshake.arguments["limit"], 50);
+
+        let sent = calls
+            .iter()
+            .find(|call| call.tool_name == "send_message_to_thread")
+            .expect("the pause request must be sent");
+        assert_eq!(sent.arguments["threadId"], "session-1");
+        assert_eq!(sent.arguments["hostId"], "host-1");
+        assert_eq!(sent.arguments["prompt"], EXPECTED_SCHEDULED_MESSAGE);
+
+        // A confirmed delivery is reported, not guessed.
+        let status = state
+            .auto_pause
+            .lock()
+            .unwrap()
+            .status(true);
+        assert_eq!(status.confirmed_count, 1);
+        assert!(status.last_confirmed_at.is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_never_reaches_the_bridge() {
+        let (state, transport, dir) = armed_state("wiring-error").await;
+        let sink = OfflineSink::failing("usage read failed");
+
+        let result = refresh_usage(&sink, &state).await;
+        assert!(result.is_err());
+        assert!(transport.calls().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_switched_off_feature_never_reaches_the_bridge() {
+        let (state, transport, dir) = armed_state("wiring-disabled").await;
+        {
+            let mut settings = state.settings.lock().await;
+            settings.auto_pause_on_low_quota = false;
+        }
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert!(transport.calls().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_sample_without_an_account_never_reaches_the_bridge() {
+        let (state, transport, dir) = armed_state("wiring-no-account").await;
+        let sink = OfflineSink::with_usage(low_quota_usage(None));
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert!(transport.calls().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_repeated_refresh_does_not_send_a_second_message() {
+        let (state, transport, dir) = armed_state("wiring-repeat").await;
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        wait_for_calls(&transport).await;
+        assert_eq!(transport.sent_prompts().len(), 1);
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the second refresh must succeed");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            transport.sent_prompts().len(),
+            1,
+            "a confirmed delivery must not be repeated"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_delivery_is_retried_on_the_next_refresh() {
+        let (state, transport, dir) = armed_state("wiring-retry").await;
+        transport.set_send_success(false);
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        wait_for_calls(&transport).await;
+        assert_eq!(transport.sent_prompts().len(), 1);
+
+        // A refused request is never recorded as a confirmed delivery.
+        let status = state.auto_pause.lock().unwrap().status(true);
+        assert_eq!(status.confirmed_count, 0);
+        assert_eq!(status.last_confirmed_at, None);
+
+        // The next refresh tries again.
+        transport.set_send_success(true);
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the second refresh must succeed");
+        for _ in 0..200 {
+            if transport.sent_prompts().len() > 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(transport.sent_prompts().len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn two_triggered_windows_produce_a_single_plain_pause() {
+        let (state, transport, dir) = armed_state("wiring-both").await;
+        let mut usage = low_quota_usage(Some("acct-1"));
+        usage.weekly.used_percent = Some(99.0);
+        let sink = OfflineSink::with_usage(usage);
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        wait_for_calls(&transport).await;
+
+        let prompts = transport.sent_prompts();
+        assert_eq!(prompts.len(), 1, "both windows share one message");
+        assert_eq!(prompts[0], crate::pause_control::PAUSE_MESSAGE);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unconfirmed handshake never reaches the sending step: the pipe name
+    /// alone is not evidence that a bridge is usable.
+    #[tokio::test]
+    async fn an_unconfirmed_handshake_never_sends_anything() {
+        let (state, transport, dir) = armed_state("wiring-handshake").await;
+        transport.set_list_threads(crate::pause_control::ToolCallOutcome {
+            success: false,
+            text: None,
+        });
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        wait_for_calls(&transport).await;
+
+        let calls = transport.calls();
+        assert!(calls.iter().any(|call| call.tool_name == "list_threads"));
+        assert!(
+            !calls.iter().any(|call| call.tool_name == "send_message_to_thread"),
+            "an unconfirmed handshake must not send"
+        );
+        let status = state.auto_pause.lock().unwrap().status(true);
+        assert_eq!(status.confirmed_count, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A transport failure is an unconfirmed delivery, not a success.
+    #[tokio::test]
+    async fn a_transport_failure_is_not_a_confirmed_delivery() {
+        let (state, transport, dir) = armed_state("wiring-transport-error").await;
+        transport.set_send_error("the pipe vanished");
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        wait_for_calls(&transport).await;
+
+        assert_eq!(transport.sent_prompts().len(), 1, "the attempt was made");
+        let status = state.auto_pause.lock().unwrap().status(true);
+        assert_eq!(status.confirmed_count, 0);
+        assert_eq!(status.last_confirmed_at, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A batch that outlives the deadline is cancelled, sends nothing and
+    /// releases its reservation so a later refresh may try again.
+    #[tokio::test]
+    async fn a_batch_that_outlives_the_deadline_releases_its_reservation() {
+        let (state, transport, dir) = armed_state("wiring-deadline").await;
+        transport.set_delay_ms(3_000);
+        {
+            let mut controller = state.auto_pause.lock().unwrap();
+            controller.set_delivery_deadline(Duration::from_millis(150));
+        }
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+
+        let started = std::time::Instant::now();
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        wait_for_calls(&transport).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the whole batch must end at the deadline, not after the call"
+        );
+        assert!(
+            transport.sent_prompts().is_empty(),
+            "the cancelled batch must not send"
+        );
+        let status = state.auto_pause.lock().unwrap().status(true);
+        assert_eq!(status.confirmed_count, 0);
+
+        // The reservation was released, so the next refresh tries again.
+        transport.set_delay_ms(0);
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the second refresh must succeed");
+        for _ in 0..200 {
+            if !transport.sent_prompts().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(transport.sent_prompts().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The closed allowlist is the only way into the three new settings.
+    #[test]
+    fn the_auto_pause_settings_are_on_the_closed_allowlist() {
+        let switch = serde_json::json!({"autoPauseOnLowQuota": true});
+        assert_eq!(validate_settings_patch(&switch, false).unwrap().len(), 1);
+        assert!(validate_settings_patch(&serde_json::json!({"autoPauseOnLowQuota": false}), false).is_ok());
+        assert!(validate_settings_patch(&serde_json::json!({"autoPauseOnLowQuota": "yes"}), false).is_err());
+        assert!(validate_settings_patch(&serde_json::json!({"autoPauseOnLowQuota": 1}), false).is_err());
+        assert!(validate_settings_patch(&serde_json::json!({"autoPauseOnLowQuota": null}), false).is_err());
+
+        for value in [1u64, 5, 15] {
+            let patch = serde_json::json!({ "autoPauseFiveHourThresholdPercent": value });
+            assert!(validate_settings_patch(&patch, false).is_ok(), "{value}");
+        }
+        for value in [1u64, 2, 10] {
+            let patch = serde_json::json!({ "autoPauseWeeklyThresholdPercent": value });
+            assert!(validate_settings_patch(&patch, false).is_ok(), "{value}");
+        }
+        for value in [0u64, 16, 100] {
+            let patch = serde_json::json!({ "autoPauseFiveHourThresholdPercent": value });
+            assert!(validate_settings_patch(&patch, false).is_err(), "{value}");
+        }
+        for value in [0u64, 11, 100] {
+            let patch = serde_json::json!({ "autoPauseWeeklyThresholdPercent": value });
+            assert!(validate_settings_patch(&patch, false).is_err(), "{value}");
+        }
+        // Fractions, strings and nulls are rejected.
+        assert!(validate_settings_patch(
+            &serde_json::json!({ "autoPauseFiveHourThresholdPercent": 5.5 }),
+            false
+        )
+        .is_err());
+        assert!(validate_settings_patch(
+            &serde_json::json!({ "autoPauseWeeklyThresholdPercent": "2" }),
+            false
+        )
+        .is_err());
+        assert!(validate_settings_patch(
+            &serde_json::json!({ "autoPauseWeeklyThresholdPercent": null }),
+            false
+        )
+        .is_err());
+    }
+
+    /// The whole patch is rejected when one field is out of range, and the
+    /// three values really reach the persisted settings.
+    #[test]
+    fn an_auto_pause_patch_survives_the_persistence_chain() {
+        let (state, dir) = temp_state("patch-persistence");
+
+        let patch = serde_json::json!({
+            "autoPauseOnLowQuota": true,
+            "autoPauseFiveHourThresholdPercent": 9,
+            "autoPauseWeeklyThresholdPercent": 4,
+        });
+        let changes = validate_settings_patch(&patch, false).expect("the allowlist must accept it");
+        assert_eq!(changes.len(), 3);
+
+        let mut settings = state.config_manager.load_settings();
+        assert!(!settings.auto_pause_on_low_quota, "the default must be off");
+        merge_settings_patch(&mut settings, &patch).expect("the patch must merge");
+        assert!(settings.auto_pause_on_low_quota);
+        assert_eq!(settings.auto_pause_five_hour_threshold_percent, 9);
+        assert_eq!(settings.auto_pause_weekly_threshold_percent, 4);
+        state
+            .config_manager
+            .save_settings_checked(&settings)
+            .expect("the write must succeed");
+
+        let reloaded = ConfigManager::with_runtime_dir(dir.clone()).load_settings();
+        assert!(reloaded.auto_pause_on_low_quota);
+        assert_eq!(reloaded.auto_pause_five_hour_threshold_percent, 9);
+        assert_eq!(reloaded.auto_pause_weekly_threshold_percent, 4);
+
+        let raw = std::fs::read_to_string(state.config_manager.settings_path()).unwrap();
+        assert!(raw.contains("\"autoPauseOnLowQuota\": true"), "wire key missing");
+        assert!(
+            raw.contains("\"autoPauseFiveHourThresholdPercent\": 9"),
+            "wire key missing"
+        );
+        assert!(
+            raw.contains("\"autoPauseWeeklyThresholdPercent\": 4"),
+            "wire key missing"
+        );
+
+        // One invalid field rejects the whole patch.
+        let rejected = serde_json::json!({
+            "autoPauseOnLowQuota": true,
+            "autoPauseWeeklyThresholdPercent": 99,
+        });
+        assert!(validate_settings_patch(&rejected, false).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

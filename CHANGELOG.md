@@ -5,11 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v1.3.1 display controls
+## [Unreleased] — v1.3.1
 
 ### Added
 - Independent, persisted 5-hour quota and Burn Rate visibility switches, enabled by default for fresh and upgraded profiles, with English/Simplified Chinese/Traditional Chinese labels.
 - Weekly-only expanded overlay, centered single-bar edge pill, and large single-ring tray presentation when 5H is hidden.
+- Optional low-quota auto pause: a cooperative `暂停` request is sent to the running Codex session through the desktop client's own control plane, and a 5-hour trigger asks Codex to schedule a one-time task that sends `继续` two minutes after the reset. Off by default; `autoPauseOnLowQuota`, `autoPauseFiveHourThresholdPercent` (5 %) and `autoPauseWeeklyThresholdPercent` (2 %) are persisted settings with English/Simplified Chinese/Traditional Chinese labels.
+- New `src-tauri/src/pause_control.rs` module: the threshold and message decisions, the in-memory de-duplication ledger, the ordered bridge-candidate discovery (`codex-app-tools-*` first, `codex-browser-use-*` as the legacy fallback) and the Windows named-pipe transport.
+- A read-only bridge status command that reports whether a candidate answered the `list_threads` handshake and how many pause requests were positively confirmed; it never claims a delivery the client did not confirm.
 - Offline production-entry tray lifecycle tests and a repeatable Edge layout QA runner.
 - Offline weighted crossing-regression/idle/migration prototypes and a repeatable 240-parameter replay search with matched legacy accuracy/response evidence.
 - Offline fractional-interpolation and adaptive-window ablations with actual Weekly polling cadences, independent-observation change detection, conditional recovery and committed matched stability/response/stress summaries; [validation remains partial](docs/handoff/2026-10-03-burn-rate-adaptive-validation.md).
@@ -21,15 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Increase temporary grouped height and credit width budgets to cover measured content, and keep all default settings controls visible at 960x620.
 - Preserve the collapsed pill's session anchor across display switches and background refreshes, clamping the actual pill to the selected work area.
 - Reserve 120px per quota when Burn Rate is hidden so 100% readings fit during expansion; include full-quota fixtures in browser QA.
+- The caller-identity discovery accepts the compressed `.jsonl.zst` session transcripts and reads the thread UUID from before the extension chain, which is where the current Codex client puts it.
 
 ### Verification
-- Frontend: 86 tests passed; TypeScript/Vite production build passed.
-- Rust: 145 regular tests passed; separately executed fixed estimator grid generated 240 candidates / zero passing its current combined gates. Adaptive ablations produced 5676 result rows and preserve broader response/excursion regressions explicitly. Real-history forecasts generated 318 eligible intervals with availability and chronological checks; locked Cargo check passed.
+- Frontend: 95 tests passed; TypeScript/Vite production build passed.
+- Rust: 194 regular tests passed, including a real Windows named-pipe protocol simulation and an offline run of the production refresh path through an injectable transport; locked Cargo check passed with no warnings.
 - Browser: 406 offline Edge layout cases passed, including normal and 100% quota fixtures; all four tray lifecycle regression mutations were detected during initial implementation.
+- Bridge: the read-only `list_threads` handshake was exercised against the running Codex desktop client — pipe discovery, caller-identity discovery, the framed JSON-RPC `tools/call` and the session-record shape. No session was active at that moment, so no message was sent.
+- Estimator: the separately executed fixed estimator grid still generates 240 candidates with zero passing its current combined gates; the adaptive ablations still produce 5676 result rows and preserve the broader response/excursion regressions explicitly.
 
 ### Scope
 - Selected path: display-only. The optional Phase 5 weighted estimator, idle metadata and migration remain deferred from production after the offline parameter search failed the current combined gates. Raw accuracy standards and stability/response tradeoffs are documented in the [replay report](docs/handoff/2026-10-03-burn-rate-estimator-replay.md). The v1.3.0 production estimator and state schema remain unchanged.
-- Version bump, packaging and publication await native WebView2/tray/hover/mixed-monitor smoke checks. Browser DPI emulation and offline effects do not close that gate.
+- The auto-pause feature is opt-in and ships dark: the code path, the automated tests and the read-only handshake are verified, but a real `send_message_to_thread` delivery, the one-time scheduled `继续` task and the signed package are **not**. The [handoff](docs/handoff/2026-10-19-v1.3.1-smart-pause-implementation.md) records each acceptance layer separately.
+- Version metadata, the frontend, the Rust crate and the Tauri config now read 1.3.1, with 1.3.0 kept as the upgrade and rollback baseline. Packaging, signing and publication await the native WebView2/tray/hover/mixed-monitor smoke checks, which are still outstanding.
 
 ## [1.3.0] - 2026-10-02
 

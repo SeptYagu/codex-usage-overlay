@@ -1,5 +1,14 @@
 # Status
 
+## v1.3.1 smart pause implementation — 2026-10-19
+
+- The confirmed smart pause plan is implemented: a cooperative `暂停` request is sent to the running Codex session through the desktop client's own control plane, and a 5-hour trigger asks Codex to schedule a one-time task that sends `继续` two minutes after the reset. The feature is opt-in and off by default.
+- New `src-tauri/src/pause_control.rs` module holds the threshold and message decisions, the in-memory de-duplication ledger, the ordered bridge-candidate discovery and the Windows named-pipe transport. `refresh_usage` hands the fresh successful sample to it; the account identity is copied before `raw.to_ui(...)` because the UI model does not carry it.
+- Three points of the plan did not match the running client and the implementation follows the client: the `tools/call` tool name lives under `tool` (not `name`) in a closed parameter schema; the session transcripts are compressed `.jsonl.zst` with the thread UUID before the extension chain; and a single call carries a two-second sub-deadline inside the unchanged five-second batch deadline.
+- The read-only `list_threads` handshake was exercised against the running Codex desktop client — pipe discovery, caller-identity discovery, the framed JSON-RPC call and the session-record shape. No session was active at that moment, so no message was sent. A real delivery, the one-time scheduled `继续` task and the signed package are **not** verified.
+- Frontend 95 tests passed, the production build passed, Rust 194 regular tests passed and the locked Cargo check is clean. The production estimator, the polling cadence and the release channel are unchanged. No packaging or publication.
+- [Implementation handoff](docs/handoff/2026-10-19-v1.3.1-smart-pause-implementation.md) records each acceptance layer, the protocol corrections and the residual risks separately.
+
 ## Real quota history validation — 2026-10-03
 
 - Causal forecasts over 3,854 local integer quota observations compare all nine offline variants. On 87 common 5H five-minute windows, MAE is 2.047 points (legacy), 1.704 (fixed weighted) and 2.258 (adaptive); later-period and equal-session comparisons also favor fixed over adaptive.
@@ -34,27 +43,28 @@
 - Interactive Windows gestures and signed-package smoke tests were not performed. The historical v1.2.0 review and manual verification gaps below remain unchanged.
 
 
-_Last updated: 2026-09-29 (v1.2.0 round-3 code review passed: 0 defects; P3-1 call-site adapters and P3-2 SoundPicker compaction sentinels fully verified by WorkBuddy adversarial review. Four gates fully green: npm test 56/56, npm run build, cargo test 98/98, cargo check 0 warnings)_
+_Last updated: 2026-10-19 (v1.3.1 display controls and the smart pause implementation landed. The v1.2.0 round-3 review remains the last independently reviewed line: 0 defects. Four gates fully green: npm test 95/95, npm run build, cargo test 194/194, cargo check 0 warnings. The bridge handshake was verified read-only against the live Codex client; a real delivery and the signed package are not verified.)_
 
 ## Current state
 
 | Item | Value |
 | --- | --- |
-| Version | `1.2.1` (package metadata, lockfiles, Tauri config, and `src/version.ts` unified) |
-| Reviewed commit | `1a5314d` (`fix(review): resolve round 2 findings (P3-1 call-site adapters, P3-2 compaction sentinels)`) — v1.2.0 line |
+| Version | `1.3.1` (package metadata, lockfiles, Tauri config, and `src/version.ts` unified); `1.3.0` stays the upgrade and rollback baseline |
+| Reviewed commit | `1a5314d` (`fix(review): resolve round 2 findings (P3-1 call-site adapters, P3-2 compaction sentinels)`) — v1.2.0 line, the last line with an independent review |
 | Baseline of that review | `6eeed35` (range `6eeed35..1a5314d`, 25 files / +2606 −390) |
+| v1.3.1 line | **Not independently reviewed** — the display controls and the smart pause implementation are both implemented, self-tested and (for the bridge) exercised read-only against the live Codex client, but no WorkBuddy review round has run on them |
 | Historical manual verification gate | **Unfinished** — stage 0 Windows checks (see `docs/stage0-verification.md`); v1.2.1 uses the automated release policy above |
 | Code review gate (v1.1.3) | **Passed** — v1.1.3 round 5 (Mode C) closed the line with **0 defects**. Round 4's P3-1 is closed: `AppState::for_test` (`src-tauri/src/commands.rs:53-81`) plus the cache-read wiring tests make the capture/read/priority decisions falsifiable, and three acceptance mutations were each verified to fail tests. Rust tests 61 → 65 |
 | Code review gate (v1.2.0) | **Passed** — v1.2.0 round 3 (Mode C) closed the line with **0 defects**. Round 2's P3-1 (M1~M4, M9 call-site adapter traits) and P3-2 (SoundPicker compaction layout budget sentinels) confirmed closed. Dead helper code cleaned up. Rust tests 94 → 98 |
 | Design review gate (v1.2.0) | **Superseded by implementation** — the design round-3 residuals (P3-1 landing seam, P3-2 §7.2.6 observation points, P3-3 unique attribution rule) were addressed in `998a558` and doc sync R-5 completed. See `docs/handoff/2026-09-29-workbuddy-code-review-round3-handoff.md` |
 | Compliance audit | **Compliant** — the v1.1.2 and v1.1.3 plans and the v1.1.1 behavior review were audited line-by-line against the code: every in-scope deliverable is implemented, with no omissions, reversals, or v1.1.2 regressions (`docs/handoff/2026-09-29-cross-plan-compliance-audit.md`) |
 
-## Gates (reproduced locally on 2026-09-29 after round 3 review)
+## Gates (reproduced locally on 2026-10-19 with the v1.3.1 line)
 
-- `npm test` → 56/56 pass
+- `npm test` → 95/95 pass
 - `npm run build` (tsc + vite) → pass
-- `cargo test --manifest-path src-tauri/Cargo.toml --locked` → 98/98 pass
-- `cargo check --manifest-path src-tauri/Cargo.toml --locked` → pass (0 warnings)
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked` → 194/194 pass (4 pre-existing ignored replay tests)
+- `cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets` → pass (0 warnings)
 
 Green gates do **not** constitute review approval, and none of them exercise a real GUI.
 
@@ -62,6 +72,7 @@ Green gates do **not** constitute review approval, and none of them exercise a r
 
 None in the v1.1.3 review line.
 None in the v1.2.0 review line (all 0×P0, 0×P1, 0×P2, 0×P3). Closed by WorkBuddy review round 3.
+The v1.3.1 line has had no independent review round yet, so it has no defect count — that is a gap, not a clean bill of health.
 
 ## Residual risks (not defects — they need a packaged, multi-monitor GUI to close)
 
@@ -69,15 +80,17 @@ None in the v1.2.0 review line (all 0×P0, 0×P1, 0×P2, 0×P3). Closed by WorkB
 | --- | --- |
 | R-1 | The plans' own real-machine checks are unexecuted: settings-window drag-resize → close → reopen exact restore, tray label truncation, the settings version badge rendering (v1.1.3 plan §三-2), and the signed-package NSIS/MSI/portable upgrade, exit-install, elevation and failure-recovery smoke tests (v1.1.2 plan, "发布前验证"). |
 | R-2 | `apply_settings_geometry` / `center_settings_window` (`src-tauri/src/tray.rs:514`, `:546`) have no test or mutation probe — the geometry restore chain is automated only up to the pure planner (`select_work_area` / `place_within_work_area`) and the config read/write path. This is the `tray.rs` counterpart of the round-4/5 `lib.rs` wiring concern. |
-| R-3 | The settings-window version badge has no frontend assertion; only the tray menu label is covered (`src/components/TrayMenuView.test.tsx`). |
+| R-3 | **Closed** — the settings-window version badge is now asserted in `src/components/SettingsView.test.tsx` (the header badge read `v1.3.0` and reads `v1.3.1` after the version unification). |
 | R-4 | `README.md` / `README.en.md` do not describe the v1.1.3 user-visible behaviour (free settings-window resize, cross-process geometry memory). The v1.1.3 plan did not list README changes, so this is a coverage suggestion rather than a contract gap. |
 | R-5 (v1.2.0) | **Closed** (round 2). The design proposal §3.2 case B and the §3.3.1 pseudocode comment now state the same totality contract as the shipped `select_monitor_by_overlap` (`src-tauri/src/dock.rs:561-599`): strictly largest intersection area wins, the host screen (`fallback_index`) breaks a tie that includes it, a non-host tie is broken by the smallest `(x, y)`, and zero overlap falls back to the host. §3.1's user-visible rule (>50 % ⇒ the target screen) holds either way. |
 | R-6 (v1.2.0) | If Windows foreground lock keeps `set_focus()` failing *and* a transient `Focused(false)` arrived inside the grace window, the popup still hides at expiry (`pending_blur && !is_focused`, which is the specified contract). This is the extreme-focus variant of the symptom module 2 fixes; it can only be settled on a real machine with passthrough enabled. |
+| R-7 (v1.3.1) | The auto-pause bridge is verified read-only against the live Codex client, but a real `send_message_to_thread` delivery, the one-time `继续` task and the signed package are not. The client has no `turnId` in its thread records, so the active period falls back to the synthetic counter, which deliberately under-sends rather than double-interrupting. See the [handoff](docs/handoff/2026-10-19-v1.3.1-smart-pause-implementation.md) §5 and §7. |
 
 ## Next steps
 
-0. v1.2.0: close **P3-1** first — either make the action→window adapters injectable so the five call-site mutations (M1/M2/M3/M4/M9) each turn a test red, or declare them real-machine-only in this file and in the plan. Then **P3-2** — replace the tautological `SettingsView` "reachable" test with a real-layout assertion (headless Chromium against the built bundle) covering the "both alerts = custom sound + long path" configuration in 3 languages at 960×620 and 760×500, and make the `SoundPicker` compaction mutation fail. R-5 is closed.
-1. Run the stage-0 Windows checks and the real signed-package smoke tests (NSIS / MSI / portable): upgrade, exit-install, elevation, failure recovery.
-2. Verify on a real multi-monitor / mixed-DPI desktop: the v1.2.0 cross-screen drag attribution and seam防误折叠, the pill percentage grid at 100/150/200 % DPI, settings-window resize → close → reopen exact restore, display detach fallback, and the tray click/toggle timing with passthrough enabled (R-6).
-3. Optional hardening: give `apply_settings_geometry` an offline falsifiability path (or an integration probe) and add a `SettingsView` assertion for `v{APP_VERSION}`.
-4. Only then consider lifting the release gate; note that the v1.1.1 review's future-version items (transparency real-machine comparison, border-alpha coordination, the click-to-expand / narrow-label edge-hiding state machine) are explicitly **not** part of v1.1.2/v1.1.3 and remain unimplemented by design.
+0. v1.3.1: run an independent code review round over the display controls and the smart pause implementation. Neither line has had one, and the green gates do not substitute for it.
+1. v1.3.1: run the end-to-end auto-pause acceptance on a *disposable* Codex session — the 5-hour case, the Weekly case, the simultaneous case, the repeated refresh, the bridge-failure path and the one-time `继续` task two minutes after the reset. Do not use a live working session.
+2. Run the stage-0 Windows checks and the real signed-package smoke tests (NSIS / MSI / portable): upgrade, exit-install, elevation, failure recovery.
+3. Verify on a real multi-monitor / mixed-DPI desktop: the v1.2.0 cross-screen drag attribution and seam防误折叠, the pill percentage grid at 100/150/200 % DPI, settings-window resize → close → reopen exact restore, display detach fallback, and the tray click/toggle timing with passthrough enabled (R-6).
+4. Optional hardening: give `apply_settings_geometry` an offline falsifiability path (or an integration probe), and update `README.md` / `README.en.md` for the v1.3.1 user-visible behaviour.
+5. Only then consider lifting the release gate; note that the v1.1.1 review's future-version items (transparency real-machine comparison, border-alpha coordination, the click-to-expand / narrow-label edge-hiding state machine) are explicitly **not** part of v1.1.2/v1.1.3 and remain unimplemented by design.

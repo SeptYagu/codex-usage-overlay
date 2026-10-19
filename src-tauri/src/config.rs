@@ -65,6 +65,19 @@ pub struct OverlaySettings {
     /// default, so an upgraded profile keeps the plain bars.
     #[serde(default)]
     pub show_percentage_grid: bool,
+    /// Whether a low quota sends a cooperative pause request to the running
+    /// Codex session. Off by default: the feature is opt-in and an upgrade
+    /// must never enable it silently.
+    #[serde(default)]
+    pub auto_pause_on_low_quota: bool,
+    /// The remaining 5-hour percentage at or below which the pause request
+    /// fires.
+    #[serde(default = "default_auto_pause_five_hour_threshold")]
+    pub auto_pause_five_hour_threshold_percent: u32,
+    /// The remaining weekly percentage at or below which the pause request
+    /// fires.
+    #[serde(default = "default_auto_pause_weekly_threshold")]
+    pub auto_pause_weekly_threshold_percent: u32,
 }
 
 fn default_scale() -> u32 { 175 }
@@ -72,6 +85,8 @@ fn default_transparency() -> u32 { 23 }
 fn default_true() -> bool { true }
 fn default_refresh_interval() -> u32 { 60 }
 fn default_language() -> String { "auto".to_string() }
+fn default_auto_pause_five_hour_threshold() -> u32 { 5 }
+fn default_auto_pause_weekly_threshold() -> u32 { 2 }
 
 impl Default for OverlaySettings {
     fn default() -> Self {
@@ -96,6 +111,9 @@ impl Default for OverlaySettings {
             auto_edge_hide: false,
             mouse_passthrough: false,
             show_percentage_grid: false,
+            auto_pause_on_low_quota: false,
+            auto_pause_five_hour_threshold_percent: default_auto_pause_five_hour_threshold(),
+            auto_pause_weekly_threshold_percent: default_auto_pause_weekly_threshold(),
         }
     }
 }
@@ -424,6 +442,52 @@ mod tests {
         assert_eq!(wire.get("showPercentageGrid"), Some(&json!(true)));
         let restored: OverlaySettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert!(restored.show_percentage_grid);
+    }
+
+    /// The auto-pause contract: the master switch is off by default, the two
+    /// thresholds carry their own defaults, and an old profile that knows
+    /// nothing about the feature is migrated without enabling it.
+    #[test]
+    fn auto_pause_defaults_to_off_with_its_own_thresholds() {
+        let absent: OverlaySettings = serde_json::from_value(legacy_settings()).unwrap();
+        assert!(!absent.auto_pause_on_low_quota);
+        assert_eq!(absent.auto_pause_five_hour_threshold_percent, 5);
+        assert_eq!(absent.auto_pause_weekly_threshold_percent, 2);
+        assert!(!OverlaySettings::default().auto_pause_on_low_quota);
+        assert_eq!(
+            OverlaySettings::default().auto_pause_five_hour_threshold_percent,
+            5
+        );
+        assert_eq!(OverlaySettings::default().auto_pause_weekly_threshold_percent, 2);
+
+        // A partially migrated profile keeps its explicit values.
+        let mut partial = legacy_settings();
+        partial["autoPauseOnLowQuota"] = json!(true);
+        partial["autoPauseWeeklyThresholdPercent"] = json!(7);
+        let migrated: OverlaySettings = serde_json::from_value(partial).unwrap();
+        assert!(migrated.auto_pause_on_low_quota);
+        assert_eq!(migrated.auto_pause_weekly_threshold_percent, 7);
+        // The field the old profile did not carry still gets its default.
+        assert_eq!(migrated.auto_pause_five_hour_threshold_percent, 5);
+
+        // The wire keys are the camelCase ones the frontend patches with.
+        let mut settings = OverlaySettings::default();
+        settings.auto_pause_on_low_quota = true;
+        settings.auto_pause_five_hour_threshold_percent = 9;
+        settings.auto_pause_weekly_threshold_percent = 4;
+        let wire = serde_json::to_value(&settings).unwrap();
+        assert_eq!(wire.get("autoPauseOnLowQuota"), Some(&json!(true)));
+        assert_eq!(
+            wire.get("autoPauseFiveHourThresholdPercent"),
+            Some(&json!(9))
+        );
+        assert_eq!(wire.get("autoPauseWeeklyThresholdPercent"), Some(&json!(4)));
+
+        let restored: OverlaySettings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(restored.auto_pause_on_low_quota);
+        assert_eq!(restored.auto_pause_five_hour_threshold_percent, 9);
+        assert_eq!(restored.auto_pause_weekly_threshold_percent, 4);
     }
 
     #[test]
