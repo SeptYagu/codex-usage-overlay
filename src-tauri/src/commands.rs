@@ -187,10 +187,10 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
             let usage = raw.to_ui(estimate.five_hour_per_hour, estimate.weekly_per_hour);
             state.config_manager.write_status("ok", None);
             crate::notify::process_usage_success(sink, state, &usage).await;
-            // The account identity is copied before the UI model is built,
-            // because `CodexUsage` does not carry it. The auto-pause path needs
-            // it to build an unambiguous de-duplication key, and a sample
-            // without one never triggers a delivery.
+            // The account identity is read from the raw sample, because the UI
+            // model does not carry it. The auto-pause path needs it to build
+            // an unambiguous de-duplication key, and a sample without one
+            // never triggers a delivery.
             let account_id = raw.account_id.clone();
             let settings = state.settings.lock().await.clone();
             crate::pause_control::schedule(state, settings, usage.clone(), account_id);
@@ -1148,6 +1148,7 @@ mod auto_pause_tests {
     use crate::codex::{QuotaSnapshot, RawCodexUsage};
     use crate::config::ConfigManager;
     use crate::pause_control::testing::ScriptedTransport;
+    use crate::pause_control::BridgeConnection;
     use crate::pause_control::BridgeDiscovery;
     use std::sync::Arc;
 
@@ -1197,22 +1198,35 @@ mod auto_pause_tests {
 
     /// A sample whose 5-hour window is below the threshold.
     fn low_quota_usage(account_id: Option<&str>) -> RawCodexUsage {
+        quota_usage_at(account_id, FETCHED_AT, FETCHED_AT + 3_600)
+    }
+
+    /// A sample whose 5-hour window is below the threshold, taken at an
+    /// explicit moment and belonging to an explicit reset cycle.
+    ///
+    /// The weekly window stays far above its threshold, so only the 5-hour
+    /// quota triggers.
+    fn quota_usage_at(
+        account_id: Option<&str>,
+        fetched_at: i64,
+        five_hour_resets_at: i64,
+    ) -> RawCodexUsage {
         RawCodexUsage {
             account_id: account_id.map(ToOwned::to_owned),
             five_hour: QuotaSnapshot {
                 used_percent: Some(97.0),
-                resets_at: Some(FETCHED_AT + 3_600),
+                resets_at: Some(five_hour_resets_at),
                 window_duration_mins: Some(300),
             },
             weekly: QuotaSnapshot {
                 used_percent: Some(50.0),
-                resets_at: Some(FETCHED_AT + 86_400),
+                resets_at: Some(fetched_at + 86_400),
                 window_duration_mins: Some(10_080),
             },
             credits_display: "—".to_string(),
             credits_balance: None,
             has_credits: false,
-            fetched_at: FETCHED_AT,
+            fetched_at,
         }
     }
 
@@ -1267,6 +1281,33 @@ mod auto_pause_tests {
         }
     }
 
+    /// Waits until the scripted bridge recorded the expected number of
+    /// delivered prompts.
+    async fn wait_for_prompts(transport: &ScriptedTransport, expected: usize) {
+        for _ in 0..200 {
+            if transport.sent_prompts().len() >= expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Waits until the scripted bridge recorded the expected number of
+    /// handshakes.
+    async fn wait_for_handshakes(transport: &ScriptedTransport, expected: usize) {
+        for _ in 0..200 {
+            let count = transport
+                .calls()
+                .iter()
+                .filter(|call| call.tool_name == "list_threads")
+                .count();
+            if count >= expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// The scheduled pause request the plan fixes for a 5-hour trigger.
     const EXPECTED_SCHEDULED_MESSAGE: &str = "\u{6682}\u{505C}\u{FF0C}\u{8BBE}\u{7F6E}\u{4E00}\u{6B21}\u{6027}\u{5B9A}\u{65F6}\u{4EFB}\u{52A1}\u{FF0C}\u{5728}1h 0min +2min\u{540E}\u{53D1}\u{9001}\u{2018}\u{7EE7}\u{7EED}\u{2019}\u{4E24}\u{4E2A}\u{5B57}";
 
@@ -1281,7 +1322,7 @@ mod auto_pause_tests {
         assert_eq!(usage.five_hour_remaining_percent, Some(3));
         assert_eq!(sink.reads.load(Ordering::SeqCst), 1);
 
-        wait_for_calls(&transport).await;
+        wait_for_prompts(&transport, 1).await;
 
         // The handshake ran against the discovered pipe with the caller
         // identity, and the pause request carried the fixed message.
@@ -1329,18 +1370,41 @@ mod auto_pause_tests {
     #[tokio::test]
     async fn the_switched_off_feature_never_reaches_the_bridge() {
         let (state, transport, dir) = armed_state("wiring-disabled").await;
+
+        // Control: with the feature on, the bridge is reached. Without it the
+        // assertion below would also hold on a build where the whole feature
+        // is dead, so the control is what makes the negative case meaningful.
+        // It uses another account, so the de-duplication ledger cannot mask
+        // the effect that is being tested.
+        {
+            let control = OfflineSink::with_usage(low_quota_usage(Some("acct-control")));
+            refresh_usage(&control, &state)
+                .await
+                .expect("the control refresh must succeed");
+            wait_for_prompts(&transport, 1).await;
+            assert_eq!(
+                transport.sent_prompts().len(),
+                1,
+                "the control must reach the bridge"
+            );
+        }
+
         {
             let mut settings = state.settings.lock().await;
             settings.auto_pause_on_low_quota = false;
         }
-        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-2")));
 
         refresh_usage(&sink, &state)
             .await
             .expect("the refresh must succeed");
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
-        assert!(transport.calls().is_empty());
+        assert_eq!(
+            transport.sent_prompts().len(),
+            1,
+            "the switched-off feature must stay silent"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1348,14 +1412,35 @@ mod auto_pause_tests {
     #[tokio::test]
     async fn a_sample_without_an_account_never_reaches_the_bridge() {
         let (state, transport, dir) = armed_state("wiring-no-account").await;
+
+        // Control: a sample that carries an account identity does reach the
+        // bridge, so the negative case below is about the missing identity and
+        // not about a dead feature.
+        {
+            let control = OfflineSink::with_usage(low_quota_usage(Some("acct-control")));
+            refresh_usage(&control, &state)
+                .await
+                .expect("the control refresh must succeed");
+            wait_for_prompts(&transport, 1).await;
+            assert_eq!(
+                transport.sent_prompts().len(),
+                1,
+                "the control must reach the bridge"
+            );
+        }
+
         let sink = OfflineSink::with_usage(low_quota_usage(None));
 
         refresh_usage(&sink, &state)
             .await
             .expect("the refresh must succeed");
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
-        assert!(transport.calls().is_empty());
+        assert_eq!(
+            transport.sent_prompts().len(),
+            1,
+            "a sample without an account identity must not be delivered"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1368,7 +1453,7 @@ mod auto_pause_tests {
         refresh_usage(&sink, &state)
             .await
             .expect("the refresh must succeed");
-        wait_for_calls(&transport).await;
+        wait_for_prompts(&transport, 1).await;
         assert_eq!(transport.sent_prompts().len(), 1);
 
         refresh_usage(&sink, &state)
@@ -1386,6 +1471,58 @@ mod auto_pause_tests {
     }
 
     #[tokio::test]
+    async fn a_new_quota_cycle_can_prompt_the_same_active_session_again() {
+        let (state, transport, dir) = armed_state("wiring-new-cycle").await;
+
+        // The first cycle: the 5-hour window is nearly spent and resets in one
+        // hour.
+        let first = OfflineSink::with_usage(quota_usage_at(
+            Some("acct-1"),
+            FETCHED_AT,
+            FETCHED_AT + 3_600,
+        ));
+        refresh_usage(&first, &state)
+            .await
+            .expect("the first refresh must succeed");
+        wait_for_prompts(&transport, 1).await;
+        assert_eq!(
+            transport.sent_prompts().len(),
+            1,
+            "the first cycle must be announced"
+        );
+
+        // The second cycle: the window already reset, so the record of the
+        // finished cycle is stale. The session never left the active list, but
+        // a new reset cycle is a new quota identity and must be announced
+        // again.
+        let second = OfflineSink::with_usage(quota_usage_at(
+            Some("acct-1"),
+            FETCHED_AT + 3_601,
+            FETCHED_AT + 3_601 + 5_400,
+        ));
+        refresh_usage(&second, &state)
+            .await
+            .expect("the second refresh must succeed");
+        wait_for_prompts(&transport, 2).await;
+
+        assert_eq!(
+            transport.sent_prompts().len(),
+            2,
+            "a new reset cycle must be announced again"
+        );
+
+        // The second message belongs to the new cycle, so it names the new
+        // reset time rather than the finished one.
+        let prompts = transport.sent_prompts();
+        assert_ne!(
+            prompts[0], prompts[1],
+            "the two cycles must not share one message"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn an_unconfirmed_delivery_is_retried_on_the_next_refresh() {
         let (state, transport, dir) = armed_state("wiring-retry").await;
         transport.set_send_success(false);
@@ -1394,7 +1531,7 @@ mod auto_pause_tests {
         refresh_usage(&sink, &state)
             .await
             .expect("the refresh must succeed");
-        wait_for_calls(&transport).await;
+        wait_for_prompts(&transport, 1).await;
         assert_eq!(transport.sent_prompts().len(), 1);
 
         // A refused request is never recorded as a confirmed delivery.
@@ -1428,7 +1565,7 @@ mod auto_pause_tests {
         refresh_usage(&sink, &state)
             .await
             .expect("the refresh must succeed");
-        wait_for_calls(&transport).await;
+        wait_for_prompts(&transport, 1).await;
 
         let prompts = transport.sent_prompts();
         assert_eq!(prompts.len(), 1, "both windows share one message");
@@ -1465,6 +1602,189 @@ mod auto_pause_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The bridge status follows reality. A bridge that answered once and
+    /// then stopped must not keep claiming to be available, because the
+    /// status is the only place the user can see that the feature is
+    /// connected.
+    #[tokio::test]
+    async fn the_bridge_status_follows_the_last_handshake() {
+        let (state, transport, dir) = armed_state("wiring-connection").await;
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the first refresh must succeed");
+        wait_for_handshakes(&transport, 1).await;
+        let status = state.auto_pause.lock().unwrap().status(true);
+        assert_eq!(status.connection, BridgeConnection::Available);
+
+        // The bridge stops answering.
+        transport.set_list_threads(crate::pause_control::ToolCallOutcome {
+            success: false,
+            text: None,
+        });
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the second refresh must succeed");
+        wait_for_handshakes(&transport, 2).await;
+
+        let status = state.auto_pause.lock().unwrap().status(true);
+        assert_eq!(
+            status.connection,
+            BridgeConnection::Unavailable,
+            "a bridge that stopped answering must not report itself available"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session that the listing reports twice, once with a host and once
+    /// without, is one session. It must receive one pause request, not two.
+    #[tokio::test]
+    async fn a_session_reported_with_two_host_ids_is_targeted_once() {
+        let (state, transport, dir) = armed_state("wiring-host-id").await;
+        transport.set_list_threads(crate::pause_control::ToolCallOutcome {
+            success: true,
+            text: Some(
+                serde_json::json!({
+                    "pinnedThreads": [],
+                    "threads": [
+                        {
+                            "id": "session-1",
+                            "kind": "codex",
+                            "status": "active",
+                        },
+                        {
+                            "id": "session-1",
+                            "kind": "codex",
+                            "status": "active",
+                            "hostId": "host-1",
+                        },
+                    ],
+                })
+                .to_string(),
+            ),
+        });
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        wait_for_prompts(&transport, 1).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let sends = transport
+            .calls()
+            .into_iter()
+            .filter(|call| call.tool_name == "send_message_to_thread")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sends.len(),
+            1,
+            "one session must receive one pause request, not one per host"
+        );
+        assert_eq!(
+            sends[0].arguments["hostId"], "host-1",
+            "the record that carries the host id must be used"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 5-hour trigger whose reset time is missing still pauses, because the
+    /// plain pause needs no cycle identity. The missing identity also means
+    /// the request cannot be scoped to a cycle, so the session is not asked
+    /// to pause a second time while it stays in the same active period.
+    #[tokio::test]
+    async fn a_missing_reset_time_pauses_once_per_active_period() {
+        let (state, transport, dir) = armed_state("wiring-no-reset").await;
+        let mut usage = low_quota_usage(Some("acct-1"));
+        usage.five_hour.resets_at = None;
+        let sink = OfflineSink::with_usage(usage);
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the first refresh must succeed");
+        wait_for_prompts(&transport, 1).await;
+        assert_eq!(
+            transport.sent_prompts(),
+            vec![crate::pause_control::PAUSE_MESSAGE.to_string()],
+            "a missing reset time falls back to the plain pause"
+        );
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the second refresh must succeed");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            transport.sent_prompts().len(),
+            1,
+            "the same active period must not be paused twice"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session that leaves the active list and comes back starts a new
+    /// active period, so it may be prompted again even though the quota
+    /// cycle never changed.
+    #[tokio::test]
+    async fn a_session_that_returns_after_going_idle_is_prompted_again() {
+        let (state, transport, dir) = armed_state("wiring-return").await;
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the first refresh must succeed");
+        wait_for_prompts(&transport, 1).await;
+        assert_eq!(transport.sent_prompts().len(), 1);
+
+        // The session is no longer active.
+        transport.set_list_threads(crate::pause_control::ToolCallOutcome {
+            success: true,
+            text: Some(serde_json::json!({ "pinnedThreads": [], "threads": [] }).to_string()),
+        });
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the second refresh must succeed");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            transport.sent_prompts().len(),
+            1,
+            "an idle session is not a target"
+        );
+
+        // The session comes back and is active again.
+        transport.set_list_threads(crate::pause_control::ToolCallOutcome {
+            success: true,
+            text: Some(
+                serde_json::json!({
+                    "pinnedThreads": [],
+                    "threads": [{
+                        "id": "session-1",
+                        "kind": "codex",
+                        "status": "active",
+                        "hostId": "host-1",
+                    }],
+                })
+                .to_string(),
+            ),
+        });
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the third refresh must succeed");
+        wait_for_prompts(&transport, 2).await;
+
+        assert_eq!(
+            transport.sent_prompts().len(),
+            2,
+            "a returning session starts a new active period and may be prompted again"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A transport failure is an unconfirmed delivery, not a success.
     #[tokio::test]
     async fn a_transport_failure_is_not_a_confirmed_delivery() {
@@ -1475,7 +1795,7 @@ mod auto_pause_tests {
         refresh_usage(&sink, &state)
             .await
             .expect("the refresh must succeed");
-        wait_for_calls(&transport).await;
+        wait_for_prompts(&transport, 1).await;
 
         assert_eq!(transport.sent_prompts().len(), 1, "the attempt was made");
         let status = state.auto_pause.lock().unwrap().status(true);
@@ -1485,48 +1805,77 @@ mod auto_pause_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A batch that outlives the deadline is cancelled, sends nothing and
-    /// releases its reservation so a later refresh may try again.
+    /// A batch that outlives the deadline is cancelled and releases its
+    /// reservation, so a later refresh may try again.
+    ///
+    /// The handshake answers at once and only the send hangs. That way a
+    /// reservation really exists when the deadline cuts the batch off, and
+    /// the measured clock is the batch rather than the refresh.
     #[tokio::test]
     async fn a_batch_that_outlives_the_deadline_releases_its_reservation() {
         let (state, transport, dir) = armed_state("wiring-deadline").await;
-        transport.set_delay_ms(3_000);
+        transport.set_send_delay_ms(3_000);
         {
             let mut controller = state.auto_pause.lock().unwrap();
             controller.set_delivery_deadline(Duration::from_millis(150));
         }
         let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
 
-        let started = std::time::Instant::now();
         refresh_usage(&sink, &state)
             .await
             .expect("the refresh must succeed");
-        wait_for_calls(&transport).await;
-        tokio::time::sleep(Duration::from_millis(250)).await;
 
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the whole batch must end at the deadline, not after the call"
-        );
-        assert!(
-            transport.sent_prompts().is_empty(),
-            "the cancelled batch must not send"
-        );
-        let status = state.auto_pause.lock().unwrap().status(true);
-        assert_eq!(status.confirmed_count, 0);
-
-        // The reservation was released, so the next refresh tries again.
-        transport.set_delay_ms(0);
-        refresh_usage(&sink, &state)
-            .await
-            .expect("the second refresh must succeed");
-        for _ in 0..200 {
-            if !transport.sent_prompts().is_empty() {
+        // The batch is cut off at the deadline.
+        let started = std::time::Instant::now();
+        for _ in 0..300 {
+            if !state.auto_pause.lock().unwrap().running_flag() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert_eq!(transport.sent_prompts().len(), 1);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the whole batch must end at the deadline, not after the call"
+        );
+        assert!(
+            !state.auto_pause.lock().unwrap().running_flag(),
+            "the worker must not stay alive after the deadline"
+        );
+
+        // The request was really attempted, so a reservation existed.
+        assert_eq!(
+            transport.sent_prompts().len(),
+            1,
+            "the send must have been attempted"
+        );
+
+        // The cancelled batch released its reservation and confirmed nothing.
+        {
+            let controller = state.auto_pause.lock().unwrap();
+            assert_eq!(
+                controller.pending_len(),
+                0,
+                "the cancelled batch must release its reservation"
+            );
+            assert_eq!(
+                controller.sent_len(),
+                0,
+                "a cancelled batch is not a confirmed delivery"
+            );
+        }
+        let status = state.auto_pause.lock().unwrap().status(true);
+        assert_eq!(status.confirmed_count, 0);
+
+        // The next refresh tries again.
+        transport.set_send_delay_ms(0);
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the second refresh must succeed");
+        wait_for_prompts(&transport, 2).await;
+        assert_eq!(transport.sent_prompts().len(), 2);
+        let status = state.auto_pause.lock().unwrap().status(true);
+        assert_eq!(status.confirmed_count, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

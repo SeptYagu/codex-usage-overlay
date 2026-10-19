@@ -25,12 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve the collapsed pill's session anchor across display switches and background refreshes, clamping the actual pill to the selected work area.
 - Reserve 120px per quota when Burn Rate is hidden so 100% readings fit during expansion; include full-quota fixtures in browser QA.
 - The caller-identity discovery accepts the compressed `.jsonl.zst` session transcripts and reads the thread UUID from before the extension chain, which is where the current Codex client puts it.
+- The auto-pause active periods are released again when the client reports no active session. An empty listing used to be treated as a failed handshake, so the periods were never refreshed and a session that went idle and came back was paused only once per quota cycle for the life of the process.
+- The bridge status follows the last handshake instead of staying `available` after the bridge stopped answering; a confirmed listing with no active session counts as an answered bridge, not a missing one.
+- The bridge candidate discovery no longer runs while the app-wide lock is held. It runs on the blocking pool, and the session-directory walk is bounded at 32 files and visits the newest names first.
+- A session that the listing reports twice, once with and once without a `hostId`, is contacted once, using the record that carries the host id.
+- A 5-hour reset further than six hours away is no longer turned into a scheduled instruction to wait for days; it falls back to the plain `暂停`. The remaining time is computed with an overflow check, so a malformed reset value cannot produce a plausible looking duration.
+- The session listing parser tolerates one extra layer of JSON encoding instead of silently emptying the target list.
 
 ### Verification
 - Frontend: 95 tests passed; TypeScript/Vite production build passed.
-- Rust: 194 regular tests passed, including a real Windows named-pipe protocol simulation and an offline run of the production refresh path through an injectable transport; locked Cargo check passed with no warnings.
+- Rust: 201 regular tests passed, including a real Windows named-pipe protocol simulation and an offline run of the production refresh path through an injectable transport; locked Cargo check passed with no warnings.
+- Review: the smart pause implementation was reviewed before the release gate, once read-only and once by mutating the production logic. The active-period release, the five-second batch deadline and the quota-cycle expiry each have a regression test that turns red when the rule is removed.
 - Browser: 406 offline Edge layout cases passed, including normal and 100% quota fixtures; all four tray lifecycle regression mutations were detected during initial implementation.
-- Bridge: the read-only `list_threads` handshake was exercised against the running Codex desktop client — pipe discovery, caller-identity discovery, the framed JSON-RPC `tools/call` and the session-record shape. No session was active at that moment, so no message was sent.
+- Bridge: the read-only `list_threads` handshake was exercised against the running Codex desktop client — pipe discovery, caller-identity discovery, the framed JSON-RPC `tools/call` and the session-record shape. No session was active at that moment, so no message was sent. The client's handling of the synthetic `turnId` was traced in the installed package: the schema only requires a non-empty string, and the send path routes by the target thread id.
 - Estimator: the separately executed fixed estimator grid still generates 240 candidates with zero passing its current combined gates; the adaptive ablations still produce 5676 result rows and preserve the broader response/excursion regressions explicitly.
 
 ### Scope

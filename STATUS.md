@@ -3,11 +3,22 @@
 ## v1.3.1 smart pause implementation — 2026-10-19
 
 - The confirmed smart pause plan is implemented: a cooperative `暂停` request is sent to the running Codex session through the desktop client's own control plane, and a 5-hour trigger asks Codex to schedule a one-time task that sends `继续` two minutes after the reset. The feature is opt-in and off by default.
-- New `src-tauri/src/pause_control.rs` module holds the threshold and message decisions, the in-memory de-duplication ledger, the ordered bridge-candidate discovery and the Windows named-pipe transport. `refresh_usage` hands the fresh successful sample to it; the account identity is copied before `raw.to_ui(...)` because the UI model does not carry it.
+- New `src-tauri/src/pause_control.rs` module holds the threshold and message decisions, the in-memory de-duplication ledger, the ordered bridge-candidate discovery and the Windows named-pipe transport. `refresh_usage` hands the fresh successful sample to it; the account identity is read from the raw sample because the UI model does not carry it.
 - Three points of the plan did not match the running client and the implementation follows the client: the `tools/call` tool name lives under `tool` (not `name`) in a closed parameter schema; the session transcripts are compressed `.jsonl.zst` with the thread UUID before the extension chain; and a single call carries a two-second sub-deadline inside the unchanged five-second batch deadline.
 - The read-only `list_threads` handshake was exercised against the running Codex desktop client — pipe discovery, caller-identity discovery, the framed JSON-RPC call and the session-record shape. No session was active at that moment, so no message was sent. A real delivery, the one-time scheduled `继续` task and the signed package are **not** verified.
 - Frontend 95 tests passed, the production build passed, Rust 194 regular tests passed and the locked Cargo check is clean. The production estimator, the polling cadence and the release channel are unchanged. No packaging or publication.
 - [Implementation handoff](docs/handoff/2026-10-19-v1.3.1-smart-pause-implementation.md) records each acceptance layer, the protocol corrections and the residual risks separately.
+
+## v1.3.1 smart pause review pass — 2026-10-19
+
+- The first implementation was reviewed before the release gate — once by an independent reviewer that only read the code, once by a self-review that mutated the production logic to prove the tests react. Both passes found real problems; all of them are fixed, and the fixes are covered by tests that turn red under the corresponding mutation.
+- The most serious one: an empty session listing was treated as a **failed handshake**, so the active periods were never released. A session that went idle and came back kept its old period identity and was paused **once per quota cycle for the life of the process**. A confirmed listing with no active session is now recorded as an observation — the bridge is reachable, every active period ends there, and a returning session starts a new period and is prompted again.
+- Two of the plan's §10.6 mutation checks did not turn a test red: the five-second batch deadline (the old test cancelled the batch *before* any reservation existed, and measured the refresh instead of the batch) and the quota-cycle expiry (the old test passed because the first `prune` also switched the account, which empties the whole ledger). Both tests now fail when the rule is removed.
+- The candidate discovery no longer runs while the app-wide lock is held; it runs on the blocking pool, and the session walk is bounded at 32 files and visits the newest names first.
+- Smaller fixes: the bridge status follows the last handshake, a session listed with and without a `hostId` is contacted once using the record that carries the host id, a reset further than six hours falls back to the plain pause, the remaining time uses `checked_sub`, the live listing shape is pinned by a test, and the dead `present` flag was removed.
+- Two reported findings did not reproduce and are recorded as such: a session listed with two host ids is sent to once, and the cycle-less key of a missing `resetsAt` is a documented residual risk (R-8) rather than a defect.
+- The synthetic `turnId` was traced through the installed client: the schema only requires a non-empty string, the envelope's `turnId` is read only by the `wait_threads` completion matching and a call de-duplication key, and the send path routes by the target `threadId` and `hostId`. The read-only handshake with a synthetic turn id was accepted live, so the risk is small — but only a real delivery closes it completely.
+- After the fixes: Rust **201** regular tests passed (4 pre-existing ignored replay tests unchanged), frontend 95 passed, the production build passed, and the locked Cargo check is clean with zero warnings.
 
 ## Real quota history validation — 2026-10-03
 
@@ -43,7 +54,7 @@
 - Interactive Windows gestures and signed-package smoke tests were not performed. The historical v1.2.0 review and manual verification gaps below remain unchanged.
 
 
-_Last updated: 2026-10-19 (v1.3.1 display controls and the smart pause implementation landed. The v1.2.0 round-3 review remains the last independently reviewed line: 0 defects. Four gates fully green: npm test 95/95, npm run build, cargo test 194/194, cargo check 0 warnings. The bridge handshake was verified read-only against the live Codex client; a real delivery and the signed package are not verified.)_
+_Last updated: 2026-10-19 (v1.3.1 display controls and the smart pause implementation landed, and the smart pause implementation passed an independent review round whose findings are all fixed. The v1.2.0 round-3 review remains the last independently reviewed *release* line: 0 defects. Four gates fully green: npm test 95/95, npm run build, cargo test 201/201, cargo check 0 warnings. The bridge handshake was verified read-only against the live Codex client; a real delivery and the signed package are not verified.)_
 
 ## Current state
 
@@ -52,18 +63,18 @@ _Last updated: 2026-10-19 (v1.3.1 display controls and the smart pause implement
 | Version | `1.3.1` (package metadata, lockfiles, Tauri config, and `src/version.ts` unified); `1.3.0` stays the upgrade and rollback baseline |
 | Reviewed commit | `1a5314d` (`fix(review): resolve round 2 findings (P3-1 call-site adapters, P3-2 compaction sentinels)`) — v1.2.0 line, the last line with an independent review |
 | Baseline of that review | `6eeed35` (range `6eeed35..1a5314d`, 25 files / +2606 −390) |
-| v1.3.1 line | **Not independently reviewed** — the display controls and the smart pause implementation are both implemented, self-tested and (for the bridge) exercised read-only against the live Codex client, but no WorkBuddy review round has run on them |
+| v1.3.1 line | **Smart pause: reviewed and fixed** — an independent read-only review and a mutation-based self review both ran over the smart pause implementation; every finding is fixed and covered by a test that turns red under the corresponding mutation (see the review-pass section above). The display-controls line still has **no** independent review round |
 | Historical manual verification gate | **Unfinished** — stage 0 Windows checks (see `docs/stage0-verification.md`); v1.2.1 uses the automated release policy above |
 | Code review gate (v1.1.3) | **Passed** — v1.1.3 round 5 (Mode C) closed the line with **0 defects**. Round 4's P3-1 is closed: `AppState::for_test` (`src-tauri/src/commands.rs:53-81`) plus the cache-read wiring tests make the capture/read/priority decisions falsifiable, and three acceptance mutations were each verified to fail tests. Rust tests 61 → 65 |
 | Code review gate (v1.2.0) | **Passed** — v1.2.0 round 3 (Mode C) closed the line with **0 defects**. Round 2's P3-1 (M1~M4, M9 call-site adapter traits) and P3-2 (SoundPicker compaction layout budget sentinels) confirmed closed. Dead helper code cleaned up. Rust tests 94 → 98 |
 | Design review gate (v1.2.0) | **Superseded by implementation** — the design round-3 residuals (P3-1 landing seam, P3-2 §7.2.6 observation points, P3-3 unique attribution rule) were addressed in `998a558` and doc sync R-5 completed. See `docs/handoff/2026-09-29-workbuddy-code-review-round3-handoff.md` |
 | Compliance audit | **Compliant** — the v1.1.2 and v1.1.3 plans and the v1.1.1 behavior review were audited line-by-line against the code: every in-scope deliverable is implemented, with no omissions, reversals, or v1.1.2 regressions (`docs/handoff/2026-09-29-cross-plan-compliance-audit.md`) |
 
-## Gates (reproduced locally on 2026-10-19 with the v1.3.1 line)
+## Gates (reproduced locally on 2026-10-19 with the v1.3.1 line, after the review pass)
 
 - `npm test` → 95/95 pass
 - `npm run build` (tsc + vite) → pass
-- `cargo test --manifest-path src-tauri/Cargo.toml --locked` → 194/194 pass (4 pre-existing ignored replay tests)
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked` → 201/201 pass (4 pre-existing ignored replay tests)
 - `cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets` → pass (0 warnings)
 
 Green gates do **not** constitute review approval, and none of them exercise a real GUI.
@@ -72,7 +83,7 @@ Green gates do **not** constitute review approval, and none of them exercise a r
 
 None in the v1.1.3 review line.
 None in the v1.2.0 review line (all 0×P0, 0×P1, 0×P2, 0×P3). Closed by WorkBuddy review round 3.
-The v1.3.1 line has had no independent review round yet, so it has no defect count — that is a gap, not a clean bill of health.
+The v1.3.1 **smart pause** line had a review round on 2026-10-19: 2×P1, 2×P2 and 6×P3 were reported, all are fixed and covered by regression tests, and 2 reported findings did not reproduce. The v1.3.1 **display controls** line has had no independent review round yet, so it still has no defect count — that is a gap, not a clean bill of health.
 
 ## Residual risks (not defects — they need a packaged, multi-monitor GUI to close)
 
@@ -85,10 +96,11 @@ The v1.3.1 line has had no independent review round yet, so it has no defect cou
 | R-5 (v1.2.0) | **Closed** (round 2). The design proposal §3.2 case B and the §3.3.1 pseudocode comment now state the same totality contract as the shipped `select_monitor_by_overlap` (`src-tauri/src/dock.rs:561-599`): strictly largest intersection area wins, the host screen (`fallback_index`) breaks a tie that includes it, a non-host tie is broken by the smallest `(x, y)`, and zero overlap falls back to the host. §3.1's user-visible rule (>50 % ⇒ the target screen) holds either way. |
 | R-6 (v1.2.0) | If Windows foreground lock keeps `set_focus()` failing *and* a transient `Focused(false)` arrived inside the grace window, the popup still hides at expiry (`pending_blur && !is_focused`, which is the specified contract). This is the extreme-focus variant of the symptom module 2 fixes; it can only be settled on a real machine with passthrough enabled. |
 | R-7 (v1.3.1) | The auto-pause bridge is verified read-only against the live Codex client, but a real `send_message_to_thread` delivery, the one-time `继续` task and the signed package are not. The client has no `turnId` in its thread records, so the active period falls back to the synthetic counter, which deliberately under-sends rather than double-interrupting. See the [handoff](docs/handoff/2026-10-19-v1.3.1-smart-pause-implementation.md) §5 and §7. |
+| R-8 (v1.3.1) | A 5-hour window reported **without** `resetsAt` has no cycle identity, so its de-duplication key never expires and the session is paused only once per active period. The plan is split here on purpose (§3.1 excludes data without a cycle identity, §4.1 requires the plain `暂停` anyway); the implementation follows §4.1. The impact is bounded, because a missing reset time also means a plain pause with no resume timer — nothing scheduled is missed, and a session that leaves the active list starts a new period and is prompted again. A regression test pins the behaviour. |
 
 ## Next steps
 
-0. v1.3.1: run an independent code review round over the display controls and the smart pause implementation. Neither line has had one, and the green gates do not substitute for it.
+0. v1.3.1: run an independent code review round over the **display controls** line. The smart pause implementation has had one (findings fixed); the display controls have not, and the green gates do not substitute for it.
 1. v1.3.1: run the end-to-end auto-pause acceptance on a *disposable* Codex session — the 5-hour case, the Weekly case, the simultaneous case, the repeated refresh, the bridge-failure path and the one-time `继续` task two minutes after the reset. Do not use a live working session.
 2. Run the stage-0 Windows checks and the real signed-package smoke tests (NSIS / MSI / portable): upgrade, exit-install, elevation, failure recovery.
 3. Verify on a real multi-monitor / mixed-DPI desktop: the v1.2.0 cross-screen drag attribution and seam防误折叠, the pill percentage grid at 100/150/200 % DPI, settings-window resize → close → reopen exact restore, display detach fallback, and the tray click/toggle timing with passthrough enabled (R-6).

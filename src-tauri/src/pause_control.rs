@@ -83,9 +83,12 @@ const MAX_COLLECTION_ENTRIES: usize = 512;
 const MAX_SESSION_SCAN_DEPTH: usize = 4;
 /// How many recent session files are inspected for a caller thread identity.
 const MAX_SESSION_FILES: usize = 32;
-/// A sanity bound for the 5-hour reset distance. A reset further away than
-/// this is not a 5-hour window, so the scheduled message is not used.
-const MAX_PLAUSIBLE_RESET_DISTANCE_SECS: i64 = 7 * 24 * 60 * 60;
+/// A sanity bound for the 5-hour reset distance.
+///
+/// The 5-hour window resets within five hours of the moment it started, so a
+/// reset further away than six hours does not belong to that window. Such a
+/// value never produces a scheduled message.
+const MAX_PLAUSIBLE_RESET_DISTANCE_SECS: i64 = 6 * 60 * 60;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -171,7 +174,11 @@ pub fn pause_message(triggers: &[Trigger], observed_at: i64) -> String {
     if observed_at <= 0 {
         return PAUSE_MESSAGE.to_string();
     }
-    let distance = resets_at - observed_at;
+    // A malformed reset time must not overflow into a plausible looking
+    // duration.
+    let Some(distance) = resets_at.checked_sub(observed_at) else {
+        return PAUSE_MESSAGE.to_string();
+    };
     if distance <= 0 || distance > MAX_PLAUSIBLE_RESET_DISTANCE_SECS {
         return PAUSE_MESSAGE.to_string();
     }
@@ -243,8 +250,15 @@ fn collect_active_threads(
 /// survive, and the `pinnedThreads` and `threads` groups are merged and
 /// de-duplicated by `(hostId, id)`.
 pub fn parse_active_threads(text: &str) -> Vec<ActiveThread> {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return Vec::new();
+    // A client that wraps the payload in one more JSON string would otherwise
+    // empty the target list without any visible error.
+    let value = match serde_json::from_str::<Value>(text) {
+        Ok(Value::String(inner)) => match serde_json::from_str::<Value>(&inner) {
+            Ok(value) => value,
+            Err(_) => return Vec::new(),
+        },
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
     };
 
     let mut threads = Vec::new();
@@ -396,7 +410,13 @@ fn session_file_thread_ids() -> Vec<String> {
     }
 
     let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
-    collect_session_files(&root, 0, MAX_SESSION_SCAN_DEPTH, &mut files);
+    collect_session_files(
+        &root,
+        0,
+        MAX_SESSION_SCAN_DEPTH,
+        MAX_SESSION_FILES,
+        &mut files,
+    );
     files.sort_by(|left, right| right.0.cmp(&left.0));
 
     let mut identities = Vec::new();
@@ -412,25 +432,40 @@ fn session_file_thread_ids() -> Vec<String> {
 }
 
 /// Collects the `.jsonl` session files under `dir`, bounded by `max_depth`.
+///
+/// The walk visits the newest names first and stops as soon as `limit` files
+/// were collected. The session tree is ordered by date and by rollout
+/// timestamp, so the largest names are the newest files and the bound keeps
+/// the newest ones instead of an arbitrary subset. A long session history
+/// therefore costs no more than a short one.
 fn collect_session_files(
     dir: &std::path::Path,
     depth: usize,
     max_depth: usize,
+    limit: usize,
     out: &mut Vec<(std::time::SystemTime, std::path::PathBuf)>,
 ) {
-    if depth > max_depth {
+    if depth > max_depth || out.len() >= limit {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.filter_map(|entry| entry.ok()) {
-        let path = entry.path();
-        let Ok(metadata) = entry.metadata() else {
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .collect();
+    paths.sort_by(|left, right| right.cmp(left));
+
+    for path in paths {
+        if out.len() >= limit {
+            return;
+        }
+        let Ok(metadata) = std::fs::metadata(&path) else {
             continue;
         };
         if metadata.is_dir() {
-            collect_session_files(&path, depth + 1, max_depth, out);
+            collect_session_files(&path, depth + 1, max_depth, limit, out);
         } else if metadata.is_file() && is_session_file(&path) {
             let modified = metadata
                 .modified()
@@ -730,14 +765,28 @@ async fn read_frame(
     Ok(body)
 }
 
+/// What one candidate reported about the active sessions.
+enum Handshake {
+    /// The candidate answered and reported these targets.
+    Targets(Vec<ActiveThread>),
+    /// The candidate answered and reported no active Codex session.
+    ///
+    /// This is a valid observation, not a failure. The bridge is reachable
+    /// and the session list is empty. It is also the only way to learn that
+    /// a session left the active list, so it must not be discarded.
+    NoActiveSession,
+}
+
 /// Performs the read-only `list_threads` handshake against one candidate.
 ///
-/// A candidate is only usable when the tool call was confirmed, the result
-/// carries parseable content and at least one active Codex session is present.
+/// A candidate is only usable when the tool call was confirmed and the result
+/// carries parseable content. An empty session list is reported separately,
+/// because it is an observation about the sessions rather than a broken
+/// bridge.
 async fn handshake(
     transport: &dyn BridgeTransport,
     candidate: &BridgeCandidate,
-) -> Result<Vec<ActiveThread>, BridgeError> {
+) -> Result<Handshake, BridgeError> {
     let outcome = tokio::time::timeout(
         CALL_TIMEOUT,
         transport.call_tool(
@@ -761,11 +810,29 @@ async fn handshake(
     };
     let threads = parse_active_threads(&text);
     if threads.is_empty() {
-        return Err(BridgeError::Protocol(
-            "the list_threads result carries no active codex session".into(),
-        ));
+        return Ok(Handshake::NoActiveSession);
     }
-    Ok(threads)
+    Ok(Handshake::Targets(threads))
+}
+
+/// Reduces the listed records to one target per session.
+///
+/// The listing may report the same session twice, once with and once without
+/// a host id. The client needs the host id to route the message, so the
+/// record that carries it wins.
+fn session_targets(threads: &[ActiveThread]) -> Vec<&ActiveThread> {
+    let mut targets: Vec<&ActiveThread> = Vec::new();
+    for thread in threads {
+        match targets.iter_mut().find(|target| target.id == thread.id) {
+            Some(existing) => {
+                if existing.host_id.is_none() && thread.host_id.is_some() {
+                    *existing = thread;
+                }
+            }
+            None => targets.push(thread),
+        }
+    }
+    targets
 }
 
 /// Sends the pause request to one target.
@@ -815,8 +882,6 @@ struct DeliveryKey {
 struct ThreadPeriod {
     /// The identity used in the delivery key.
     period_id: String,
-    /// Whether the session was present in the latest listing.
-    present: bool,
 }
 
 /// The snapshot a delivery worker consumes.
@@ -856,11 +921,11 @@ impl BridgeDiscovery {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BridgeConnection {
-    /// No handshake has succeeded yet.
+    /// No handshake has completed yet.
     Unknown,
-    /// A candidate completed the `list_threads` handshake.
+    /// A candidate answered the `list_threads` handshake.
     Available,
-    /// The last batch found no usable bridge.
+    /// No candidate answered the last batch.
     Unavailable,
 }
 
@@ -985,12 +1050,29 @@ impl AutoPauseController {
         self.delivery_deadline = deadline;
     }
 
+    /// Whether a delivery worker is still running, for the offline tests.
+    #[cfg(test)]
+    pub(crate) fn running_flag(&self) -> bool {
+        self.running
+    }
+
+    /// How many requests are reserved but not yet confirmed.
+    #[cfg(test)]
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// How many requests were positively confirmed.
+    #[cfg(test)]
+    pub(crate) fn sent_len(&self) -> usize {
+        self.sent.len()
+    }
+
     /// The candidate list for the next batch.
-    fn candidates(&self) -> Vec<BridgeCandidate> {
-        let discovery = self
-            .discovery_override
-            .clone()
-            .unwrap_or_else(BridgeDiscovery::discover);
+    ///
+    /// The discovery is ordinary file system work, so it is produced before
+    /// the controller is locked and the result is passed in.
+    fn candidates(discovery: &BridgeDiscovery) -> Vec<BridgeCandidate> {
         build_candidates(
             discovery.explicit_pipe_path.as_deref(),
             &discovery.pipe_names,
@@ -1028,20 +1110,9 @@ impl AutoPauseController {
         self.periods.retain(|id, _| active.contains(id.as_str()));
 
         for thread in threads {
-            let needs_new_period = self
-                .periods
-                .get(&thread.id)
-                .map(|period| !period.present)
-                .unwrap_or(true);
-            if needs_new_period {
+            if !self.periods.contains_key(&thread.id) {
                 let period_id = self.next_period_id(thread);
-                self.periods.insert(
-                    thread.id.clone(),
-                    ThreadPeriod {
-                        period_id,
-                        present: true,
-                    },
-                );
+                self.periods.insert(thread.id.clone(), ThreadPeriod { period_id });
             } else if let Some(turn) = thread
                 .turn_id
                 .as_deref()
@@ -1274,60 +1345,111 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
     }
     let prompt = pause_message(&triggers, sample.usage.fetched_at);
 
-    let (transport, candidates) = {
+    // The transport and the discovery override are read under the lock, but
+    // the discovery itself is ordinary file system work. Running it while
+    // the controller is held would block every other user of the state and
+    // could not be interrupted by the batch deadline.
+    let (transport, override_discovery) = {
         let controller = lock_controller(state);
-        (controller.transport.clone(), controller.candidates())
+        (
+            controller.transport.clone(),
+            controller.discovery_override.clone(),
+        )
     };
+    let discovery = match override_discovery {
+        Some(discovery) => discovery,
+        None => discover_bridge().await,
+    };
+    let candidates = AutoPauseController::candidates(&discovery);
     if candidates.is_empty() {
         let mut controller = lock_controller(state);
         controller.connection = BridgeConnection::Unavailable;
         return;
     }
 
+    // A candidate that answered without reporting an active session is still
+    // an observation: the sessions left the active list. The first candidate
+    // that reports targets wins.
+    let mut answered = false;
+    let mut reported: Option<(BridgeCandidate, Vec<ActiveThread>)> = None;
     for candidate in candidates {
-        let threads = match handshake(transport.as_ref(), &candidate).await {
-            Ok(threads) => threads,
+        match handshake(transport.as_ref(), &candidate).await {
             // A failed handshake moves on to the next candidate; the pipe name
             // alone never proves that a bridge is usable.
             Err(_) => continue,
-        };
-
-        {
-            let mut controller = lock_controller(state);
-            controller.connection = BridgeConnection::Available;
-            controller.refresh_periods(&threads);
-        }
-
-        for thread in &threads {
-            let period_id = { lock_controller(state).period_id(&thread.id) };
-            let Some(period_id) = period_id else {
+            Ok(Handshake::NoActiveSession) => {
+                answered = true;
                 continue;
-            };
-            let reservation =
-                { lock_controller(state).reserve(&sample.account_id, &period_id, &triggers) };
-            let keys = match reservation {
-                Reservation::Nothing | Reservation::Backfilled => continue,
-                Reservation::Send { keys } => keys,
-            };
-
-            // The guard releases the reservation on every failure path,
-            // including a cancelled batch, so a timeout never blocks a retry.
-            let mut guard = ReservationGuard::new(state.clone(), keys.clone());
-            let confirmed = send_pause(transport.as_ref(), &candidate, thread, &prompt)
-                .await
-                .unwrap_or(false);
-            if confirmed {
-                let mut controller = lock_controller(state);
-                controller.confirm(&keys);
-                controller.confirmed_count += 1;
-                controller.last_confirmed_at = Some(unix_now());
-                drop(controller);
-                guard.mark_confirmed();
+            }
+            Ok(Handshake::Targets(threads)) => {
+                answered = true;
+                reported = Some((candidate, threads));
+                break;
             }
         }
+    }
 
-        // The handshake succeeded, so this candidate is the bridge to use.
-        break;
+    let Some((candidate, threads)) = reported else {
+        // No candidate reported a target. When a candidate answered, the
+        // observation is that nothing is active, so every active period ends
+        // here and a session that returns later starts a new one. Without that
+        // observation a returning session would keep its old period identity
+        // and could never be prompted again in the same quota cycle.
+        let mut controller = lock_controller(state);
+        controller.connection = if answered {
+            BridgeConnection::Available
+        } else {
+            BridgeConnection::Unavailable
+        };
+        if answered {
+            controller.refresh_periods(&[]);
+        }
+        return;
+    };
+
+    {
+        let mut controller = lock_controller(state);
+        controller.connection = BridgeConnection::Available;
+        controller.refresh_periods(&threads);
+    }
+    for thread in session_targets(&threads) {
+        let period_id = { lock_controller(state).period_id(&thread.id) };
+        let Some(period_id) = period_id else {
+            continue;
+        };
+        let reservation =
+            { lock_controller(state).reserve(&sample.account_id, &period_id, &triggers) };
+        let keys = match reservation {
+            Reservation::Nothing | Reservation::Backfilled => continue,
+            Reservation::Send { keys } => keys,
+        };
+
+        // The guard releases the reservation on every failure path,
+        // including a cancelled batch, so a timeout never blocks a retry.
+        let mut guard = ReservationGuard::new(state.clone(), keys.clone());
+        let confirmed = send_pause(transport.as_ref(), &candidate, thread, &prompt)
+            .await
+            .unwrap_or(false);
+        if confirmed {
+            let mut controller = lock_controller(state);
+            controller.confirm(&keys);
+            controller.confirmed_count += 1;
+            controller.last_confirmed_at = Some(unix_now());
+            drop(controller);
+            guard.mark_confirmed();
+        }
+    }
+}
+
+/// Discovers the bridge on a blocking thread.
+///
+/// Enumerating the named pipes and walking the session directory is ordinary
+/// file system work. Running it on the blocking pool keeps the quota refresh
+/// path responsive and keeps the controller lock free while it runs.
+async fn discover_bridge() -> BridgeDiscovery {
+    match tokio::task::spawn_blocking(BridgeDiscovery::discover).await {
+        Ok(discovery) => discovery,
+        Err(_) => BridgeDiscovery::default(),
     }
 }
 
@@ -1396,7 +1518,7 @@ pub(crate) mod testing {
         list_threads: Option<ToolCallOutcome>,
         send_success: bool,
         send_error: Option<String>,
-        delay_ms: u64,
+        send_delay_ms: u64,
     }
 
     impl ScriptedTransport {
@@ -1441,9 +1563,10 @@ pub(crate) mod testing {
             self.inner.lock().unwrap().send_error = Some(error.to_owned());
         }
 
-        /// Delays every call, so a deadline can be observed.
-        pub(crate) fn set_delay_ms(&self, delay_ms: u64) {
-            self.inner.lock().unwrap().delay_ms = delay_ms;
+        /// Hangs only the `send_message_to_thread` call, so the handshake
+        /// succeeds and the batch is cut off while a request is in flight.
+        pub(crate) fn set_send_delay_ms(&self, delay_ms: u64) {
+            self.inner.lock().unwrap().send_delay_ms = delay_ms;
         }
 
         /// Every recorded call.
@@ -1478,7 +1601,7 @@ pub(crate) mod testing {
             arguments: Value,
         ) -> Pin<Box<dyn Future<Output = Result<ToolCallOutcome, BridgeError>> + Send + 'a>> {
             Box::pin(async move {
-                let (list_threads, send_success, send_error, delay_ms) = {
+                let (list_threads, send_success, send_error, send_delay_ms) = {
                     let mut state = self.inner.lock().unwrap();
                     state.calls.push(RecordedCall {
                         pipe: pipe.to_owned(),
@@ -1490,12 +1613,9 @@ pub(crate) mod testing {
                         state.list_threads.clone(),
                         state.send_success,
                         state.send_error.clone(),
-                        state.delay_ms,
+                        state.send_delay_ms,
                     )
                 };
-                if delay_ms > 0 {
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                }
                 if tool_name == "list_threads" {
                     return match list_threads {
                         Some(outcome) => Ok(outcome),
@@ -1503,6 +1623,10 @@ pub(crate) mod testing {
                             "the list_threads call was not confirmed".into(),
                         )),
                     };
+                }
+                if send_delay_ms > 0 {
+                    // The send hangs, so the batch deadline has to cut it off.
+                    tokio::time::sleep(Duration::from_millis(send_delay_ms)).await;
                 }
                 if let Some(error) = send_error {
                     return Err(BridgeError::Unavailable(error));
@@ -1610,7 +1734,17 @@ mod tests {
 
     #[test]
     fn an_unusable_reset_time_falls_back_to_the_plain_pause() {
-        for resets_at in [None, Some(999), Some(1_000 + 30 * 24 * 3_600)] {
+        for resets_at in [
+            None,
+            Some(999),
+            // Beyond the 5-hour window: a reset that far away is not one, and
+            // a scheduled message would tell Codex to wait for days.
+            Some(1_000 + 6 * 3_600 + 1),
+            Some(1_000 + 30 * 24 * 3_600),
+            // A malformed value must not overflow into a plausible duration.
+            Some(i64::MIN),
+            Some(i64::MAX),
+        ] {
             let triggers = vec![Trigger {
                 quota: QuotaKind::FiveHour,
                 resets_at,
@@ -1671,6 +1805,89 @@ mod tests {
     fn an_unparseable_payload_yields_no_target() {
         assert!(parse_active_threads("not json").is_empty());
         assert!(parse_active_threads("{}").is_empty());
+    }
+
+    /// The shape the live Codex client returns, observed through a read-only
+    /// handshake. The listing carries both groups and a mixture of kinds and
+    /// states, so only the active Codex records may survive.
+    #[test]
+    fn the_live_listing_shape_is_parsed_as_expected() {
+        let payload = json!({
+            "pinnedThreads": [],
+            "threads": [
+                {
+                    "id": "0199b0d2-1111-7000-8000-000000000001",
+                    "kind": "chatgpt",
+                    "status": "idle",
+                    "hostId": "local",
+                },
+                {
+                    "id": "0199b0d2-2222-7000-8000-000000000002",
+                    "kind": "codex",
+                    "status": "idle",
+                    "hostId": "local",
+                },
+                {
+                    "id": "0199b0d2-3333-7000-8000-000000000003",
+                    "kind": "codex",
+                    "status": "notLoaded",
+                    "hostId": "local",
+                },
+                {
+                    "id": "0199b0d2-4444-7000-8000-000000000004",
+                    "kind": "codex",
+                    "status": "active",
+                    "hostId": "local",
+                },
+            ],
+        })
+        .to_string();
+
+        let threads = parse_active_threads(&payload);
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "0199b0d2-4444-7000-8000-000000000004");
+        assert_eq!(threads[0].host_id.as_deref(), Some("local"));
+
+        // A client that adds one more layer of JSON encoding must not empty
+        // the target list.
+        let wrapped = serde_json::to_string(&Value::String(payload)).unwrap();
+        assert_eq!(parse_active_threads(&wrapped).len(), 1);
+    }
+
+    #[test]
+    fn the_session_walk_is_bounded_and_prefers_the_newest_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-usage-overlay-session-walk-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let older = dir.join("2026").join("10").join("18");
+        let newer = dir.join("2026").join("10").join("19");
+        std::fs::create_dir_all(&older).unwrap();
+        std::fs::create_dir_all(&newer).unwrap();
+        for index in 0..20 {
+            let name = format!(
+                "rollout-2026-10-18T00-00-{index:02}-123e4567-e89b-12d3-a456-426614174000.jsonl.zst"
+            );
+            std::fs::write(older.join(name), b"{}").unwrap();
+        }
+        for index in 0..5 {
+            let name = format!(
+                "rollout-2026-10-19T00-00-{index:02}-123e4567-e89b-12d3-a456-426614174000.jsonl.zst"
+            );
+            std::fs::write(newer.join(name), b"{}").unwrap();
+        }
+
+        let mut files = Vec::new();
+        collect_session_files(&dir, 0, MAX_SESSION_SCAN_DEPTH, 8, &mut files);
+
+        assert_eq!(files.len(), 8, "the walk must stop at the limit");
+        assert!(
+            files.iter().take(5).all(|(_, path)| path.starts_with(&newer)),
+            "the newest date folder must be visited first"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2052,11 +2269,25 @@ mod tests {
             quota: QuotaKind::FiveHour,
             resets_at: Some(2_000),
         }];
+
+        // The account is established before anything is recorded. Without
+        // this the later prune could pass by clearing the whole ledger on an
+        // account switch, which would not prove that the expired cycle was
+        // the reason.
+        controller.prune("acct", 1_000);
+
         let keys = match controller.reserve("acct", "session-1#p1", &triggers) {
             Reservation::Send { keys } => keys,
             other => panic!("expected a send reservation, got {other:?}"),
         };
         controller.confirm(&keys);
+
+        // The cycle is still running, so the record still applies.
+        controller.prune("acct", 1_500);
+        assert!(matches!(
+            controller.reserve("acct", "session-1#p1", &triggers),
+            Reservation::Nothing
+        ));
 
         // The cycle ended: the record no longer applies.
         controller.prune("acct", 3_000);
