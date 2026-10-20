@@ -395,17 +395,87 @@ fn a_confirmed_segment_transition_rejects_before_training() {
     assert_eq!(learner.a, 10.0);
     let event = harness.last_event().expect("the rejection is recorded");
     assert_eq!(event.kind, ShadowEventKind::Rejected);
-    assert_eq!(event.rejection_reason.as_deref(), Some("transition"));
+    assert_eq!(event.rejection_reason.as_deref(), Some("long_idle"));
     // The weighted metadata of the old segment is gone.
     assert_eq!(harness.shadow().weighted.last_crossing_observation_at, None);
     assert_eq!(harness.shadow().weighted.idle_rate_ceiling, None);
 }
 
 #[test]
+fn the_segment_transition_causes_are_recorded_separately() {
+    // A completed quota cycle without a pending interval: a lifecycle record.
+    let mut cycle = Harness::new("cause-cycle");
+    let mut first = usage(1000, 10.0, 10.0);
+    first.five_hour.resets_at = Some(2000);
+    cycle.refresh(&first);
+    let mut second = usage(1060, 10.0, 10.0);
+    second.five_hour.resets_at = Some(2000);
+    cycle.refresh(&second);
+    // The quota cycle completes.
+    let mut after_cycle = usage(2000, 3.0, 10.0);
+    after_cycle.five_hour.resets_at = Some(9000);
+    cycle.refresh(&after_cycle);
+    let event = cycle.last_event().expect("the cycle is recorded");
+    assert_eq!(event.kind, ShadowEventKind::Lifecycle);
+    assert_eq!(event.lifecycle.as_deref(), Some("quota_cycle"));
+
+    // A completed quota cycle with a pending interval rejects it, and the
+    // rejection carries the cause.
+    let mut pending = Harness::new("cause-cycle-pending");
+    let mut first = usage(1000, 10.0, 10.0);
+    first.five_hour.resets_at = Some(2000);
+    pending.refresh(&first);
+    for minute in 1..=3 {
+        let mut sample = usage(1000 + minute * 60, 10.0 + minute as f64, 10.0);
+        sample.five_hour.resets_at = Some(2000);
+        pending.refresh(&sample);
+    }
+    assert!(pending.shadow().pending.is_some());
+    let mut boundary = usage(2000, 3.0, 10.0);
+    boundary.five_hour.resets_at = Some(9000);
+    pending.refresh(&boundary);
+    let event = pending.last_event().expect("the cycle is recorded");
+    assert_eq!(event.kind, ShadowEventKind::Rejected);
+    assert_eq!(event.rejection_reason.as_deref(), Some("quota_cycle"));
+
+    // An overnight resume is a long idle, not a quota cycle.
+    let mut idle = Harness::origin("cause-idle");
+    idle.step(1880, 20.0);
+    let event = idle.last_event().expect("the idle is recorded");
+    assert_eq!(event.kind, ShadowEventKind::Rejected);
+    assert_eq!(event.rejection_reason.as_deref(), Some("long_idle"));
+
+    // A confirmed decrease is a correction.
+    let mut correction = Harness::origin("cause-correction");
+    correction.step(1240, 12.0);
+    let event = correction.last_event().expect("the decrease is recorded");
+    assert_eq!(event.kind, ShadowEventKind::Rejected);
+    assert_eq!(event.rejection_reason.as_deref(), Some("decrease"));
+    correction.step(1300, 11.0);
+    let event = correction.last_event().expect("the correction is recorded");
+    assert_eq!(event.kind, ShadowEventKind::Lifecycle);
+    assert_eq!(event.lifecycle.as_deref(), Some("correction"));
+}
+
+#[test]
+fn a_backwards_rejection_records_no_gap_duration() {
+    let mut harness = Harness::origin("backwards-gap");
+    harness.step(1120, 12.0);
+    let event = harness.last_event().expect("the rejection is recorded");
+    assert_eq!(event.rejection_reason.as_deref(), Some("backwards"));
+    // A backwards observation has no gap at all.
+    assert_eq!(event.actual_gap_seconds, None);
+}
+
+#[test]
 fn a_decrease_rejects_the_interval() {
     let mut harness = Harness::origin("decrease");
-    // The used percentage drops below the last valid observation.
-    harness.step(1240, 12.0);
+    // The reading first rises, so the last valid observation sits above the
+    // origin. The frozen rule compares the decrease with the previous
+    // observation, so the following drop rejects the interval even though the
+    // reading is still above the origin.
+    harness.step(1240, 14.0);
+    harness.step(1300, 13.5);
     let learner = harness.personal();
     assert_eq!(learner.matured_feedbacks, 0);
     assert_eq!(learner.a, 10.0);
@@ -470,6 +540,22 @@ fn a_backward_timestamp_cannot_train() {
 }
 
 #[test]
+fn a_refused_sample_never_becomes_a_new_origin() {
+    let mut harness = Harness::origin("refused-origin");
+    // The production history refuses a backwards observation, so it must not
+    // become the origin of a new learning interval either.
+    harness.step(1120, 12.0);
+    assert!(
+        harness.shadow().pending.is_none(),
+        "a refused sample must not start a new interval"
+    );
+    // The rejection is still recorded and the learner did not train.
+    assert_eq!(harness.personal().matured_feedbacks, 0);
+    let event = harness.last_event().expect("the rejection is recorded");
+    assert_eq!(event.rejection_reason.as_deref(), Some("backwards"));
+}
+
+#[test]
 fn future_observations_cannot_change_an_earlier_shadow_prediction() {
     let mut harness = Harness::origin("no-look-ahead");
     let stored = harness.shadow().pending.clone().unwrap();
@@ -494,24 +580,11 @@ fn future_observations_cannot_change_an_earlier_shadow_prediction() {
 }
 
 #[test]
-fn the_visible_usage_values_are_unchanged_by_the_shadow() {
-    let mut harness = Harness::new("visible");
-    let mut last: Option<f64> = None;
-    for minute in 0..10 {
-        let at = 1000 + minute * 60;
-        let used = 10.0 + minute as f64;
-        let estimate = harness.refresh(&usage(at, used, 10.0));
-        // The production estimate is exactly the pre-shadow computation.
-        let expected = estimate_rate(
-            &harness.tracker.state.five_hour,
-            FIVE_HOUR_HORIZON_SECS,
-            2,
-        );
-        assert_eq!(estimate.five_hour_per_hour, expected);
-        last = estimate.five_hour_per_hour;
-    }
-    // The frontend contract cannot carry a shadow value.
-    let ui = usage(1600, 19.0, 10.0).to_ui(last, None);
+fn the_frontend_contract_cannot_carry_a_shadow_value() {
+    // The frontend contract is a closed struct, so a shadow value cannot
+    // reach it. This is a structural invariant, not a recomputation: it does
+    // not depend on any rate.
+    let ui = usage(1600, 19.0, 10.0).to_ui(Some(120.0), Some(25.0));
     let json = serde_json::to_value(&ui).unwrap();
     let keys: Vec<String> = json
         .as_object()
@@ -533,6 +606,67 @@ fn the_visible_usage_values_are_unchanged_by_the_shadow() {
 }
 
 #[test]
+fn the_published_rates_survive_the_persist_and_flush_cycle() {
+    // The same golden series as the pre-shadow baseline, but driven through
+    // the full harness: the sample is accepted, the state is persisted and
+    // the audit outbox is flushed. The published rates must not move, so the
+    // shadow pass and the persistence do not leak into the visible value.
+    let samples: [(i64, f64, f64); 14] = [
+        (1_000, 10.0, 10.0),
+        (1_060, 13.0, 12.0),
+        (1_120, 16.0, 14.0),
+        (1_240, 19.0, 15.0),
+        (1_360, 19.0, 15.0),
+        (1_420, 22.0, 16.0),
+        (1_540, 25.0, 18.0),
+        (1_600, 28.0, 18.0),
+        (1_660, 24.0, 19.0),
+        (1_720, 26.0, 20.0),
+        (1_840, 30.0, 22.0),
+        (1_900, 33.0, 24.0),
+        (2_600, 40.0, 30.0),
+        (2_660, 44.0, 33.0),
+    ];
+    let expected: [(Option<f64>, Option<f64>); 14] = [
+        (None, None),
+        (Some(160.0), Some(90.0)),
+        (Some(144.0), Some(108.0)),
+        (Some(80.0), Some(54.0)),
+        (Some(42.352941176471), Some(33.75)),
+        (Some(51.428571428571), Some(31.764705882353)),
+        (Some(80.0), Some(30.0)),
+        (Some(120.0), Some(25.714285714286)),
+        (Some(120.0), Some(40.0)),
+        (None, Some(41.538461538462)),
+        (Some(112.5), Some(51.428571428571)),
+        (Some(128.571428571429), Some(77.142857142857)),
+        (None, Some(27.0)),
+        (Some(225.0), Some(67.5)),
+    ];
+    let mut harness = Harness::new("persist-cycle");
+    for (index, (at, five, week)) in samples.iter().enumerate() {
+        let estimate = harness.refresh(&usage(*at, *five, *week));
+        let (want_five, want_week) = expected[index];
+        match (estimate.five_hour_per_hour, want_five) {
+            (Some(actual), Some(want)) => assert!(
+                (actual - want).abs() < 1e-9,
+                "sample {index}: 5H {actual} vs {want}"
+            ),
+            (None, None) => {}
+            (actual, want) => panic!("sample {index}: 5H {actual:?} vs {want:?}"),
+        }
+        match (estimate.weekly_per_hour, want_week) {
+            (Some(actual), Some(want)) => assert!(
+                (actual - want).abs() < 1e-9,
+                "sample {index}: weekly {actual} vs {want}"
+            ),
+            (None, None) => {}
+            (actual, want) => panic!("sample {index}: weekly {actual:?} vs {want:?}"),
+        }
+    }
+}
+
+#[test]
 fn a_successful_refresh_persists_the_shadow_state() {
     let harness = Harness::origin("persist");
     let raw = fs::read_to_string(harness.config.burn_rate_state_path()).unwrap();
@@ -543,25 +677,10 @@ fn a_successful_refresh_persists_the_shadow_state() {
     assert!((pending.origin_fixed_rate_per_hour - 60.0).abs() < 1e-9);
 }
 
-#[test]
-fn a_failed_usage_read_does_not_fabricate_feedback_or_erase_the_learner_state() {
-    let mut harness = Harness::origin("failed-read");
-    for minute in 1..=5 {
-        harness.step(1180 + minute * 60, 13.0 + minute as f64);
-    }
-    let before = fs::read_to_string(harness.config.burn_rate_state_path()).unwrap();
-
-    // A failed read never reaches the tracker, so the state is untouched.
-    let loaded = BurnRateTracker::load(&harness.config);
-    assert_eq!(
-        loaded.state.five_hour_shadow.personal,
-        harness.tracker.state.five_hour_shadow.personal
-    );
-    assert_eq!(
-        before,
-        fs::read_to_string(harness.config.burn_rate_state_path()).unwrap()
-    );
-}
+// A failed usage read is a property of the production read boundary, not of
+// the tracker: the tracker never sees a failed sample. The behaviour is
+// covered where the failure can really be injected, in the refresh path of
+// `crate::commands`.
 
 #[test]
 fn an_account_switch_increments_the_generation_and_clears_the_personal_state() {
@@ -841,6 +960,51 @@ fn an_unflushed_outbox_is_never_overwritten_by_a_second_personal_outcome() {
 }
 
 #[test]
+fn a_lifecycle_transition_never_overwrites_a_retained_audit_event() {
+    let mut harness = Harness::origin("outbox-lifecycle");
+    // The matured event is recorded but never flushed, so the slot stays
+    // occupied.
+    for minute in 1..=5 {
+        harness.accept(&usage(1180 + minute * 60, 13.0 + minute as f64, 10.0));
+    }
+    let retained = harness.shadow().audit_outbox.clone().unwrap();
+    assert_eq!(retained.kind, ShadowEventKind::Matured);
+    assert_eq!(retained.target_at, Some(1480));
+
+    // An account switch would record a lifecycle event. It must not replace
+    // the retained record.
+    let mut switched = usage(1600, 20.0, 12.0);
+    switched.account_id = Some("acct-b".into());
+    harness.accept(&switched);
+    let outbox = harness.shadow().audit_outbox.as_ref().unwrap();
+    assert_eq!(outbox.kind, ShadowEventKind::Matured);
+    assert_eq!(outbox.target_at, Some(1480));
+    assert_eq!(outbox.event_sequence, retained.event_sequence);
+
+    // A segment transition would record a rejection. It must not replace the
+    // retained record either.
+    let mut other = Harness::origin("outbox-segment");
+    for minute in 1..=5 {
+        other.accept(&usage(1180 + minute * 60, 13.0 + minute as f64, 10.0));
+    }
+    let retained = other.shadow().audit_outbox.clone().unwrap();
+    assert_eq!(retained.kind, ShadowEventKind::Matured);
+    other.accept(&usage(1880, 20.0, 10.0));
+    let outbox = other.shadow().audit_outbox.as_ref().unwrap();
+    assert_eq!(outbox.kind, ShadowEventKind::Matured);
+    assert_eq!(outbox.target_at, retained.target_at);
+    // The learner state the retained record describes is still there.
+    assert_eq!(other.personal().matured_feedbacks, 1);
+
+    // The retained record reaches the log intact.
+    harness.persist().unwrap();
+    let _ = BurnRateTracker::load(&harness.config);
+    let log = fs::read_to_string(harness.config.shadow_evidence_path()).unwrap();
+    assert!(log.contains("\"kind\":\"matured\""), "{log}");
+    assert!(!log.contains("\"kind\":\"lifecycle\""), "{log}");
+}
+
+#[test]
 fn a_state_save_failure_does_not_append_the_event_and_pauses_the_personal_transitions() {
     let mut harness = Harness::origin("save-failure");
     for minute in 1..=5 {
@@ -916,4 +1080,67 @@ fn the_evidence_log_contains_no_account_identifier() {
     let log = fs::read_to_string(harness.config.shadow_evidence_path()).unwrap();
     assert!(!log.contains("acct-a"));
     assert!(!log.contains("accountId"));
+}
+
+/// The published rates must not move.
+///
+/// The expected values are the ones the pre-shadow implementation produced for
+/// the same series; they were captured from the base commit and are hard
+/// coded on purpose. A recomputation from the current state would only prove
+/// self-consistency, not that the published estimator is unchanged.
+#[test]
+fn the_published_rates_match_the_pre_shadow_golden_vector() {
+    let samples: [(i64, f64, f64); 14] = [
+        (1_000, 10.0, 10.0),
+        (1_060, 13.0, 12.0),
+        (1_120, 16.0, 14.0),
+        (1_240, 19.0, 15.0),
+        (1_360, 19.0, 15.0),
+        (1_420, 22.0, 16.0),
+        (1_540, 25.0, 18.0),
+        (1_600, 28.0, 18.0),
+        (1_660, 24.0, 19.0),
+        (1_720, 26.0, 20.0),
+        (1_840, 30.0, 22.0),
+        (1_900, 33.0, 24.0),
+        (2_600, 40.0, 30.0),
+        (2_660, 44.0, 33.0),
+    ];
+    let expected: [(Option<f64>, Option<f64>); 14] = [
+        (None, None),
+        (Some(160.0), Some(90.0)),
+        (Some(144.0), Some(108.0)),
+        (Some(80.0), Some(54.0)),
+        (Some(42.352941176471), Some(33.75)),
+        (Some(51.428571428571), Some(31.764705882353)),
+        (Some(80.0), Some(30.0)),
+        (Some(120.0), Some(25.714285714286)),
+        (Some(120.0), Some(40.0)),
+        (None, Some(41.538461538462)),
+        (Some(112.5), Some(51.428571428571)),
+        (Some(128.571428571429), Some(77.142857142857)),
+        (None, Some(27.0)),
+        (Some(225.0), Some(67.5)),
+    ];
+    let mut tracker = BurnRateTracker::from_state(BurnRateStateFile::default());
+    for (index, (at, five, week)) in samples.iter().enumerate() {
+        let estimate = tracker.accept_usage(&usage(*at, *five, *week));
+        let (want_five, want_week) = expected[index];
+        match (estimate.five_hour_per_hour, want_five) {
+            (Some(actual), Some(want)) => assert!(
+                (actual - want).abs() < 1e-9,
+                "sample {index}: 5H {actual} vs {want}"
+            ),
+            (None, None) => {}
+            (actual, want) => panic!("sample {index}: 5H {actual:?} vs {want:?}"),
+        }
+        match (estimate.weekly_per_hour, want_week) {
+            (Some(actual), Some(want)) => assert!(
+                (actual - want).abs() < 1e-9,
+                "sample {index}: weekly {actual} vs {want}"
+            ),
+            (None, None) => {}
+            (actual, want) => panic!("sample {index}: weekly {actual:?} vs {want:?}"),
+        }
+    }
 }

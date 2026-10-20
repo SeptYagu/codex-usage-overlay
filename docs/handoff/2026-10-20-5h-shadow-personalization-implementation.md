@@ -120,10 +120,27 @@ Delivery rules, as implemented:
 5. the slot is cleared in memory and the persisted copy is replaced with the
    next state-changing save.
 
-While the slot is occupied, the Fixed Weighted estimator keeps running but the
-personal outcome maturation and the creation of new pending intervals are
-paused. A retained event is never overwritten, and an event whose learner
-state is not durable is never appended.
+A retained event is flushed **before** the next sample is processed, not only
+after the save. The refresh path is therefore:
+
+```text
+flush the retained outbox -> accept the sample -> persist the state -> flush the new outbox
+```
+
+If the retained event still cannot be appended, the personal outcome maturation
+and the creation of new pending intervals are paused for that refresh, while the
+Fixed Weighted estimator keeps running and the visible production behavior is
+unaffected.
+
+A retained event is never overwritten: not by a second personal outcome, and not
+by a lifecycle transition either. An event whose learner state is not durable is
+never appended.
+
+The flush order is what protects the learning coverage. Because the retained
+event is flushed first, a transient append failure costs no learning interval:
+the interval that was waiting during the pause is learned from as soon as the
+slot drains. With the opposite order, every append failure would silently drop
+one five-minute interval.
 
 The log keeps at most 10,000 events and compacts to the newest ones. A
 compaction or append failure never fails a usage refresh.
@@ -182,6 +199,9 @@ on the Fixed Weighted prediction only.
   appended to the durable log in that state.
 - An append failure keeps the slot populated, so the next refresh retries it.
   The visible production behavior is unaffected.
+- A retained event survives a lifecycle transition. An account switch or a
+  segment transition during an occupied slot records no event, so the retained
+  record is never destroyed.
 
 ## 6. Cadence behavior under the frozen 90-second rule
 
@@ -201,14 +221,21 @@ coverage is lost at the configured cadence.
 
 | Gate | Result |
 | --- | --- |
-| `cargo check --all-targets` | clean, zero warnings |
-| `cargo test` | **276** regular tests passed, 0 failed, 4 pre-existing ignored replay tests unchanged |
+| `cargo check --all-targets --locked` | clean, zero warnings |
+| `cargo test --locked` | **284** regular tests passed, 0 failed, 4 pre-existing ignored replay tests unchanged |
 | `npm test` | **95** frontend tests passed, unchanged |
 | `npm run build` | passed |
 | `scripts/Test-TauriRelease.ps1` | 6/6 passed |
 | `scripts/check-replay-evidence.mjs` (new) | 13/13 evidence files byte-identical with the committed evidence |
 
-New Rust tests: 11 weighted, 25 personal, 39 shadow lifecycle.
+New Rust tests: 11 weighted, 26 personal, 44 shadow lifecycle, 2 shadow refresh
+(the last two drive the production `refresh_usage` path with a scripted usage
+source, so a failing read and a failing evidence append are really injected).
+
+A 16-probe mutation audit covers the frozen rules. Every probe mutates one
+production rule and the named test turns red; three probes did not at first and
+the matching tests were strengthened until they did. The probes live outside the
+repository.
 
 ### Replay regression gates (plan §17)
 
@@ -263,6 +290,24 @@ implementation-level deviations are recorded:
    deliberately publishes nothing, so the accessor is only called by the
    offline tests. The crate is a binary, where `pub` does not imply a
    reachable symbol.
+10. **Three separate segment transition codes.** The plan only asks for "a
+    stable rejection code". A confirmed segment transition is recorded with
+    the code that names its actual cause: `quota_cycle`, `long_idle` or
+    `correction`. A later analysis has to tell a real quota cycle, an
+    overnight resume and a confirmed correction apart, so one shared code
+    would destroy that distinction.
+11. **A backwards rejection records no `actualGapSeconds`.** The plan asks for
+    "relevant timing metadata such as `actualGapSeconds` when applicable". A
+    negative gap is not a gap, so the field stays empty instead of carrying a
+    negative duration.
+12. **The outbox is flushed before the sample is processed and after the
+    save.** The plan (§5.4) requires a flush "before processing any new
+    personal-learning event". The implementation flushes at both boundaries, so
+    a transient append failure costs no learning interval.
+13. **A new origin needs an accepted sample.** The origin snapshot is only
+    built when the production burn-rate history accepted the observation, so
+    the learner never starts an interval from a sample that the visible
+    estimator refused.
 
 ## 9. Not verified
 
@@ -310,8 +355,42 @@ src-tauri/src/codex/burn_rate/shadow.rs     new: the shadow state, the outbox, t
 src-tauri/src/codex/burn_rate/shadow_tests.rs new: the lifecycle tests
 src-tauri/src/codex/burn_rate/replay.rs     now imports the production helpers
 src-tauri/src/config.rs                     the evidence log path
-src-tauri/src/commands.rs                   the outbox flush after the save
+src-tauri/src/commands.rs                   the outbox flush before and after the sample
 scripts/check-replay-evidence.mjs           new: the byte-identical replay gate
 ```
 
 No frontend file, no Cargo dependency and no npm dependency changed.
+
+## 12. Independent review and follow-up fixes
+
+The implementation was reviewed by an independent read-only reviewer, which
+reproduced the published behavior of the base commit `6137faa` side by side
+before judging the change. The published `five_hour_per_hour`,
+`weekly_per_hour` and `state_changed` sequences were byte-identical between
+the base commit and the shadow commit, and the reviewer independently
+reproduced all 13 committed evidence files.
+
+The review returned **FAIL** and reported one critical defect, one major
+defect, seven minor defects and two nits. All of them are fixed in this
+release.
+
+| Severity | Finding | Fix |
+| --- | --- | --- |
+| critical | the audit slot was only guarded for the personal outcome, so a lifecycle transition could overwrite an unappended matured or rejected event and destroy it for good, while the learner state had already advanced | the event placement requires an empty slot, so no event of any kind can take an occupied slot; the regression test is `a_lifecycle_transition_never_overwrites_a_retained_audit_event` |
+| major | the handoff claimed "a retained event is never overwritten" while the code did not guarantee it | the claim is now true and the rule is documented in §5 and §8 |
+| minor | the outbox was flushed only after the personal processing, so every transient append failure silently dropped one five-minute interval | the flush moved to the front of the refresh path; the regression test is `a_retained_audit_event_is_flushed_before_the_next_sample_is_processed` |
+| minor | a backwards rejection wrote a negative `actualGapSeconds` | the field stays empty for a backwards observation |
+| minor | `quota_reset` merged a real quota cycle, an overnight resume and a confirmed correction into one code | the three causes have their own stable codes |
+| minor | the effective-factor test passed with the formula removed | the test now uses a case where `p != y`, so the frozen formula is really exercised |
+| minor | the "failed usage read" test never injected a failure | the failure is now injected into the production read boundary of `refresh_usage` |
+| minor | the "visible values" test only proved self-consistency | it was split into a structural frontend-contract test and a golden-vector test over the full persist-and-flush cycle |
+| minor | the outbox coverage only exercised the working path | the failing-append path is now covered at the production refresh boundary |
+| nit | `PendingPersonalForecast::algorithm_version` was written but never read | the shadow normalization now discards a pending interval that carries another algorithm version |
+| nit | the handoff was missing from the handoff index | it is listed in `docs/handoff/INDEX.md` |
+
+The mutation probes in the reviewer's own harness and the 16 self-audit
+probes of this implementation confirm that the frozen rules are really
+covered: every probe mutates one production rule and the named test turns
+red. The probes are listed in the review notes and are not part of the
+repository.
+

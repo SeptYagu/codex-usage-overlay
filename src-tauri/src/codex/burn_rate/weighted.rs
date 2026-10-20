@@ -356,6 +356,21 @@ mod tests {
             .unwrap();
         assert!(third <= second + 1e-9, "{third} > {second}");
         assert!(metadata.idle_rate_ceiling.unwrap() <= ceiling);
+
+        // The quota is active again, so the idle rule does not apply, but the
+        // established ceiling still bounds the published rate. The stored
+        // ceiling is kept, never replaced by the higher fit.
+        let established = metadata.idle_rate_ceiling.unwrap();
+        let active = linear_state(7, 1000);
+        let fourth = metadata
+            .publish(&active, 1800, 2, WeightedParameters::FIVE_HOUR, true)
+            .unwrap();
+        assert!(fourth <= established + 1e-9, "{fourth} > {established}");
+        assert_eq!(
+            metadata.idle_rate_ceiling,
+            Some(established),
+            "the ceiling must never be raised"
+        );
     }
 
     #[test]

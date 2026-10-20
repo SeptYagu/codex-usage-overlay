@@ -176,6 +176,12 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
         Ok(raw) => {
             let estimate = {
                 let mut tracker = state.burn_rate.lock().await;
+                // A retained audit event is flushed before the new sample is
+                // processed, so a transient append failure does not cost a
+                // learning interval.
+                if let Err(error) = tracker.flush_audit_outbox(&state.config_manager) {
+                    eprintln!("Could not append the retained shadow evidence: {error}");
+                }
                 let estimate = tracker.accept_usage(&raw);
                 if estimate.state_changed || tracker.is_dirty() {
                     if let Err(error) = tracker.save(&state.config_manager) {
@@ -1976,6 +1982,250 @@ mod auto_pause_tests {
             "autoPauseWeeklyThresholdPercent": 99,
         });
         assert!(validate_settings_patch(&rejected, false).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The shadow refresh tests.
+///
+/// They drive the *production* refresh path — `refresh_usage` — with a
+/// scripted usage source, so the order of the flush, the acceptance and the
+/// persistence is the order the application performs. The assertions read the
+/// persisted state file and the local evidence log, because the durable copy
+/// is the contract between two runs.
+#[cfg(test)]
+mod shadow_refresh_tests {
+    use super::*;
+    use crate::codex::{QuotaSnapshot, RawCodexUsage};
+    use crate::config::ConfigManager;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+
+    const RESET_AT: i64 = 1_000_000;
+
+    /// A usage source that replays a scripted sequence of outcomes.
+    struct ScriptedSource {
+        outcomes: StdMutex<VecDeque<Result<RawCodexUsage, String>>>,
+    }
+
+    impl ScriptedSource {
+        fn new(outcomes: Vec<Result<RawCodexUsage, String>>) -> Self {
+            Self {
+                outcomes: StdMutex::new(outcomes.into()),
+            }
+        }
+    }
+
+    impl TrayPresentationSink for ScriptedSource {
+        fn present(&self, _presentation: crate::tray::TrayPresentation) {}
+        fn app_handle(&self) -> Option<&AppHandle> {
+            None
+        }
+    }
+
+    impl UsageSource for ScriptedSource {
+        async fn read_usage(&self, _: &AppState) -> Result<RawCodexUsage, String> {
+            let mut outcomes = self.outcomes.lock().unwrap();
+            outcomes
+                .pop_front()
+                .expect("the scripted outcome must be present")
+        }
+    }
+
+    fn sample(at: i64, five: f64, week: f64) -> RawCodexUsage {
+        RawCodexUsage {
+            account_id: Some("acct-a".into()),
+            five_hour: QuotaSnapshot {
+                used_percent: Some(five),
+                resets_at: Some(RESET_AT),
+                window_duration_mins: None,
+            },
+            weekly: QuotaSnapshot {
+                used_percent: Some(week),
+                resets_at: Some(RESET_AT),
+                window_duration_mins: None,
+            },
+            credits_display: "-".into(),
+            credits_balance: None,
+            has_credits: false,
+            fetched_at: at,
+        }
+    }
+
+    /// A series that burns exactly one quota point per minute, so the Fixed
+    /// Weighted estimator settles at sixty points per hour and a five-minute
+    /// interval matures.
+    fn burning_series(count: usize) -> Vec<Result<RawCodexUsage, String>> {
+        (0..count)
+            .map(|minute| Ok(sample(1000 + minute as i64 * 60, 10.0 + minute as f64, 10.0)))
+            .collect()
+    }
+
+    /// A series of explicit samples.
+    fn series(points: &[(i64, f64)]) -> Vec<Result<RawCodexUsage, String>> {
+        points
+            .iter()
+            .map(|(at, used)| Ok(sample(*at, *used, 10.0)))
+            .collect()
+    }
+
+    fn temp_state(tag: &str) -> (Arc<AppState>, ConfigManager, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-usage-overlay-shadow-refresh-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = ConfigManager::with_runtime_dir(dir.clone());
+        (
+            Arc::new(AppState::for_test(config.clone())),
+            config,
+            dir,
+        )
+    }
+
+    /// The persisted shadow subtree of the burn-rate state.
+    fn shadow_state(config: &ConfigManager) -> serde_json::Value {
+        let raw = std::fs::read_to_string(config.burn_rate_state_path()).unwrap();
+        let state: serde_json::Value =
+            serde_json::from_str(&raw).expect("the state must be JSON");
+        state
+            .get("fiveHourShadow")
+            .cloned()
+            .expect("the state must carry the shadow subtree")
+    }
+
+    /// The records of the local evidence log.
+    fn evidence(config: &ConfigManager) -> Vec<serde_json::Value> {
+        let Ok(content) = std::fs::read_to_string(config.shadow_evidence_path()) else {
+            return Vec::new();
+        };
+        content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("the evidence record must be JSON"))
+            .collect()
+    }
+
+    /// A failed usage read must not fabricate a feedback and must not erase
+    /// the learner state.
+    ///
+    /// The failure is injected into the production read boundary, so the
+    /// sample really never reaches the tracker.
+    #[tokio::test]
+    async fn a_failed_usage_read_does_not_fabricate_feedback_or_erase_the_learner_state() {
+        let (state, config, dir) = temp_state("failed-read");
+        let mut outcomes = burning_series(9);
+        outcomes.push(Err("usage read failed".to_string()));
+        let sink = ScriptedSource::new(outcomes);
+
+        for _ in 0..9 {
+            refresh_usage(&sink, &state)
+                .await
+                .expect("the refresh must succeed");
+        }
+
+        // One interval matured, so the learner holds real evidence and the
+        // durable state really carries the shadow subtree.
+        let before = shadow_state(&config);
+        assert_eq!(before["personal"]["maturedFeedbacks"], 1);
+        let before_raw = std::fs::read_to_string(config.burn_rate_state_path()).unwrap();
+        let before_evidence = evidence(&config).len();
+
+        // The read fails now.
+        let error = refresh_usage(&sink, &state)
+            .await
+            .expect_err("the read must fail");
+        assert_eq!(error, "usage read failed");
+
+        // The durable state is untouched: no fabricated feedback, no erased
+        // learner state, no lost interval.
+        let after_raw = std::fs::read_to_string(config.burn_rate_state_path()).unwrap();
+        assert_eq!(before_raw, after_raw, "a failed read must not change the state");
+        let after = shadow_state(&config);
+        assert_eq!(after["personal"], before["personal"]);
+        assert_eq!(after["pending"], before["pending"]);
+        assert_eq!(after["auditOutbox"], before["auditOutbox"]);
+        assert_eq!(evidence(&config).len(), before_evidence);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A retained audit event is flushed before the next sample is processed.
+    ///
+    /// A transient append failure must cost no learning interval: the
+    /// retained event is appended by the next refresh, and the interval that
+    /// was waiting in the meantime is learned from, not dropped.
+    #[tokio::test]
+    async fn a_retained_audit_event_is_flushed_before_the_next_sample_is_processed() {
+        let (state, config, dir) = temp_state("retained-flush");
+        // The evidence log cannot be appended to while it is a directory.
+        std::fs::create_dir_all(config.shadow_evidence_path()).unwrap();
+        let sink = ScriptedSource::new(series(&[
+            (1000, 10.0),
+            (1060, 11.0),
+            (1120, 12.0),
+            (1180, 13.0),
+            (1240, 14.0),
+            (1300, 15.0),
+            (1360, 16.0),
+            (1420, 17.0),
+            (1480, 18.0),
+            // The paused sample. The learner skips it, so the next one has to
+            // stay inside the frozen 90 second gap rule.
+            (1520, 18.5),
+            (1560, 19.0),
+        ]));
+
+        // Nine samples: the fourth opens the interval, the ninth matures it.
+        for _ in 0..9 {
+            refresh_usage(&sink, &state)
+                .await
+                .expect("the refresh must succeed");
+        }
+
+        // The matured event is retained, because the append failed.
+        let retained = shadow_state(&config);
+        assert_eq!(retained["auditOutbox"]["kind"], "matured");
+        assert_eq!(retained["auditOutbox"]["targetAt"], 1480);
+        assert_eq!(retained["personal"]["maturedFeedbacks"], 1);
+        // The next interval starts at the maturation point.
+        assert_eq!(retained["pending"]["originAt"], 1480);
+
+        // The tenth sample arrives while the event is still retained.
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        let blocked = shadow_state(&config);
+        assert_eq!(
+            blocked["auditOutbox"]["kind"], "matured",
+            "the retained event must survive"
+        );
+        // The learner is paused, so the interval did not advance.
+        assert_eq!(blocked["pending"]["lastValidAt"], 1480);
+
+        // The evidence log becomes writable again.
+        std::fs::remove_dir_all(config.shadow_evidence_path()).unwrap();
+
+        // The eleventh sample arrives. The retained event is flushed first, so
+        // the learner is no longer paused and the interval advances.
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        let flushed = shadow_state(&config);
+        assert!(
+            flushed["auditOutbox"].is_null(),
+            "the retained event must be flushed"
+        );
+        assert_eq!(
+            flushed["pending"]["lastValidAt"], 1560,
+            "the waiting interval must not be lost"
+        );
+
+        let records = evidence(&config);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["kind"], "matured");
+        assert_eq!(records[0]["targetAt"], 1480);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

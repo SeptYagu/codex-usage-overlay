@@ -28,7 +28,9 @@ pub const FEEDBACK_MAX_GAP_SECS: i64 = 90;
 /// Why a pending interval was rejected.
 ///
 /// The codes are stable: they are written into the local evidence log and are
-/// read by later offline analysis.
+/// read by later offline analysis. The three segment causes are separate
+/// codes, because a later analysis has to tell a real quota cycle, an
+/// overnight resume and a confirmed correction apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RejectionReason {
     /// The accepted-observation gap exceeded the frozen limit.
@@ -43,8 +45,14 @@ pub enum RejectionReason {
     TooLate,
     /// The timestamps moved backwards.
     Backwards,
-    /// A confirmed quota transition invalidated the interval.
-    Transition,
+    /// The quota cycle completed and started a new segment.
+    QuotaCycle,
+    /// The observation gap exceeded the production maximum and started a new
+    /// segment.
+    LongIdle,
+    /// A decrease was confirmed by a later observation and started a new
+    /// segment.
+    Correction,
 }
 
 impl RejectionReason {
@@ -57,7 +65,9 @@ impl RejectionReason {
             Self::Saturation => "saturation",
             Self::TooLate => "too_late",
             Self::Backwards => "backwards",
-            Self::Transition => "transition",
+            Self::QuotaCycle => "quota_cycle",
+            Self::LongIdle => "long_idle",
+            Self::Correction => "correction",
         }
     }
 }
@@ -454,6 +464,27 @@ mod tests {
     }
 
     #[test]
+    fn the_effective_factor_follows_the_frozen_formula() {
+        // A prediction of two points that observed one makes the raw factor
+        // differ from one, so the formula is actually exercised.
+        let mut state = PersonalCalibrationState::default();
+        state.apply_outcome(1.0, 2.0, 1.0, 0);
+        let raw = state.raw_factor();
+        let trust = state.trust();
+        assert!(raw < 1.0, "the raw factor must differ from one");
+        assert!(trust > 0.0);
+        let expected = 1.0 + trust * (raw - 1.0);
+        assert!(
+            (state.effective_factor() - expected).abs() < 1e-12,
+            "{} vs {expected}",
+            state.effective_factor()
+        );
+        // The attenuation moves the factor towards one, never past it.
+        assert!(state.effective_factor() > raw);
+        assert!(state.effective_factor() < 1.0);
+    }
+
+    #[test]
     fn an_old_contribution_decays_exponentially() {
         for steps in [100, 200, 300] {
             let mut state = PersonalCalibrationState::default();
@@ -657,6 +688,8 @@ mod tests {
         assert_eq!(RejectionReason::Saturation.code(), "saturation");
         assert_eq!(RejectionReason::TooLate.code(), "too_late");
         assert_eq!(RejectionReason::Backwards.code(), "backwards");
-        assert_eq!(RejectionReason::Transition.code(), "transition");
+        assert_eq!(RejectionReason::QuotaCycle.code(), "quota_cycle");
+        assert_eq!(RejectionReason::LongIdle.code(), "long_idle");
+        assert_eq!(RejectionReason::Correction.code(), "correction");
     }
 }

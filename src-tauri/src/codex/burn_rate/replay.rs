@@ -100,11 +100,11 @@ impl Candidate {
         // Migration happens before the incoming observation advances the baseline.
         self.normalize();
         let before = self.quota.clone();
-        accept_quota(&mut self.quota, snapshot, at, max_gap);
+        let acceptance = accept_quota(&mut self.quota, snapshot, at, max_gap);
         let mut metadata = self.metadata();
         metadata.apply_transition(&before, &self.quota, at);
         self.adopt_metadata(metadata);
-        self.quota.last_observed_at != before.last_observed_at
+        acceptance.accepted
     }
 
     fn publish(&mut self, horizon: i64, span: u32, p: Parameters, accepted: bool) -> Option<f64> {

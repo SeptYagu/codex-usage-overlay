@@ -360,7 +360,8 @@ impl FiveHourShadowState {
         self.weighted.normalize(quota);
         self.personal.normalize();
         if let Some(pending) = &mut self.pending {
-            if !pending.origin_fixed_rate_per_hour.is_finite()
+            if pending.algorithm_version != SHADOW_ALGORITHM_VERSION
+                || !pending.origin_fixed_rate_per_hour.is_finite()
                 || pending.origin_fixed_rate_per_hour <= 0.0
                 || !pending.origin_used_percent.is_finite()
                 || !pending.last_valid_used_percent.is_finite()

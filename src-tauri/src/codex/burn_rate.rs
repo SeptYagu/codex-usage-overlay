@@ -173,6 +173,54 @@ struct LearnerSnapshot {
     informative_updates: u64,
 }
 
+/// What one accepted quota sample did to the history.
+///
+/// The classification is the transition signal the shadow path needs: it
+/// tells a real quota cycle, an overnight resume and a confirmed correction
+/// apart, and it records whether the production baseline advanced, which is
+/// the definition of an accepted observation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QuotaAcceptance {
+    /// The persisted state changed.
+    changed: bool,
+    /// The production baseline advanced.
+    accepted: bool,
+    /// The transition that ended the previous segment, if any.
+    transition: Option<SegmentTransition>,
+}
+
+/// The reason a new quota segment started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SegmentTransition {
+    /// The quota cycle completed.
+    QuotaCycle,
+    /// The observation gap exceeded the production maximum.
+    LongIdle,
+    /// A decrease was confirmed by a later observation.
+    Correction,
+}
+
+impl SegmentTransition {
+    /// The stable evidence-log code of the transition.
+    fn code(&self) -> &'static str {
+        match self {
+            Self::QuotaCycle => "quota_cycle",
+            Self::LongIdle => "long_idle",
+            Self::Correction => "correction",
+        }
+    }
+
+    /// The stable rejection reason of a pending interval the transition
+    /// invalidated.
+    fn rejection_reason(&self) -> RejectionReason {
+        match self {
+            Self::QuotaCycle => RejectionReason::QuotaCycle,
+            Self::LongIdle => RejectionReason::LongIdle,
+            Self::Correction => RejectionReason::Correction,
+        }
+    }
+}
+
 /// The result of one shadow pass.
 struct ShadowPass {
     state_changed: bool,
@@ -290,17 +338,23 @@ impl BurnRateTracker {
         // The shadow path needs the pre-accept state, so the transition it
         // observes is the one the production tracker just made.
         let before = self.state.five_hour.clone();
-        changed |= accept_quota(
+        let acceptance = accept_quota(
             &mut self.state.five_hour,
             &usage.five_hour,
             usage.fetched_at,
             FIVE_HOUR_MAX_GAP_SECS,
         );
+        changed |= acceptance.changed;
         let five_hour_per_hour = valid_used_percent(&usage.five_hour)
             .and_then(|_| estimate_rate(&self.state.five_hour, FIVE_HOUR_HORIZON_SECS, 2));
 
-        let shadow =
-            self.process_five_hour_shadow(usage, &before, five_hour_per_hour, account_transition);
+        let shadow = self.process_five_hour_shadow(
+            usage,
+            &before,
+            acceptance,
+            five_hour_per_hour,
+            account_transition,
+        );
         changed |= shadow.state_changed;
         self.shadow_estimate = shadow.estimate;
 
@@ -309,7 +363,8 @@ impl BurnRateTracker {
             &usage.weekly,
             usage.fetched_at,
             WEEKLY_MAX_GAP_SECS,
-        );
+        )
+        .changed;
 
         if changed {
             self.state_dirty = true;
@@ -361,17 +416,16 @@ impl BurnRateTracker {
         &mut self,
         usage: &RawCodexUsage,
         before: &QuotaRateState,
+        acceptance: QuotaAcceptance,
         published_rate: Option<f64>,
         account_transition: AccountTransition,
     ) -> ShadowPass {
         let observed_at = usage.fetched_at;
         let mut changed = false;
         let after = self.state.five_hour.clone();
-        // The observation was accepted when the production baseline advanced.
-        let accepted = after.last_observed_at != before.last_observed_at;
-        let segment_transition = after.segment_id != before.segment_id;
         let used = valid_used_percent(&usage.five_hour);
         let resets_at = usage.five_hour.resets_at.filter(|value| *value > 0);
+        let transition = acceptance.transition;
 
         // The Fixed Weighted metadata follows the production crossing history.
         if self
@@ -389,13 +443,13 @@ impl BurnRateTracker {
         let mut outcome: Option<PersonalOutcome> = None;
 
         if !audit_busy {
-            if segment_transition {
+            if let Some(transition) = transition {
                 // A confirmed transition invalidates the pending interval
                 // before it can train.
                 if let Some(pending) = self.state.five_hour_shadow.pending.take() {
                     outcome = Some(PersonalOutcome::Rejected {
                         pending,
-                        reason: RejectionReason::Transition,
+                        reason: transition.rejection_reason(),
                     });
                     changed = true;
                 }
@@ -449,7 +503,7 @@ impl BurnRateTracker {
             FIVE_HOUR_HARD_EVIDENCE_HORIZON_SECS,
             FIVE_HOUR_MIN_LEVEL_SPAN,
             WeightedParameters::FIVE_HOUR,
-            accepted,
+            acceptance.accepted,
         );
         if metadata_before
             != (
@@ -479,41 +533,52 @@ impl BurnRateTracker {
         let personalized = fixed_rate.map(|rate| rate * effective_factor);
 
         // The evidence event is formed only now, so it carries the state that
-        // the outcome produced.
-        let event = match outcome {
-            Some(PersonalOutcome::Matured {
-                pending,
-                matured,
-                before: learner_before,
-            }) => Some(matured_event(
-                &pending,
-                &matured,
-                &learner_before,
-                &self.state.five_hour_shadow.personal,
-                observed_at,
-                personalized,
-            )),
-            Some(PersonalOutcome::Rejected { pending, reason }) => Some(rejected_event(
-                &pending,
-                reason,
-                observed_at,
-                used,
-                Some(observed_at.saturating_sub(pending.last_valid_at)),
-            )),
-            None => lifecycle_event_for(account_transition, segment_transition, observed_at),
-        };
-        if let Some(mut event) = event {
-            self.state.five_hour_shadow.event_sequence =
-                self.state.five_hour_shadow.event_sequence.saturating_add(1);
-            event.account_generation = self.state.five_hour_shadow.account_generation;
-            event.event_sequence = self.state.five_hour_shadow.event_sequence;
-            self.state.five_hour_shadow.audit_outbox = Some(event);
-            changed = true;
+        // the outcome produced. A retained event is never overwritten: the
+        // audit slot holds one event, and a second one would destroy a record
+        // whose learner update already survived.
+        if self.state.five_hour_shadow.audit_outbox.is_none() {
+            let event = match outcome {
+                Some(PersonalOutcome::Matured {
+                    pending,
+                    matured,
+                    before: learner_before,
+                }) => Some(matured_event(
+                    &pending,
+                    &matured,
+                    &learner_before,
+                    &self.state.five_hour_shadow.personal,
+                    observed_at,
+                    personalized,
+                )),
+                Some(PersonalOutcome::Rejected { pending, reason }) => Some(rejected_event(
+                    &pending,
+                    reason,
+                    observed_at,
+                    used,
+                    // A backwards observation has no gap at all.
+                    (observed_at >= pending.last_valid_at)
+                        .then(|| observed_at - pending.last_valid_at),
+                )),
+                None => lifecycle_event_for(account_transition, transition, observed_at),
+            };
+            if let Some(mut event) = event {
+                self.state.five_hour_shadow.event_sequence =
+                    self.state.five_hour_shadow.event_sequence.saturating_add(1);
+                event.account_generation = self.state.five_hour_shadow.account_generation;
+                event.event_sequence = self.state.five_hour_shadow.event_sequence;
+                self.state.five_hour_shadow.audit_outbox = Some(event);
+                changed = true;
+            }
         }
 
         // A finished interval is replaced by a fresh origin at the same
-        // observation.
-        if !audit_busy && self.state.five_hour_shadow.pending.is_none() {
+        // observation. The production must have accepted the observation, so
+        // the origin is never built from a sample the burn-rate history
+        // refused.
+        if !audit_busy
+            && acceptance.accepted
+            && self.state.five_hour_shadow.pending.is_none()
+        {
             if let Some(pending) = build_pending(
                 observed_at,
                 used,
@@ -547,16 +612,13 @@ impl BurnRateTracker {
 /// The lifecycle evidence of an observation without a personal outcome.
 fn lifecycle_event_for(
     account_transition: AccountTransition,
-    segment_transition: bool,
+    transition: Option<SegmentTransition>,
     at: i64,
 ) -> Option<ShadowEvidenceEvent> {
     if account_transition == AccountTransition::Switched {
         return Some(lifecycle_event("account_switch", at));
     }
-    if segment_transition {
-        return Some(lifecycle_event("quota_reset", at));
-    }
-    None
+    transition.map(|transition| lifecycle_event(transition.code(), at))
 }
 
 /// Builds the origin snapshot of a new five-minute learning interval.
@@ -612,9 +674,30 @@ fn accept_quota(
     snapshot: &QuotaSnapshot,
     observed_at: i64,
     max_gap_secs: i64,
-) -> bool {
+) -> QuotaAcceptance {
+    let before_observed_at = state.last_observed_at;
+    let (changed, transition) =
+        accept_quota_sample(state, snapshot, observed_at, max_gap_secs);
+    QuotaAcceptance {
+        changed,
+        // The observation was accepted when the production baseline advanced.
+        accepted: state.last_observed_at != before_observed_at,
+        transition,
+    }
+}
+
+/// Applies one quota sample and classifies the transition it caused.
+///
+/// The state semantics are unchanged; only the transition cause is reported
+/// alongside the changed flag.
+fn accept_quota_sample(
+    state: &mut QuotaRateState,
+    snapshot: &QuotaSnapshot,
+    observed_at: i64,
+    max_gap_secs: i64,
+) -> (bool, Option<SegmentTransition>) {
     let Some(current) = valid_used_percent(snapshot) else {
-        return false;
+        return (false, None);
     };
 
     let (boundary_changed, actual_cycle_transition) =
@@ -623,36 +706,37 @@ fn accept_quota(
     if actual_cycle_transition {
         start_new_segment(state);
         set_baseline(state, current, observed_at);
-        return true;
+        return (true, Some(SegmentTransition::QuotaCycle));
     }
 
     let Some(previous_at) = state.last_observed_at else {
         set_baseline(state, current, observed_at);
-        return true;
+        return (true, None);
     };
     let previous = state.last_observed_percent.unwrap_or(current);
 
     if observed_at < previous_at {
-        return changed;
+        return (changed, None);
     }
     if observed_at.saturating_sub(previous_at) > max_gap_secs {
         start_new_segment(state);
         set_baseline(state, current, observed_at);
-        return true;
+        return (true, Some(SegmentTransition::LongIdle));
     }
 
     if current + EPSILON < previous {
         if state.correction_candidate.is_some() {
             start_new_segment(state);
             set_baseline(state, current, observed_at);
+            return (true, Some(SegmentTransition::Correction));
         } else {
             state.correction_candidate = Some(CorrectionCandidate {
                 used_percent: current,
                 observed_at,
                 resets_at: snapshot.resets_at,
             });
+            return (true, None);
         }
-        return true;
     }
 
     if state.correction_candidate.take().is_some() {
@@ -661,9 +745,9 @@ fn accept_quota(
 
     if observed_at == previous_at {
         if (current - previous).abs() <= EPSILON {
-            return changed;
+            return (changed, None);
         }
-        return changed;
+        return (changed, None);
     }
 
     if current > previous + EPSILON {
@@ -687,7 +771,7 @@ fn accept_quota(
 
     state.last_observed_percent = Some(current);
     state.last_observed_at = Some(observed_at);
-    true
+    (true, None)
 }
 
 fn accept_reset_boundary(
