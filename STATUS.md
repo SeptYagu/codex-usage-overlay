@@ -10,6 +10,7 @@
 - The published rates stay pinned: a golden vector captured from the base commit matches in all 14 samples, and the full persist-and-flush cycle produces the same values.
 - **Published.** `v1.3.2` is tagged at `3600d82` and published as the latest GitHub release: the signed NSIS installer, the signed MSI, the signed portable archive, their `.sig` files, the `latest.json` updater manifest and `SHA256SUMS.txt`. The release workflow ran green on windows-latest (14m57s), including the packaging regression, the frontend and Rust suites, and the signed Tauri build. `1.3.1` stays the rollback baseline.
 - The plan's packaged and native smoke validation (installing the signed package and observing the learner across a real restart) was **not performed**; the release notes keep that limitation visible.
+- A release near-miss is now closed: the first `v1.3.2` tag was cancelled because `src/version.ts` still carried `1.3.1`, which would have shipped an installer whose settings badge and tray menu showed the old version. `src/version.test.ts` now fails when the six version locations drift apart, and `RELEASING.md` lists all of them.
 
 ## 5H shadow personalization implementation — 2026-10-20
 
