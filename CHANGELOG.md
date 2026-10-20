@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] - 2026-10-20
+
+### Fixed
+- The shadow audit slot is now persisted in its cleared state. An event that reached the local evidence log is no longer left behind in `burn-rate-state.json`, so a restart can no longer append the same evidence a second time and push real history out of the bounded log.
+- A pending five-minute interval is no longer blind while the audit slot is occupied. A quota cycle, an overnight resume, a confirmed correction, a decrease or a saturation in that window latches the rejection on the interval, and the rejection is reported as soon as the slot is free — with the observation that caused it, not with the tick that finally reported it. An interval can no longer survive a quota cycle and train the learner across it.
+- A restored pending interval is validated against the production quota state before it is resumed: the percentage range, the reset timestamp, the published and personalized rates, the learner snapshot, the segment identity and the observation timestamps.
+- The smart pause handshake no longer repeats the same read-only call for every caller identity of a pipe that already answered without an active session.
+- The active periods are released when the auto-pause switch is off or the quota is back above the threshold, so a session that returns in that window is paused again instead of being swallowed by the de-duplication ledger of its previous period.
+- The bridge connection status is no longer stuck at `Unknown` while the quota is comfortable. A read-only handshake probe answers it, and the probe never sends a message to a session.
+
+### Changed
+- While the audit slot is occupied, the pending interval keeps advancing (`lastValidAt`) instead of being frozen, but it is still not settled and the learner does not move. A busy audit slot no longer costs a learning interval that the quota really produced.
+
+### Verification
+- Frontend: 97 tests passed; TypeScript/Vite production build passed.
+- Rust: 293 regular tests passed, 0 failed, 4 pre-existing ignored replay tests unchanged; locked Cargo check with `--all-targets` passed with no warnings.
+- Mutation gates: 10 of 10 single-mutation probes (the plan's M1–M6) turned a named test red. The first run exposed one probe that no test covered, and the missing regression test was added.
+- Estimator parity: the 13 committed replay evidence files stay byte-identical.
+- The version is `1.3.3` in all six release locations.
+
+### Scope
+- The shadow stack stays a shadow: **no user-visible behavior changed.** The personalized rate is still internal evidence and is never published.
+- The packaged and native smoke validation could **not** be performed on this machine. The restart without a duplicate append, the paused-again session after the switch was toggled and the real bridge status are covered by the automated tests only.
+
 ## [1.3.2] - 2026-10-20
 
 ### Added

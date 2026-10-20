@@ -1,5 +1,19 @@
 # Status
 
+## v1.3.3 shadow & smart pause remediation — 2026-10-20
+
+- The 6 post-release review findings of the `v1.3.2` and `v1.3.1` lines are fixed: 2×High, 2×Medium, 2×Low. The plan and the implementation record are in `docs/handoff/`.
+- The two serious ones: the flushed audit slot was never persisted in its cleared state, so a restart appended the same evidence to the log again and could push real history out of the bounded 10,000-event log; and a pending five-minute interval was blind to the invalidating signals while the audit slot was occupied, so it could survive a quota cycle and train the learner across it.
+- The busy-window blindness is gone: a quota cycle, an overnight resume, a confirmed correction, a decrease or a saturation in that window latches the rejection on the interval, the decision can no longer be washed away, and the rejection is reported with the observation that caused it. A restored interval is additionally validated against the production quota state — percentage range, reset timestamp, rates, learner snapshot, segment identity and observation timestamps.
+- The smart pause fixes: a pipe that answered without an active session is not probed again for every caller identity; the active periods are released when the switch is off or the quota is comfortable, so a session that returns in that window is paused again; and a read-only handshake probe answers the bridge connection status instead of leaving it at `Unknown` while the quota is comfortable.
+- One deliberate behavior change: a pending interval keeps advancing (`lastValidAt`) while the audit slot is occupied, but it is still not settled and the learner does not move. A busy audit slot no longer costs a learning interval that the quota really produced. The one existing test that pinned the old "frozen interval" contract was updated accordingly.
+- Seven points of the plan did not match the running code (the evidence-line counter lives on the tracker, the startup path never saved, the reason enum is named differently, the stable evidence codes, the time-consistency condition, the connection enum and the replay gate command). Each one is implemented in the repository's own terms and documented with its reason in §3 of the implementation handoff.
+- Rust **293** regular tests passed (0 failed, 4 pre-existing ignored replay tests unchanged), frontend **97** passed, the production build passed, the locked Cargo check with `--all-targets` is clean with zero warnings, and the 13 committed replay evidence files stay byte-identical.
+- A 10-probe mutation audit confirms the coverage: every probe mutates one fix of the plan and the named test turns red. **The first run exposed one probe that no test covered** — the second write of the cleared slot in the refresh path — and the missing regression test was added before the audit was repeated. No probe now relies on a compile failure.
+- The version is `1.3.3` in all six release locations. **Not published yet**: the tag, the signed packages and the GitHub release are still outstanding.
+- The packaged and native smoke validation could **not** be performed on this machine. The restart without a duplicate append, the paused-again session after the switch was toggled and the real bridge status are covered by the automated tests only.
+- [Implementation handoff](docs/handoff/2026-10-20-v1.3.3-shadow-and-smart-pause-remediation-implementation.md) records the per-finding contracts, the seven deviations, the behavior change, the mutation table, the gate results and the residual risks.
+
 ## 5H shadow personalization review pass — 2026-10-20
 
 - The shadow implementation was reviewed by an independent read-only reviewer, which first reproduced the published behavior of the base commit `6137faa` side by side: the published `five_hour_per_hour`, `weekly_per_hour` and `state_changed` sequences were byte-identical, and all 13 committed evidence files were independently reproduced. The review returned **FAIL**.
@@ -79,15 +93,16 @@
 - Interactive Windows gestures and signed-package smoke tests were not performed. The historical v1.2.0 review and manual verification gaps below remain unchanged.
 
 
-_Last updated: 2026-10-20 (v1.3.2 published: the invisible 5H shadow personalization stack is in, it passed an independent review round whose findings are all fixed, and `v1.3.2` is tagged and released as the latest release. Nothing user-visible changed. Four gates fully green: npm test 95/95, npm run build, cargo test 284/284, cargo check 0 warnings, plus the 13 byte-identical replay evidence files and a 318-row forecast with a maximum prediction deviation of 0. The packaged and native smoke validation of the plan is not verified.)_
+_Last updated: 2026-10-20 (v1.3.3 remediation implemented, not published: the 6 post-release review findings of the v1.3.2 and v1.3.1 lines — 2×High, 2×Medium, 2×Low — are fixed, each with a regression test that turns red under the corresponding mutation, and 10/10 mutation probes are detected. The gates are green: npm test 97/97, npm run build, cargo test 293/293, cargo check 0 warnings, plus the 13 byte-identical replay evidence files. The packaged and native smoke validation is not verified, and the tag, the signed packages and the GitHub release are still outstanding.)_
 
 ## Current state
 
 | Item | Value |
 | --- | --- |
-| Version | `1.3.2` (package metadata, lockfiles, Tauri config, and `src/version.ts` unified); `1.3.1` stays the upgrade and rollback baseline |
+| Version | `1.3.3` (package metadata, lockfiles, Tauri config, and `src/version.ts` unified; the tag and the signed packages are not published yet); `1.3.2` stays the upgrade and rollback baseline |
 | Reviewed commit | `1a5314d` (`fix(review): resolve round 2 findings (P3-1 call-site adapters, P3-2 compaction sentinels)`) — v1.2.0 line, the last line with an independent review |
 | Baseline of that review | `6eeed35` (range `6eeed35..1a5314d`, 25 files / +2606 −390) |
+| v1.3.3 line | **Remediation implemented, not published** — the 6 post-release review findings of the `v1.3.2` and `v1.3.1` lines (2×High, 2×Medium, 2×Low) are fixed, each with a regression test that turns red under the corresponding mutation; 10/10 mutation probes are detected. Seven plan points did not match the running code and are documented with their reasons. The tag, the signed packages and the GitHub release are still outstanding (see the remediation section above) |
 | v1.3.2 line | **5H shadow personalization: reviewed and fixed** — an independent read-only review reproduced the published behavior of the base commit side by side and returned FAIL with 1 critical, 1 major, 7 minor and 2 nit findings; every finding is fixed and covered by a test that turns red under the corresponding mutation (see the review-pass section above). Shadow only: no user-visible behavior changed |
 | v1.3.1 line | **Smart pause: reviewed and fixed** — an independent read-only review and a mutation-based self review both ran over the smart pause implementation; every finding is fixed and covered by a test that turns red under the corresponding mutation (see the review-pass section above). The display-controls line still has **no** independent review round |
 | Historical manual verification gate | **Unfinished** — stage 0 Windows checks (see `docs/stage0-verification.md`); v1.2.1 uses the automated release policy above |
@@ -96,12 +111,14 @@ _Last updated: 2026-10-20 (v1.3.2 published: the invisible 5H shadow personaliza
 | Design review gate (v1.2.0) | **Superseded by implementation** — the design round-3 residuals (P3-1 landing seam, P3-2 §7.2.6 observation points, P3-3 unique attribution rule) were addressed in `998a558` and doc sync R-5 completed. See `docs/handoff/2026-09-29-workbuddy-code-review-round3-handoff.md` |
 | Compliance audit | **Compliant** — the v1.1.2 and v1.1.3 plans and the v1.1.1 behavior review were audited line-by-line against the code: every in-scope deliverable is implemented, with no omissions, reversals, or v1.1.2 regressions (`docs/handoff/2026-09-29-cross-plan-compliance-audit.md`) |
 
-## Gates (reproduced locally on 2026-10-19 with the v1.3.1 line, after the review pass)
+## Gates (reproduced locally on 2026-10-20 with the v1.3.3 line)
 
-- `npm test` → 95/95 pass
+- `npm test` → 97/97 pass
 - `npm run build` (tsc + vite) → pass
-- `cargo test --manifest-path src-tauri/Cargo.toml --locked` → 201/201 pass (4 pre-existing ignored replay tests)
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked` → 293/293 pass (4 pre-existing ignored replay tests)
 - `cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets` → pass (0 warnings)
+- `node scripts/check-replay-evidence.mjs` → 13/13 evidence files byte-identical
+- mutation probes M1–M6 → 10/10 detected
 
 Green gates do **not** constitute review approval, and none of them exercise a real GUI.
 
