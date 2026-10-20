@@ -8,6 +8,8 @@
 - The two nits are fixed too: a pending interval that carries another algorithm version is now discarded by the shadow normalization, and the handoff is listed in `docs/handoff/INDEX.md`.
 - A 16-probe mutation audit confirms the coverage: every probe mutates one frozen production rule and the named test turns red. One probe did not turn red at first — the code compares the decrease with the previous observation, but the old test could not tell that apart from a comparison with the origin. The test now uses a reading that is below the previous observation and still above the origin.
 - The published rates stay pinned: a golden vector captured from the base commit matches in all 14 samples, and the full persist-and-flush cycle produces the same values.
+- **Published.** `v1.3.2` is tagged at `3600d82` and published as the latest GitHub release: the signed NSIS installer, the signed MSI, the signed portable archive, their `.sig` files, the `latest.json` updater manifest and `SHA256SUMS.txt`. The release workflow ran green on windows-latest (14m57s), including the packaging regression, the frontend and Rust suites, and the signed Tauri build. `1.3.1` stays the rollback baseline.
+- The plan's packaged and native smoke validation (installing the signed package and observing the learner across a real restart) was **not performed**; the release notes keep that limitation visible.
 
 ## 5H shadow personalization implementation — 2026-10-20
 
@@ -76,15 +78,16 @@
 - Interactive Windows gestures and signed-package smoke tests were not performed. The historical v1.2.0 review and manual verification gaps below remain unchanged.
 
 
-_Last updated: 2026-10-19 (v1.3.1 published: the display controls and the smart pause implementation are in, the smart pause implementation passed an independent review round whose findings are all fixed, and `v1.3.1` is tagged and released. The v1.2.0 round-3 review remains the last independently reviewed *release* line: 0 defects. Four gates fully green: npm test 95/95, npm run build, cargo test 201/201, cargo check 0 warnings. The bridge handshake was verified read-only against the live Codex client; a real delivery and the signed package smoke test are not verified.)_
+_Last updated: 2026-10-20 (v1.3.2 published: the invisible 5H shadow personalization stack is in, it passed an independent review round whose findings are all fixed, and `v1.3.2` is tagged and released as the latest release. Nothing user-visible changed. Four gates fully green: npm test 95/95, npm run build, cargo test 284/284, cargo check 0 warnings, plus the 13 byte-identical replay evidence files and a 318-row forecast with a maximum prediction deviation of 0. The packaged and native smoke validation of the plan is not verified.)_
 
 ## Current state
 
 | Item | Value |
 | --- | --- |
-| Version | `1.3.1` (package metadata, lockfiles, Tauri config, and `src/version.ts` unified); `1.3.0` stays the upgrade and rollback baseline |
+| Version | `1.3.2` (package metadata, lockfiles, Tauri config, and `src/version.ts` unified); `1.3.1` stays the upgrade and rollback baseline |
 | Reviewed commit | `1a5314d` (`fix(review): resolve round 2 findings (P3-1 call-site adapters, P3-2 compaction sentinels)`) — v1.2.0 line, the last line with an independent review |
 | Baseline of that review | `6eeed35` (range `6eeed35..1a5314d`, 25 files / +2606 −390) |
+| v1.3.2 line | **5H shadow personalization: reviewed and fixed** — an independent read-only review reproduced the published behavior of the base commit side by side and returned FAIL with 1 critical, 1 major, 7 minor and 2 nit findings; every finding is fixed and covered by a test that turns red under the corresponding mutation (see the review-pass section above). Shadow only: no user-visible behavior changed |
 | v1.3.1 line | **Smart pause: reviewed and fixed** — an independent read-only review and a mutation-based self review both ran over the smart pause implementation; every finding is fixed and covered by a test that turns red under the corresponding mutation (see the review-pass section above). The display-controls line still has **no** independent review round |
 | Historical manual verification gate | **Unfinished** — stage 0 Windows checks (see `docs/stage0-verification.md`); v1.2.1 uses the automated release policy above |
 | Code review gate (v1.1.3) | **Passed** — v1.1.3 round 5 (Mode C) closed the line with **0 defects**. Round 4's P3-1 is closed: `AppState::for_test` (`src-tauri/src/commands.rs:53-81`) plus the cache-read wiring tests make the capture/read/priority decisions falsifiable, and three acceptance mutations were each verified to fail tests. Rust tests 61 → 65 |
@@ -113,7 +116,7 @@ The v1.3.1 **smart pause** line had a review round on 2026-10-19: 2×P1, 2×P2 a
 | --- | --- |
 | R-1 | The plans' own real-machine checks are unexecuted: settings-window drag-resize → close → reopen exact restore, tray label truncation, the settings version badge rendering (v1.1.3 plan §三-2), and the signed-package NSIS/MSI/portable upgrade, exit-install, elevation and failure-recovery smoke tests (v1.1.2 plan, "发布前验证"). |
 | R-2 | `apply_settings_geometry` / `center_settings_window` (`src-tauri/src/tray.rs:514`, `:546`) have no test or mutation probe — the geometry restore chain is automated only up to the pure planner (`select_work_area` / `place_within_work_area`) and the config read/write path. This is the `tray.rs` counterpart of the round-4/5 `lib.rs` wiring concern. |
-| R-3 | **Closed** — the settings-window version badge is now asserted in `src/components/SettingsView.test.tsx` (the header badge read `v1.3.0` and reads `v1.3.1` after the version unification). |
+| R-3 | **Closed** — the settings-window version badge is now asserted in `src/components/SettingsView.test.tsx` (the header badge read `v1.3.0` and follows the unified version, `v1.3.2` now). |
 | R-4 | `README.md` / `README.en.md` do not describe the v1.1.3 user-visible behaviour (free settings-window resize, cross-process geometry memory). The v1.1.3 plan did not list README changes, so this is a coverage suggestion rather than a contract gap. |
 | R-5 (v1.2.0) | **Closed** (round 2). The design proposal §3.2 case B and the §3.3.1 pseudocode comment now state the same totality contract as the shipped `select_monitor_by_overlap` (`src-tauri/src/dock.rs:561-599`): strictly largest intersection area wins, the host screen (`fallback_index`) breaks a tie that includes it, a non-host tie is broken by the smallest `(x, y)`, and zero overlap falls back to the host. §3.1's user-visible rule (>50 % ⇒ the target screen) holds either way. |
 | R-6 (v1.2.0) | If Windows foreground lock keeps `set_focus()` failing *and* a transient `Focused(false)` arrived inside the grace window, the popup still hides at expiry (`pending_blur && !is_focused`, which is the specified contract). This is the extreme-focus variant of the symptom module 2 fixes; it can only be settled on a real machine with passthrough enabled. |

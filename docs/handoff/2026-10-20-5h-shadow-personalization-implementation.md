@@ -3,6 +3,8 @@
 - Date: 2026-10-20
 - Plan: [2026-10-03-5h-persistent-shadow-personalization-implementation-plan.md](2026-10-03-5h-persistent-shadow-personalization-implementation-plan.md)
 - Base commit: `6137faa` (v1.3.1 release record)
+- Implementation commit: `6c309ab`; review fixes: `90a10b6`; release: `b207174`, `3600d82`
+- Released as: `v1.3.2` (tagged at `3600d82`, published as the latest GitHub release)
 - Scope: shadow only. No user-visible behavior changed.
 
 ## 1. What was built
@@ -316,10 +318,27 @@ implementation-level deviations are recorded:
   installer and observe the learner across a real restart. The restart,
   pending resume/reject, account switch, quota reset, log retry and the
   30/60/120/300-second cadence behavior are covered by the automated tests
-  only. A packaged run remains open.
+  only. A packaged run remains open, and the limitation is stated in the
+  `v1.3.2` release notes.
 - The live overlay, the tray and the notification behavior were not observed
   interactively; the automated gate is that the visible `CodexUsage` values
   and the frontend DTO are unchanged and that the frontend suite is untouched.
+
+## 9.1 Release record
+
+`v1.3.2` is tagged at `3600d82` and published as the latest GitHub release: the
+signed NSIS installer, the signed MSI, the signed portable archive, their
+`.sig` files, the `latest.json` updater manifest and `SHA256SUMS.txt`. The
+release workflow ran green on windows-latest in 14m57s, including the packaging
+regression, the frontend and Rust suites and the signed Tauri build. The `main`
+CI run of the same commit was green in 2m57s.
+
+One detail is worth recording: the first `v1.3.2` attempt was cancelled because
+`src/version.ts` still carried `1.3.1`, so the settings-window version badge
+and the tray menu would have shown the old version. The file was unified with
+the other four version locations, the tag was moved to the fix commit
+`3600d82` and the release workflow was re-run. The published artifacts come
+from `3600d82`.
 
 ## 10. How to reproduce the gates
 
