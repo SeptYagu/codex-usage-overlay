@@ -359,17 +359,17 @@ impl FiveHourShadowState {
         let before = self.clone();
         self.weighted.normalize(quota);
         self.personal.normalize();
-        if let Some(pending) = &mut self.pending {
-            if pending.algorithm_version != SHADOW_ALGORITHM_VERSION
-                || !pending.origin_fixed_rate_per_hour.is_finite()
-                || pending.origin_fixed_rate_per_hour <= 0.0
-                || !pending.origin_used_percent.is_finite()
-                || !pending.last_valid_used_percent.is_finite()
-                || pending.origin_at <= 0
-                || pending.last_valid_at < pending.origin_at
-            {
-                self.pending = None;
-            }
+        // A restored interval is only kept when every field it carries still
+        // describes a real observation of the current segment. An interval
+        // that was invalidated during a busy audit outbox survives this
+        // check on purpose: its rejection still has to be reported, so it is
+        // dropped when the rejection is settled.
+        let pending_is_resumable = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.is_valid_for(quota));
+        if !pending_is_resumable {
+            self.pending = None;
         }
         before != *self
     }

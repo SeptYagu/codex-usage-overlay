@@ -193,6 +193,15 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
                 if let Err(error) = tracker.flush_audit_outbox(&state.config_manager) {
                     eprintln!("Could not append shadow evidence: {error}");
                 }
+                // The flushed slot is cleared in memory, and the cleared state
+                // is persisted. Without it the persisted copy would still hold
+                // the consumed event, and the next start would append it to
+                // the evidence log a second time.
+                if tracker.is_dirty() {
+                    if let Err(error) = tracker.save(&state.config_manager) {
+                        eprintln!("Could not persist burn-rate state: {error}");
+                    }
+                }
                 estimate
             };
             let usage = raw.to_ui(estimate.five_hour_per_hour, estimate.weekly_per_hour);
@@ -470,6 +479,8 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         envelope,
         auto_check_just_enabled,
         auto_install_just_enabled,
+        auto_pause_just_enabled,
+        auto_pause_just_disabled,
         auto_edge_hide_changed,
         previous_auto_edge_hide,
         mouse_passthrough_changed,
@@ -486,12 +497,18 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         state.config_manager.save_settings_checked(&next)?;
         let auto_check_just_enabled = !settings.auto_check_updates && next.auto_check_updates;
         let auto_install_just_enabled = !settings.auto_install_updates && next.auto_install_updates;
+        let auto_pause_just_enabled =
+            !settings.auto_pause_on_low_quota && next.auto_pause_on_low_quota;
+        let auto_pause_just_disabled =
+            settings.auto_pause_on_low_quota && !next.auto_pause_on_low_quota;
         *settings = next.clone();
         let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
         (
             SettingsEnvelope { revision, settings: next.clone() },
             auto_check_just_enabled,
             auto_install_just_enabled,
+            auto_pause_just_enabled,
+            auto_pause_just_disabled,
             was_auto_edge_hide != next.auto_edge_hide,
             was_auto_edge_hide,
             was_mouse_passthrough != next.mouse_passthrough,
@@ -499,6 +516,20 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
             overlay_geometry_changed(&previous_settings, &next),
         )
     };
+
+    // The active period bookkeeping follows the switch. A session that comes
+    // back while the switch is off must not reuse the period identity of its
+    // previous low-quota period, or the de-duplication ledger would swallow
+    // the next pause request.
+    if auto_pause_just_disabled {
+        crate::pause_control::clear_active_periods(state);
+    }
+    // The bridge status stays unknown until the first handshake. A read-only
+    // probe answers it right after the switch is turned on, so the status is
+    // not a placeholder while the quota is still comfortable.
+    if auto_pause_just_enabled {
+        crate::pause_control::probe_bridge_status(state);
+    }
 
     if let Some(app) = sink.app_handle() {
         if auto_edge_hide_changed {
@@ -1166,6 +1197,7 @@ mod auto_pause_tests {
     const FETCHED_AT: i64 = 1_700_000_000;
     const CALLER_THREAD: &str = "123e4567-e89b-12d3-a456-426614174000";
     const PIPE: &str = "codex-app-tools-123e4567-e89b-12d3-a456-426614174000";
+    const SECOND_PIPE: &str = "codex-app-tools-223e4567-e89b-12d3-a456-426614174000";
 
     /// A tray sink that records nothing and needs no event loop.
     struct OfflineSink {
@@ -1278,6 +1310,11 @@ mod auto_pause_tests {
                     crate::pause_control::run_delivery_worker(state).await;
                 });
             }));
+            controller.set_probe_spawner(Arc::new(|state| {
+                tokio::spawn(async move {
+                    crate::pause_control::probe_bridge(&state).await;
+                });
+            }));
         }
         (state, transport, dir)
     }
@@ -1317,6 +1354,16 @@ mod auto_pause_tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// A sample whose 5-hour window is far above the threshold.
+    ///
+    /// The weekly window stays far above its threshold as well, so the sample
+    /// never schedules a delivery.
+    fn comfortable_quota_usage(account_id: Option<&str>) -> RawCodexUsage {
+        let mut usage = quota_usage_at(account_id, FETCHED_AT, FETCHED_AT + 3_600);
+        usage.five_hour.used_percent = Some(20.0);
+        usage
     }
 
     /// The scheduled pause request the plan fixes for a 5-hour trigger.
@@ -1985,6 +2032,184 @@ mod auto_pause_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A pipe that answered without an active session is not probed again
+    /// for the remaining caller identities.
+    ///
+    /// The candidate list crosses every pipe with every caller identity, so
+    /// the same pipe is offered up to 32 times. The pipe answered and
+    /// reported no active session, so the remaining identities would repeat
+    /// the same read-only call.
+    #[tokio::test]
+    async fn no_active_session_short_circuits_remaining_caller_threads_for_same_pipe() {
+        let (state, transport, dir) = armed_state("short-circuit").await;
+        // The bridge answers, but no session is active.
+        transport.set_list_threads(crate::pause_control::ToolCallOutcome {
+            success: true,
+            text: Some(serde_json::json!({ "pinnedThreads": [], "threads": [] }).to_string()),
+        });
+        // Two pipes are offered three caller identities each.
+        {
+            let mut controller = state.auto_pause.lock().unwrap();
+            controller.set_discovery(BridgeDiscovery {
+                explicit_pipe_path: None,
+                pipe_names: vec![PIPE.to_string(), SECOND_PIPE.to_string()],
+                caller_thread_ids: vec![
+                    CALLER_THREAD.to_string(),
+                    "223e4567-e89b-12d3-a456-426614174000".to_string(),
+                    "323e4567-e89b-12d3-a456-426614174000".to_string(),
+                ],
+            });
+        }
+
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-short")));
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        wait_for_handshakes(&transport, 1).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let handshakes = transport
+            .calls()
+            .iter()
+            .filter(|call| call.tool_name == "list_threads")
+            .count();
+        assert_eq!(
+            handshakes, 2,
+            "an exhausted pipe is probed once, not once per caller identity"
+        );
+        // The bridge answered, so the connection is available, and an idle
+        // bridge never receives a pause request.
+        let status = state.auto_pause.lock().unwrap().status(true);
+        assert_eq!(status.connection, BridgeConnection::Available);
+        assert!(transport.sent_prompts().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session that comes back while the feature was off starts a new
+    /// active period, so it is paused again.
+    ///
+    /// The quota cycle never changed, so only a fresh period identity can
+    /// lift the de-duplication of the earlier pause request.
+    #[tokio::test]
+    async fn toggling_auto_pause_off_and_on_resets_active_periods_so_restarted_turn_is_paused() {
+        let (state, transport, dir) = armed_state("period-reset").await;
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the first refresh must succeed");
+        wait_for_prompts(&transport, 1).await;
+        assert_eq!(transport.sent_prompts().len(), 1);
+
+        // The switch is turned off and the session leaves the active list.
+        {
+            let mut settings = state.settings.lock().await;
+            settings.auto_pause_on_low_quota = false;
+        }
+        transport.set_list_threads(crate::pause_control::ToolCallOutcome {
+            success: true,
+            text: Some(serde_json::json!({ "pinnedThreads": [], "threads": [] }).to_string()),
+        });
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the second refresh must succeed");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(transport.sent_prompts().len(), 1);
+
+        // The session is active again and the switch is on. The quota never
+        // left its cycle, so only a fresh active period can be paused again.
+        transport.set_list_threads(crate::pause_control::ToolCallOutcome {
+            success: true,
+            text: Some(
+                serde_json::json!({
+                    "pinnedThreads": [],
+                    "threads": [{
+                        "id": "session-1",
+                        "kind": "codex",
+                        "status": "active",
+                        "hostId": "host-1",
+                    }],
+                })
+                .to_string(),
+            ),
+        });
+        {
+            let mut settings = state.settings.lock().await;
+            settings.auto_pause_on_low_quota = true;
+        }
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the third refresh must succeed");
+        wait_for_prompts(&transport, 2).await;
+
+        assert_eq!(
+            transport.sent_prompts().len(),
+            2,
+            "a session that returns after the switch was off is paused again"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bridge status is answered by a read-only probe while the quota is
+    /// comfortable.
+    ///
+    /// Without the probe the status stays unknown, because the handshake only
+    /// happens when a delivery is scheduled.
+    #[tokio::test]
+    async fn enabling_auto_pause_above_threshold_probes_bridge_status_when_unknown() {
+        let (state, transport, dir) = armed_state("probe-status").await;
+        // The quota is comfortable, so no delivery is scheduled.
+        let sink = OfflineSink::with_usage(comfortable_quota_usage(Some("acct-1")));
+
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
+        wait_for_handshakes(&transport, 1).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let status = state.auto_pause.lock().unwrap().status(true);
+        assert_eq!(
+            status.connection,
+            BridgeConnection::Available,
+            "the probe replaces the unknown status"
+        );
+        // The probe is read-only.
+        assert!(transport.sent_prompts().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Turning the switch on answers the bridge status right away.
+    #[tokio::test]
+    async fn turning_the_switch_on_probes_the_bridge_status() {
+        let (state, transport, dir) = armed_state("probe-enable").await;
+        // The switch starts off.
+        {
+            let mut settings = state.settings.lock().await;
+            settings.auto_pause_on_low_quota = false;
+        }
+        let sink = OfflineSink::with_usage(comfortable_quota_usage(Some("acct-1")));
+
+        apply_settings_patch(
+            &sink,
+            &state,
+            serde_json::json!({ "autoPauseOnLowQuota": true }),
+            false,
+        )
+        .await
+        .expect("the patch must apply");
+
+        wait_for_handshakes(&transport, 1).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let status = state.auto_pause.lock().unwrap().status(true);
+        assert_eq!(status.connection, BridgeConnection::Available);
+        assert!(transport.sent_prompts().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// The shadow refresh tests.
@@ -2107,6 +2332,36 @@ mod shadow_refresh_tests {
             .collect()
     }
 
+    /// The refresh that flushes the audit event also persists the cleared
+    /// slot.
+    ///
+    /// The persisted copy is the contract between two runs: a retained event
+    /// on disk would be appended to the evidence log again on the next start.
+    #[tokio::test]
+    async fn a_refresh_persists_the_cleared_audit_slot() {
+        let (state, config, dir) = temp_state("cleared-slot");
+        let sink = ScriptedSource::new(burning_series(9));
+
+        for _ in 0..9 {
+            refresh_usage(&sink, &state)
+                .await
+                .expect("the refresh must succeed");
+        }
+
+        // The interval matured, so the event reached the log.
+        let records = evidence(&config);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["kind"], "matured");
+        // The persisted slot is empty, so the next start appends nothing.
+        let persisted = shadow_state(&config);
+        assert!(
+            persisted["auditOutbox"].is_null(),
+            "the cleared slot must be persisted: {persisted}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A failed usage read must not fabricate a feedback and must not erase
     /// the learner state.
     ///
@@ -2201,8 +2456,11 @@ mod shadow_refresh_tests {
             blocked["auditOutbox"]["kind"], "matured",
             "the retained event must survive"
         );
-        // The learner is paused, so the interval did not advance.
-        assert_eq!(blocked["pending"]["lastValidAt"], 1480);
+        // The learner is paused, so the interval is not settled. It stays
+        // alive, because a busy audit outbox must not cost a learning
+        // interval that the quota really produced.
+        assert_eq!(blocked["pending"]["lastValidAt"], 1520);
+        assert_eq!(blocked["personal"]["maturedFeedbacks"], 1);
 
         // The evidence log becomes writable again.
         std::fs::remove_dir_all(config.shadow_evidence_path()).unwrap();

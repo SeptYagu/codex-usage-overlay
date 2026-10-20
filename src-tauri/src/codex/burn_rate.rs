@@ -6,8 +6,8 @@ use crate::config::ConfigManager;
 use super::{QuotaSnapshot, RawCodexUsage};
 
 use personal::{
-    MaturedOutcome, PendingOutcome, PendingPersonalForecast, PersonalCalibrationState,
-    RejectionReason,
+    LatchedRejection, MaturedOutcome, PendingOutcome, PendingPersonalForecast,
+    PersonalCalibrationState, RejectionReason,
 };
 use shadow::{
     append_evidence_event, compact_evidence_log, count_evidence_events, lifecycle_event,
@@ -255,6 +255,13 @@ impl BurnRateTracker {
         // does not lose the outcome.
         if let Err(error) = tracker.flush_audit_outbox(config) {
             eprintln!("Could not append the retained shadow evidence: {error}");
+        } else if tracker.is_dirty() {
+            // The retained event reached the log, so the cleared slot is
+            // persisted. Without it the next start would read the event again
+            // and append it to the evidence log a second time.
+            if let Err(error) = tracker.save(config) {
+                eprintln!("Could not persist the burn-rate state: {error}");
+            }
         }
         tracker
     }
@@ -319,6 +326,10 @@ impl BurnRateTracker {
         // The slot is cleared in memory; the persisted copy is replaced with
         // the next state-changing save.
         self.state.five_hour_shadow.audit_outbox = None;
+        // The cleared slot is a change of the persisted state. Without the
+        // flag the next start would read the retained event again and append
+        // it to the evidence log a second time.
+        self.state_dirty = true;
         Ok(())
     }
 
@@ -442,18 +453,80 @@ impl BurnRateTracker {
         let audit_busy = self.state.five_hour_shadow.audit_outbox.is_some();
         let mut outcome: Option<PersonalOutcome> = None;
 
-        if !audit_busy {
-            if let Some(transition) = transition {
+        if audit_busy {
+            // The outbox still holds an unappended event, so the interval can
+            // not be settled. It is not blind, though: a segment reset or a
+            // decrease in this tick invalidates it, and the decision is
+            // latched on the interval, so that no later observation can wash
+            // it away.
+            if let Some(pending) = self.state.five_hour_shadow.pending.as_mut() {
+                if pending.latched_rejection.is_none() {
+                    let reason = match transition {
+                        Some(transition) => Some(transition.rejection_reason()),
+                        None if after.segment_id != pending.origin_segment_id => {
+                            Some(RejectionReason::SegmentReset)
+                        }
+                        None => None,
+                    };
+                    if let Some(reason) = reason {
+                        pending.latch_rejection(LatchedRejection {
+                            reason,
+                            observed_at,
+                            target_used_percent: used,
+                            actual_gap_seconds: (observed_at >= pending.last_valid_at)
+                                .then(|| observed_at - pending.last_valid_at),
+                        });
+                        changed = true;
+                    } else if let Some(used) = used {
+                        // The interval is observed but never settled: a matured
+                        // outcome would overwrite the retained event, so the
+                        // learner stays untouched and the interval waits.
+                        match pending.observe(observed_at, used, resets_at) {
+                            PendingOutcome::Continue => {
+                                changed = true;
+                            }
+                            PendingOutcome::Duplicate => {}
+                            PendingOutcome::Rejected(reason) => {
+                                pending.latch_rejection(LatchedRejection {
+                                    reason,
+                                    observed_at,
+                                    target_used_percent: Some(used),
+                                    actual_gap_seconds: (observed_at >= pending.last_valid_at)
+                                        .then(|| observed_at - pending.last_valid_at),
+                                });
+                                changed = true;
+                            }
+                            PendingOutcome::Matured(_) => {}
+                        }
+                    }
+                }
+            }
+        } else if let Some(mut pending) = self.state.five_hour_shadow.pending.take() {
+            // A latched rejection is settled first: it was decided while the
+            // outbox was busy and it must not be washed away.
+            if let Some(latched) = pending.latched_rejection {
+                outcome = Some(PersonalOutcome::Rejected {
+                    pending,
+                    reason: latched.reason,
+                });
+                changed = true;
+            } else if let Some(transition) = transition {
                 // A confirmed transition invalidates the pending interval
                 // before it can train.
-                if let Some(pending) = self.state.five_hour_shadow.pending.take() {
-                    outcome = Some(PersonalOutcome::Rejected {
-                        pending,
-                        reason: transition.rejection_reason(),
-                    });
-                    changed = true;
-                }
-            } else if let Some(mut pending) = self.state.five_hour_shadow.pending.take() {
+                outcome = Some(PersonalOutcome::Rejected {
+                    pending,
+                    reason: transition.rejection_reason(),
+                });
+                changed = true;
+            } else if after.segment_id != pending.origin_segment_id {
+                // The interval outlived the segment it was created in, so it
+                // can never train the learner.
+                outcome = Some(PersonalOutcome::Rejected {
+                    pending,
+                    reason: RejectionReason::SegmentReset,
+                });
+                changed = true;
+            } else {
                 match used {
                     Some(used) => match pending.observe(observed_at, used, resets_at) {
                         PendingOutcome::Continue => {
@@ -550,15 +623,32 @@ impl BurnRateTracker {
                     observed_at,
                     personalized,
                 )),
-                Some(PersonalOutcome::Rejected { pending, reason }) => Some(rejected_event(
-                    &pending,
-                    reason,
-                    observed_at,
-                    used,
-                    // A backwards observation has no gap at all.
-                    (observed_at >= pending.last_valid_at)
-                        .then(|| observed_at - pending.last_valid_at),
-                )),
+                Some(PersonalOutcome::Rejected { pending, reason }) => {
+                    // A latched rejection keeps the observation that caused
+                    // it, so the evidence describes the violation instead of
+                    // the tick that finally reported it.
+                    let (target_at, target_used, actual_gap) = match pending.latched_rejection {
+                        Some(latched) => (
+                            latched.observed_at,
+                            latched.target_used_percent,
+                            latched.actual_gap_seconds,
+                        ),
+                        None => (
+                            observed_at,
+                            used,
+                            // A backwards observation has no gap at all.
+                            (observed_at >= pending.last_valid_at)
+                                .then(|| observed_at - pending.last_valid_at),
+                        ),
+                    };
+                    Some(rejected_event(
+                        &pending,
+                        reason,
+                        target_at,
+                        target_used,
+                        actual_gap,
+                    ))
+                }
                 None => lifecycle_event_for(account_transition, transition, observed_at),
             };
             if let Some(mut event) = event {
@@ -587,6 +677,7 @@ impl BurnRateTracker {
                 fixed_rate,
                 personalized,
                 learner,
+                after.segment_id,
             ) {
                 self.state.five_hour_shadow.pending = Some(pending);
                 changed = true;
@@ -634,6 +725,7 @@ fn build_pending(
     fixed_rate: Option<f64>,
     personalized: Option<f64>,
     learner: LearnerSnapshot,
+    segment_id: u64,
 ) -> Option<PendingPersonalForecast> {
     let used = used?;
     if used >= 100.0 {
@@ -662,6 +754,8 @@ fn build_pending(
         origin_informative_updates: learner.informative_updates,
         last_valid_at: origin_at,
         last_valid_used_percent: used,
+        origin_segment_id: segment_id,
+        latched_rejection: None,
     })
 }
 

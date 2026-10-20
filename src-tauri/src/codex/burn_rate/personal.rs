@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::shadow::SHADOW_ALGORITHM_VERSION;
+use super::QuotaRateState;
 use super::EPSILON;
 
 /// The decay of the learner and of the trust evidence.
@@ -31,7 +33,8 @@ pub const FEEDBACK_MAX_GAP_SECS: i64 = 90;
 /// read by later offline analysis. The three segment causes are separate
 /// codes, because a later analysis has to tell a real quota cycle, an
 /// overnight resume and a confirmed correction apart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RejectionReason {
     /// The accepted-observation gap exceeded the frozen limit.
     Gap,
@@ -53,6 +56,12 @@ pub enum RejectionReason {
     /// A decrease was confirmed by a later observation and started a new
     /// segment.
     Correction,
+    /// The interval outlived the quota segment it was created in.
+    ///
+    /// The transition codes above name the signal that ended the segment. This
+    /// one names the identity check: the interval belongs to a segment that is
+    /// no longer the current one, so it can never train the learner.
+    SegmentReset,
 }
 
 impl RejectionReason {
@@ -68,8 +77,30 @@ impl RejectionReason {
             Self::QuotaCycle => "quota_cycle",
             Self::LongIdle => "long_idle",
             Self::Correction => "correction",
+            Self::SegmentReset => "segment_reset",
         }
     }
+}
+
+/// A rejection that was decided while the audit outbox was busy.
+///
+/// The interval keeps the decision instead of settling it, because settling it
+/// would overwrite the retained evidence event. A later observation can never
+/// wash the decision away: the interval stays rejected until the outbox is
+/// free again and the rejection is reported.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatchedRejection {
+    /// Why the interval was rejected.
+    pub reason: RejectionReason,
+    /// When the violating observation arrived.
+    pub observed_at: i64,
+    /// The used percentage of that observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_used_percent: Option<f64>,
+    /// The gap between that observation and the last valid one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_gap_seconds: Option<i64>,
 }
 
 /// The persisted personal calibration state.
@@ -202,6 +233,20 @@ pub struct PendingPersonalForecast {
     pub last_valid_at: i64,
     /// The used percentage of that observation.
     pub last_valid_used_percent: f64,
+    /// The quota segment the interval was created in.
+    ///
+    /// The identity binds the interval to its segment. An interval that
+    /// outlives its segment is invalid even when no transition signal arrives
+    /// in the same tick, so a restored interval can never train the learner
+    /// across a quota cycle.
+    #[serde(default)]
+    pub origin_segment_id: u64,
+    /// A rejection that was decided while the audit outbox was busy.
+    ///
+    /// The field is absent for an interval that was never invalidated, and it
+    /// keeps the decision alive until the outbox is free again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latched_rejection: Option<LatchedRejection>,
 }
 
 /// What one observation did to a pending interval.
@@ -310,11 +355,95 @@ impl PendingPersonalForecast {
             shadow_predicted_delta: shadow,
         })
     }
+
+    /// Latches a rejection decision on the interval.
+    ///
+    /// The first decision wins. A later observation can never wash a latched
+    /// rejection away, so an interval that was invalidated during a busy
+    /// audit outbox stays invalid until the rejection is reported.
+    pub fn latch_rejection(&mut self, rejection: LatchedRejection) {
+        if self.latched_rejection.is_none() {
+            self.latched_rejection = Some(rejection);
+        }
+    }
+
+    /// Whether the interval may be resumed against the production state.
+    ///
+    /// A restored interval is only safe when every field it carries still
+    /// describes a real observation of the current segment. The check covers
+    /// the value ranges, the learner snapshot and the consistency with the
+    /// production quota state.
+    pub fn is_valid_for(&self, quota: &QuotaRateState) -> bool {
+        if self.algorithm_version != SHADOW_ALGORITHM_VERSION {
+            return false;
+        }
+        if self.origin_at <= 0 || self.last_valid_at < self.origin_at {
+            return false;
+        }
+        if !self.origin_used_percent.is_finite()
+            || self.origin_used_percent < 0.0
+            || self.origin_used_percent >= 100.0
+        {
+            return false;
+        }
+        if !self.last_valid_used_percent.is_finite()
+            || self.last_valid_used_percent < self.origin_used_percent - EPSILON
+            || self.last_valid_used_percent >= 100.0
+        {
+            return false;
+        }
+        if self.origin_reset_at <= 0 {
+            return false;
+        }
+        if !self.origin_fixed_rate_per_hour.is_finite() || self.origin_fixed_rate_per_hour <= 0.0 {
+            return false;
+        }
+        if self
+            .origin_published_rate_per_hour
+            .is_some_and(|rate| !rate.is_finite() || rate < 0.0)
+        {
+            return false;
+        }
+        if self
+            .origin_shadow_rate_per_hour
+            .is_some_and(|rate| !rate.is_finite() || rate <= 0.0)
+        {
+            return false;
+        }
+        if !self.origin_raw_factor.is_finite()
+            || self.origin_raw_factor < RAW_FACTOR_MIN - EPSILON
+            || self.origin_raw_factor > RAW_FACTOR_MAX + EPSILON
+        {
+            return false;
+        }
+        if !self.origin_trust.is_finite() || !(0.0..=1.0).contains(&self.origin_trust) {
+            return false;
+        }
+        if !self.origin_effective_factor.is_finite() || self.origin_effective_factor <= 0.0 {
+            return false;
+        }
+        if !self.origin_evidence.is_finite() || self.origin_evidence < 0.0 {
+            return false;
+        }
+        // The interval belongs to the segment it was created in. A latched
+        // rejection is the one exception: it still has to be reported, so the
+        // interval survives until the audit outbox is free again.
+        if self.origin_segment_id != quota.segment_id && self.latched_rejection.is_none() {
+            return false;
+        }
+        // The production must have observed at least as late as the interval.
+        let Some(last_observed_at) = quota.last_observed_at else {
+            return false;
+        };
+        if last_observed_at < self.last_valid_at {
+            return false;
+        }
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::shadow::SHADOW_ALGORITHM_VERSION;
     use super::*;
 
     const ORIGIN_RESET: i64 = 100_000;
@@ -335,6 +464,8 @@ mod tests {
             origin_informative_updates: 0,
             last_valid_at: origin_at,
             last_valid_used_percent: used,
+            origin_segment_id: 0,
+            latched_rejection: None,
         }
     }
 

@@ -983,6 +983,8 @@ pub struct AutoPauseController {
     delivery_deadline: Duration,
     /// Starts the delivery worker.
     spawn_worker: WorkerSpawner,
+    /// Starts the read-only bridge probe.
+    spawn_probe: WorkerSpawner,
 }
 
 impl Default for AutoPauseController {
@@ -1011,6 +1013,11 @@ impl AutoPauseController {
             spawn_worker: Arc::new(|state| {
                 tauri::async_runtime::spawn(async move {
                     run_delivery_worker(state).await;
+                });
+            }),
+            spawn_probe: Arc::new(|state| {
+                tauri::async_runtime::spawn(async move {
+                    probe_bridge(&state).await;
                 });
             }),
         }
@@ -1042,6 +1049,12 @@ impl AutoPauseController {
     #[cfg(test)]
     pub(crate) fn set_worker_spawner(&mut self, spawner: WorkerSpawner) {
         self.spawn_worker = spawner;
+    }
+
+    /// Replaces the probe starter, for the offline tests.
+    #[cfg(test)]
+    pub(crate) fn set_probe_spawner(&mut self, spawner: WorkerSpawner) {
+        self.spawn_probe = spawner;
     }
 
     /// Shortens the batch deadline, for the offline tests.
@@ -1099,6 +1112,15 @@ impl AutoPauseController {
         };
         self.sent.retain(still_relevant);
         self.pending.retain(still_relevant);
+    }
+
+    /// Releases the active period bookkeeping of every session.
+    ///
+    /// The period counter keeps counting, so a session that comes back later
+    /// receives a fresh period identity. The de-duplication ledger keeps its
+    /// entries: they belong to the periods that really happened.
+    fn clear_active_periods(&mut self) {
+        self.periods.clear();
     }
 
     /// Refreshes the active periods from a fresh listing.
@@ -1281,9 +1303,19 @@ pub fn schedule(
         return;
     };
     if !settings.auto_pause_on_low_quota {
+        // The switch is off: the active periods are released, so a session
+        // that comes back later starts a new period instead of reusing the
+        // identity of the period that was already paused.
+        lock_controller(state).clear_active_periods();
         return;
     }
     if triggered_quotas(&settings, &usage).is_empty() {
+        // The quota is back above the threshold: every session gets a fresh
+        // low-quota pause protection when the quota drops again.
+        lock_controller(state).clear_active_periods();
+        // The bridge status is unknown until the first handshake, so a
+        // read-only probe answers it while the quota is still comfortable.
+        probe_bridge_status(state);
         return;
     }
 
@@ -1309,6 +1341,79 @@ pub fn schedule(
 
     if let Some(spawner) = spawner {
         spawner(state.clone());
+    }
+}
+
+/// Releases the active period bookkeeping of every session.
+///
+/// The bookkeeping follows the switch and the quota. A session that was
+/// paused in an earlier low-quota period must not be swallowed by the
+/// de-duplication ledger of that period, so it receives a new period
+/// identity as soon as the feature is off or the quota is comfortable again.
+pub fn clear_active_periods(state: &Arc<AppState>) {
+    lock_controller(state).clear_active_periods();
+}
+
+/// Probes the bridge when the connection status is still unknown.
+///
+/// The probe is read-only: it performs the `list_threads` handshake and never
+/// sends a message to a session, so it is safe to run while the quota is
+/// comfortable. It runs in the background, because a pipe call may block.
+pub fn probe_bridge_status(state: &Arc<AppState>) {
+    let spawner = {
+        let controller = lock_controller(state);
+        // A known status is not replaced by a probe, and a delivery in flight
+        // already reports the bridge state.
+        if controller.connection != BridgeConnection::Unknown || controller.running {
+            return;
+        }
+        controller.spawn_probe.clone()
+    };
+    spawner(state.clone());
+}
+
+/// Performs the read-only bridge probe.
+///
+/// The status is reported, never guessed: a candidate that answered proves
+/// that the bridge is reachable, and a candidate that reported targets also
+/// refreshes the active periods.
+pub(crate) async fn probe_bridge(state: &Arc<AppState>) {
+    let (transport, override_discovery) = {
+        let controller = lock_controller(state);
+        (
+            controller.transport.clone(),
+            controller.discovery_override.clone(),
+        )
+    };
+    let discovery = match override_discovery {
+        Some(discovery) => discovery,
+        None => discover_bridge().await,
+    };
+    let candidates = AutoPauseController::candidates(&discovery);
+    let mut answered = false;
+    let mut threads: Option<Vec<ActiveThread>> = None;
+    for candidate in candidates {
+        match handshake(transport.as_ref(), &candidate).await {
+            Err(_) => continue,
+            Ok(Handshake::NoActiveSession) => {
+                answered = true;
+                break;
+            }
+            Ok(Handshake::Targets(listed)) => {
+                answered = true;
+                threads = Some(listed);
+                break;
+            }
+        }
+    }
+    let mut controller = lock_controller(state);
+    controller.connection = if answered {
+        BridgeConnection::Available
+    } else {
+        BridgeConnection::Unavailable
+    };
+    if let Some(threads) = threads {
+        controller.refresh_periods(&threads);
     }
 }
 
@@ -1372,13 +1477,21 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
     // that reports targets wins.
     let mut answered = false;
     let mut reported: Option<(BridgeCandidate, Vec<ActiveThread>)> = None;
+    // A pipe that answered without reporting an active session is exhausted.
+    // The remaining caller identities of the same pipe would repeat the same
+    // read-only call against a pipe that is already known to be idle.
+    let mut exhausted_pipes: HashSet<String> = HashSet::new();
     for candidate in candidates {
+        if exhausted_pipes.contains(&candidate.pipe.to_ascii_lowercase()) {
+            continue;
+        }
         match handshake(transport.as_ref(), &candidate).await {
             // A failed handshake moves on to the next candidate; the pipe name
             // alone never proves that a bridge is usable.
             Err(_) => continue,
             Ok(Handshake::NoActiveSession) => {
                 answered = true;
+                exhausted_pipes.insert(candidate.pipe.to_ascii_lowercase());
                 continue;
             }
             Ok(Handshake::Targets(threads)) => {

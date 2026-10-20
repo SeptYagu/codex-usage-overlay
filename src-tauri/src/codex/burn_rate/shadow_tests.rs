@@ -71,6 +71,9 @@ impl Harness {
         let estimate = self.tracker.accept_usage(sample);
         let _ = self.persist();
         let _ = self.tracker.flush_audit_outbox(&self.config);
+        // The cleared slot is persisted as well, exactly like the application
+        // does after the flush.
+        let _ = self.persist();
         estimate
     }
 
@@ -914,8 +917,9 @@ fn a_duplicate_outbox_append_is_harmless() {
     }
     // The outbox is kept, so the event is only persisted, not appended.
     harness.persist().unwrap();
+    let consumed = fs::read(harness.config.burn_rate_state_path()).unwrap();
 
-    // The startup flushes the retained event.
+    // The startup flushes the retained event and persists the cleared slot.
     let first = BurnRateTracker::load(&harness.config);
     let log = fs::read_to_string(harness.config.shadow_evidence_path()).unwrap();
     assert_eq!(
@@ -924,10 +928,18 @@ fn a_duplicate_outbox_append_is_harmless() {
     );
     assert!(first.state.five_hour_shadow.audit_outbox.is_none());
 
-    // The persisted slot still holds the event, so a later start appends it
-    // again. The audit key makes the duplicate harmless.
+    // The cleared slot is on disk, so a later start appends nothing.
     let mut second = BurnRateTracker::load(&harness.config);
     second.flush_audit_outbox(&harness.config).unwrap();
+    let log = fs::read_to_string(harness.config.shadow_evidence_path()).unwrap();
+    let lines: Vec<&str> = log.lines().filter(|line| !line.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 1, "a cleared slot is never appended twice");
+
+    // A crash between the append and the second write leaves the consumed
+    // event on disk. The next start appends it again, and the audit key makes
+    // the duplicate harmless.
+    fs::write(harness.config.burn_rate_state_path(), &consumed).unwrap();
+    let _ = BurnRateTracker::load(&harness.config);
     let log = fs::read_to_string(harness.config.shadow_evidence_path()).unwrap();
     let lines: Vec<&str> = log.lines().filter(|line| !line.trim().is_empty()).collect();
     assert_eq!(lines.len(), 2);
@@ -935,6 +947,193 @@ fn a_duplicate_outbox_append_is_harmless() {
     let second: ShadowEvidenceEvent = serde_json::from_str(lines[1]).unwrap();
     assert_eq!(first.account_generation, second.account_generation);
     assert_eq!(first.event_sequence, second.event_sequence);
+}
+
+#[test]
+fn flushing_audit_outbox_marks_state_dirty_and_persists_cleared_slot_across_restarts() {
+    let mut harness = Harness::origin("outbox-cleared");
+    // The matured event is recorded but never flushed, so the slot stays
+    // occupied.
+    for minute in 1..=5 {
+        harness.accept(&usage(1180 + minute * 60, 13.0 + minute as f64, 10.0));
+    }
+    assert!(harness.shadow().audit_outbox.is_some());
+    harness.persist().unwrap();
+
+    // The flush clears the slot and marks the persisted copy as outdated.
+    harness.tracker.flush_audit_outbox(&harness.config).unwrap();
+    assert!(harness.shadow().audit_outbox.is_none());
+    assert!(
+        harness.tracker.is_dirty(),
+        "the cleared slot is a change of the persisted state"
+    );
+
+    // The cleared slot reaches the disk, so the next start does not append
+    // the same event to the evidence log again.
+    harness.tracker.save(&harness.config).unwrap();
+    assert!(!harness.tracker.is_dirty());
+    let _ = BurnRateTracker::load(&harness.config);
+    let log = fs::read_to_string(harness.config.shadow_evidence_path()).unwrap();
+    assert_eq!(
+        log.lines().filter(|line| !line.trim().is_empty()).count(),
+        1,
+        "the retained event reaches the log exactly once"
+    );
+
+    // A further start appends nothing, because the slot is empty on disk.
+    let _ = BurnRateTracker::load(&harness.config);
+    let log = fs::read_to_string(harness.config.shadow_evidence_path()).unwrap();
+    assert_eq!(
+        log.lines().filter(|line| !line.trim().is_empty()).count(),
+        1,
+        "a cleared slot is never appended twice"
+    );
+}
+
+#[test]
+fn segment_transition_or_decrease_during_audit_busy_invalidates_pending_interval() {
+    let mut harness = Harness::origin("busy-interval");
+    // The matured event is recorded but never flushed, so the audit slot
+    // stays occupied and the personal transitions are paused.
+    for minute in 1..=5 {
+        harness.accept(&usage(1180 + minute * 60, 13.0 + minute as f64, 10.0));
+    }
+    assert!(harness.shadow().audit_outbox.is_some());
+    harness.persist().unwrap();
+    // The interval that was created next to the retained event.
+    let pending = harness
+        .shadow()
+        .pending
+        .clone()
+        .expect("the matured interval is replaced by a fresh one");
+    assert_eq!(pending.origin_at, 1480);
+    let segment = harness.tracker.state.five_hour.segment_id;
+
+    // The quota falls back while the outbox is busy. The decrease is
+    // confirmed by a later observation, so the production starts a new
+    // segment. The interval must not survive that.
+    harness.accept(&usage(1540, 12.0, 10.0));
+    harness.accept(&usage(1600, 12.0, 10.0));
+    assert_ne!(
+        harness.tracker.state.five_hour.segment_id,
+        segment,
+        "the confirmed decrease starts a new segment"
+    );
+    let latched = harness
+        .shadow()
+        .pending
+        .as_ref()
+        .expect("the interval is kept until its rejection is reported")
+        .latched_rejection
+        .expect("the busy window latches the rejection");
+    assert_eq!(latched.reason, RejectionReason::Decrease);
+    assert_eq!(latched.observed_at, 1540);
+
+    // The learner never trained from the cross-segment interval.
+    assert_eq!(harness.personal().matured_feedbacks, 1);
+
+    // The outbox frees and the rejection is reported instead of a matured
+    // outcome.
+    harness.tracker.flush_audit_outbox(&harness.config).unwrap();
+    harness.accept(&usage(1660, 12.5, 10.0));
+    let event = harness
+        .shadow()
+        .audit_outbox
+        .as_ref()
+        .expect("the latched rejection becomes an evidence event");
+    assert_eq!(event.kind, ShadowEventKind::Rejected);
+    assert_eq!(event.rejection_reason.as_deref(), Some("decrease"));
+    assert_eq!(
+        event.target_at,
+        Some(1540),
+        "the evidence describes the violation, not the reporting tick"
+    );
+    assert_eq!(harness.personal().matured_feedbacks, 1);
+}
+
+#[test]
+fn a_segment_transition_during_audit_busy_is_latched_for_the_pending_interval() {
+    let mut harness = Harness::origin("busy-segment");
+    for minute in 1..=5 {
+        harness.accept(&usage(1180 + minute * 60, 13.0 + minute as f64, 10.0));
+    }
+    assert!(harness.shadow().audit_outbox.is_some());
+    harness.persist().unwrap();
+
+    // The application was idle for longer than the production maximum, so
+    // the production starts a new segment while the outbox is busy.
+    harness.accept(&usage(2200, 20.0, 10.0));
+    let latched = harness
+        .shadow()
+        .pending
+        .as_ref()
+        .expect("the interval is kept until its rejection is reported")
+        .latched_rejection
+        .expect("the transition latches the rejection");
+    assert_eq!(latched.reason, RejectionReason::LongIdle);
+    assert_eq!(latched.observed_at, 2200);
+
+    // The outbox frees and the rejection is reported.
+    harness.tracker.flush_audit_outbox(&harness.config).unwrap();
+    harness.accept(&usage(2260, 20.5, 10.0));
+    let event = harness
+        .shadow()
+        .audit_outbox
+        .as_ref()
+        .expect("the latched rejection becomes an evidence event");
+    assert_eq!(event.kind, ShadowEventKind::Rejected);
+    assert_eq!(event.rejection_reason.as_deref(), Some("long_idle"));
+    assert_eq!(harness.personal().matured_feedbacks, 1);
+}
+
+#[test]
+fn normalize_rejects_out_of_range_or_desynchronized_pending_forecast() {
+    let harness = Harness::origin("normalize-bounds");
+    let quota = harness.tracker.state.five_hour.clone();
+    let pending = harness
+        .shadow()
+        .pending
+        .clone()
+        .expect("the origin creates a pending interval");
+    assert!(pending.is_valid_for(&quota));
+
+    // An origin outside the quota range is refused.
+    let mut broken = pending.clone();
+    broken.origin_used_percent = 150.0;
+    assert!(!broken.is_valid_for(&quota));
+    broken = pending.clone();
+    broken.origin_used_percent = -1.0;
+    assert!(!broken.is_valid_for(&quota));
+    // A last valid observation below the origin is refused.
+    broken = pending.clone();
+    broken.last_valid_used_percent = pending.origin_used_percent - 1.0;
+    assert!(!broken.is_valid_for(&quota));
+    // A missing reset timestamp is refused.
+    broken = pending.clone();
+    broken.origin_reset_at = 0;
+    assert!(!broken.is_valid_for(&quota));
+    // A rate that cannot be published is refused.
+    broken = pending.clone();
+    broken.origin_fixed_rate_per_hour = 0.0;
+    assert!(!broken.is_valid_for(&quota));
+    // An interval of another segment is refused.
+    broken = pending.clone();
+    broken.origin_segment_id = quota.segment_id + 1;
+    assert!(!broken.is_valid_for(&quota));
+    // An interval that is ahead of the production history is refused.
+    let mut ahead = pending.clone();
+    ahead.last_valid_at = quota.last_observed_at.unwrap_or(0) + 60;
+    assert!(!ahead.is_valid_for(&quota));
+    // A production history without an observation is refused.
+    let mut blind = quota.clone();
+    blind.last_observed_at = None;
+    assert!(!pending.is_valid_for(&blind));
+
+    // The shadow state drops the interval instead of resuming it.
+    let mut shadow = FiveHourShadowState::default();
+    shadow.pending = Some(broken);
+    assert!(shadow.normalize(&quota));
+    assert!(shadow.pending.is_none());
 }
 
 #[test]
