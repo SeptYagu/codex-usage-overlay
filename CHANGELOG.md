@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-10-20
+
+### Added
+- An invisible 5-hour personalization stack that collects causal feedback for a later publication decision: the Fixed Weighted candidate promoted to production code, a frozen multiplicative learner (`A0=B0=10`, `lambda=0.99`, `c=clamp(A/B,0.75,1.50)`, decayed evidence `E`, trust `g=E/(E+8)`), a five-minute pending interval with a complete causal origin snapshot, a v2 state subtree with an algorithm-version boundary and an at-least-once audit outbox, and a bounded, de-identified local evidence log.
+- The burn-rate state schema moved from v1 to v2. A v1 file keeps its 5H and Weekly crossing history and gains a neutral shadow subtree; a malformed shadow subtree keeps the recoverable quota history; an algorithm-version mismatch keeps the history and the audit identity and resets only the incompatible learner state.
+- Offline gates that keep the committed replay evidence honest: the replay suite now imports the production weighted helper, and `scripts/check-replay-evidence.mjs` compares the regenerated evidence with the committed files byte by byte.
+
+### Fixed
+- The audit slot is now guarded for every event, not only for the personal outcome. A lifecycle transition during an occupied slot could overwrite an unappended matured or rejected event and destroy it for good, while the learner state had already advanced.
+- A retained audit event is flushed before the next sample is processed, so a transient append failure no longer drops one five-minute learning interval.
+- A backwards observation no longer records a negative gap duration.
+- A quota cycle, an overnight resume and a confirmed correction are recorded with their own stable codes instead of one shared code.
+- A pending interval that carries another algorithm version is discarded when the shadow state is normalized.
+
+### Verification
+- Frontend: 95 tests passed; TypeScript/Vite production build passed.
+- Rust: 284 regular tests passed, 4 pre-existing ignored replay tests unchanged; locked Cargo check passed with no warnings.
+- Estimator parity: the regenerated real-history forecast matches the pre-refactor baseline in all 318 rows with a **maximum prediction deviation of 0**, and the 13 committed evidence files stay byte-identical.
+- Review: the shadow implementation was reviewed before the release gate by an independent read-only reviewer, which first reproduced the published behavior of the base commit side by side. The review found one critical, one major, seven minor and two nit defects; all of them are fixed and each fix has a regression test that turns red when the rule is removed.
+
+### Scope
+- Shadow only: **no user-visible behavior changed.** The overlay, the pill, the tray, the notifications, the settings, the polling cadence and the frontend DTO are untouched, and the frontend suite is unchanged. The personalized rate is internal evidence and is never published.
+- The packaged and native smoke validation of the plan could **not** be performed on this machine. The restart, pending resume/reject, account switch, quota reset, log retry and the 30/60/120/300-second cadence behavior are covered by the automated tests only.
+
 ## [1.3.1] - 2026-10-19
 
 ### Added

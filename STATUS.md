@@ -1,5 +1,14 @@
 # Status
 
+## 5H shadow personalization review pass — 2026-10-20
+
+- The shadow implementation was reviewed by an independent read-only reviewer, which first reproduced the published behavior of the base commit `6137faa` side by side: the published `five_hour_per_hour`, `weekly_per_hour` and `state_changed` sequences were byte-identical, and all 13 committed evidence files were independently reproduced. The review returned **FAIL**.
+- The critical finding: the audit slot was only guarded for the personal outcome, so a lifecycle transition (an account switch or a segment transition) could overwrite an unappended matured or rejected event and destroy it for good, while the learner state had already advanced. The event placement now requires an empty slot, so no event of any kind can take an occupied slot.
+- Seven minor findings are fixed as well: the outbox is now flushed before the new sample is processed, so a transient append failure no longer drops a five-minute learning interval; a backwards observation no longer writes a negative gap duration; a quota cycle, an overnight resume and a confirmed correction have their own stable codes; the effective-factor test now uses a case where `p != y`; the "failed usage read" test really injects a failure into the production read boundary; the "visible values" test was split into a structural frontend-contract test and a golden-vector test over the full persist-and-flush cycle; and the failing-append path is covered at the production refresh boundary.
+- The two nits are fixed too: a pending interval that carries another algorithm version is now discarded by the shadow normalization, and the handoff is listed in `docs/handoff/INDEX.md`.
+- A 16-probe mutation audit confirms the coverage: every probe mutates one frozen production rule and the named test turns red. One probe did not turn red at first — the code compares the decrease with the previous observation, but the old test could not tell that apart from a comparison with the origin. The test now uses a reading that is below the previous observation and still above the origin.
+- The published rates stay pinned: a golden vector captured from the base commit matches in all 14 samples, and the full persist-and-flush cycle produces the same values.
+
 ## 5H shadow personalization implementation — 2026-10-20
 
 - The 5-hour burn-rate estimator now carries an invisible personalization stack that collects causal feedback for a later publication decision. Nothing user-visible changed: the overlay, the pill, the tray, the notifications, the settings, the polling cadence and the frontend DTO are untouched, and the frontend suite is unchanged.
@@ -8,9 +17,9 @@
 - The burn-rate state schema moved from v1 to v2. A v1 file keeps its 5H and Weekly crossing history and gains a neutral shadow subtree; a malformed shadow subtree keeps the recoverable quota history; an algorithm-version mismatch keeps the history and the audit identity and resets only the incompatible learner state.
 - The matured outcome scores the three predictions that were stored at the origin (published, Fixed Weighted, personalized), each capped by the quota remaining at the origin. The learner always trains on the Fixed Weighted prediction. A reset-correction, a decrease, a saturation, a gap over the frozen 90 seconds, a confirmed segment transition and a backward timestamp all reject the interval without touching the long-lived `A/B/E`.
 - The personal transitions are paused while an audit event is waiting for the durable log, and a retained event is flushed on the next startup. The local evidence log is bounded to 10,000 events, carries no account identifier, and a save or log failure never fails a usage refresh.
-- Rust **276** regular tests passed (4 pre-existing ignored replay tests unchanged), frontend 95 passed, the production build passed, the packaging regression passed, and the locked Cargo check is clean with zero warnings.
+- Rust **284** regular tests passed (4 pre-existing ignored replay tests unchanged), frontend 95 passed, the production build passed, the packaging regression passed, and the locked Cargo check is clean with zero warnings.
 - The packaged and native smoke validation of the plan could **not** be performed on this machine; the restart, pending resume/reject, account switch, quota reset, log retry and the 30/60/120/300-second cadence behavior are covered by the automated tests only.
-- [Implementation handoff](docs/handoff/2026-10-20-5h-shadow-personalization-implementation.md) records the test counts, the migration and isolation results, two de-identified evidence records, the outbox recovery result and the nine implementation-level deviations.
+- [Implementation handoff](docs/handoff/2026-10-20-5h-shadow-personalization-implementation.md) records the test counts, the migration and isolation results, two de-identified evidence records, the outbox recovery result and the thirteen implementation-level deviations.
 
 ## v1.3.1 smart pause implementation — 2026-10-19
 
