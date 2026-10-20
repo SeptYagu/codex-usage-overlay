@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import i18n from '../i18n';
 import { DEFAULT_SETTINGS } from '../types';
+import { APP_VERSION } from '../version';
 import { TrayMenuView, trayMenuWidthForText } from './TrayMenuView';
 
 const tauri = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -158,11 +159,11 @@ it('never sizes the popup from the container-bound scrollWidth', async () => {
 
 it('shows the client version in the check-for-updates menu item', async () => {
   render(<TrayMenuView settings={DEFAULT_SETTINGS} onPatchSettings={() => {}} />);
-  expect(screen.getByRole('menuitem', { name: 'Check for Updates (v1.3.2)' })).toBeTruthy();
+  expect(screen.getByRole('menuitem', { name: `Check for Updates (v${APP_VERSION})` })).toBeTruthy();
   cleanup();
   await i18n.changeLanguage('zh-CN');
   render(<TrayMenuView settings={DEFAULT_SETTINGS} onPatchSettings={() => {}} />);
-  expect(screen.getByRole('menuitem', { name: '检查更新 (当前版本: v1.3.2)' })).toBeTruthy();
+  expect(screen.getByRole('menuitem', { name: `检查更新 (当前版本: v${APP_VERSION})` })).toBeTruthy();
 });
 
 it('exposes auto edge hide as a synchronized checkbox menu item', () => {

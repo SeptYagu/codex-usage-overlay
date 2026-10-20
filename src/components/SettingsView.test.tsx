@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SettingsView } from './SettingsView';
 import { DEFAULT_SETTINGS, OverlaySettings } from '../types';
+import { APP_VERSION } from '../version';
 import i18n from '../i18n';
 
 const tauri = vi.hoisted(() => ({
@@ -87,7 +88,7 @@ describe('two-column settings layout', () => {
     expect(grid.contains(header)).toBe(false);
     expect(grid.contains(footer)).toBe(false);
     expect(within(header).getByRole('heading', { name: 'Settings' })).toBeTruthy();
-    expect(within(header).getByText('v1.3.2')).toBeTruthy();
+    expect(within(header).getByText(`v${APP_VERSION}`)).toBeTruthy();
     expect(within(footer).getByText('septwind@agent.qq.com')).toBeTruthy();
   });
 
