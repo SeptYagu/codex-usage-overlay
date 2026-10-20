@@ -6,7 +6,7 @@ Generate a Tauri updater key once with `npm run tauri -- signer generate --write
 
 GitHub Actions 从标签对应的源码生成发布附件。本机构建仅用于验证，正式附件由发布流程生成。
 
-1. Update the app version in `package.json`, `package-lock.json` (the root version and the root package entry), `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`, and `src/version.ts`. The last one is the frontend constant behind the settings-window badge and the tray menu, so a release that skips it ships an installer that shows the previous version. `src/version.test.ts` fails when the locations drift apart.
+1. Update the app version in `package.json`, `package-lock.json` (the root version and the root package entry), `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`, and `src/version.ts`. The last one is the frontend constant behind the settings-window badge and the tray menu, so a release that skips it ships an installer that shows the previous version. `src/version.test.ts` fails when the locations drift apart. The two frontend tests that assert the rendered version (`SettingsView.test.tsx`, `TrayMenuView.test.tsx`) read that constant instead of a hardcoded string, so they need no manual update — keep it that way, a hardcoded version there is a seventh place that silently drifts.
 2. Run `npm test`, `npm run build`, and `cargo test --manifest-path src-tauri/Cargo.toml --locked`.
 3. Complete Windows smoke checks, record any remaining limitations in preview release notes, then commit and push the source branch (`main`).
 4. Tag that exact commit. A preview tag uses the app version plus `-preview`:
