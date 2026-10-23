@@ -1344,6 +1344,7 @@ mod auto_pause_tests {
             settings.auto_pause_on_low_quota = true;
             settings.auto_pause_five_hour_threshold_percent = 5;
             settings.auto_pause_weekly_threshold_percent = 2;
+            settings.language = "zh-CN".to_string();
         }
 
         let transport = Arc::new(ScriptedTransport::new());
@@ -1418,6 +1419,34 @@ mod auto_pause_tests {
 
     /// Cooperative delivery must never ask for an external continuation timer.
     const EXPECTED_PAUSE_MESSAGE: &str = "\u{6682}\u{505C}";
+
+    #[tokio::test]
+    async fn pause_message_uses_english_when_selected() {
+        let (state, transport, _dir) = armed_state("wiring-locale-en").await;
+        {
+            let mut settings = state.settings.lock().await;
+            settings.language = "en-US".to_string();
+        }
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+        refresh_usage(&sink, &state).await.expect("the refresh must succeed");
+        wait_for_prompts(&transport, 1).await;
+        let prompts = transport.sent_prompts();
+        assert_eq!(prompts, vec!["Pause"]);
+    }
+
+    #[tokio::test]
+    async fn pause_message_uses_traditional_chinese_when_selected() {
+        let (state, transport, _dir) = armed_state("wiring-locale-hant").await;
+        {
+            let mut settings = state.settings.lock().await;
+            settings.language = "zh-Hant".to_string();
+        }
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+        refresh_usage(&sink, &state).await.expect("the refresh must succeed");
+        wait_for_prompts(&transport, 1).await;
+        let prompts = transport.sent_prompts();
+        assert_eq!(prompts, vec!["\u{66AB}\u{505C}"]);
+    }
 
     #[tokio::test]
     async fn a_successful_refresh_requests_pause_without_an_external_resume_timer() {

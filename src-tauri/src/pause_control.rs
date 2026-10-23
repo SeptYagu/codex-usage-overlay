@@ -41,9 +41,29 @@ pub mod status;
 pub mod resume;
 pub use status::AutoPauseStatus;
 
-/// The fixed pause request. The production path never assembles a prompt from
-/// user input, settings or a translation resource.
-pub const PAUSE_MESSAGE: &str = "\u{6682}\u{505C}";
+/// The localized pause message literals.
+pub const PAUSE_MESSAGE_ZH_CN: &str = "\u{6682}\u{505C}";
+pub const PAUSE_MESSAGE_ZH_HANT: &str = "\u{66AB}\u{505C}";
+pub const PAUSE_MESSAGE_EN: &str = "Pause";
+
+/// Backward-compatible alias for the default Chinese pause message.
+#[allow(dead_code)]
+pub const PAUSE_MESSAGE: &str = PAUSE_MESSAGE_ZH_CN;
+
+/// Resolves the pause prompt literal for a resolved locale ("zh-CN", "zh-Hant", "en-US").
+pub fn pause_message_for_locale(locale: &str) -> &'static str {
+    match locale {
+        "zh-Hant" => PAUSE_MESSAGE_ZH_HANT,
+        "zh-CN" => PAUSE_MESSAGE_ZH_CN,
+        _ => PAUSE_MESSAGE_EN,
+    }
+}
+
+/// Resolves the pause prompt for the configured language setting.
+pub fn pause_message_for_language(language: &str) -> &'static str {
+    let locale = crate::commands::resolve_locale(language);
+    pause_message_for_locale(locale)
+}
 
 
 /// The current Codex desktop client bridge family.
@@ -132,8 +152,8 @@ pub fn triggered_quotas(settings: &OverlaySettings, usage: &CodexUsage) -> Vec<T
 }
 
 /// The overlay owns resume scheduling; a cooperative message only asks to pause.
-pub fn pause_message(_triggers: &[Trigger], _observed_at: i64) -> String {
-    PAUSE_MESSAGE.to_string()
+pub fn pause_message(language: &str, _triggers: &[Trigger], _observed_at: i64) -> String {
+    pause_message_for_language(language).to_string()
 }
 
 /// A Codex session that may receive a pause request.
@@ -1452,7 +1472,7 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
         return;
     }
     // Continuation scheduling belongs to the gated resume manager.
-    let prompt = pause_message(&triggers, sample.usage.fetched_at);
+    let prompt = pause_message(&sample.settings.language, &triggers, sample.usage.fetched_at);
 
     // The transport and the discovery override are read under the lock, but
     // the discovery itself is ordinary file system work. Running it while
@@ -1899,7 +1919,7 @@ mod tests {
             quota: QuotaKind::FiveHour,
             resets_at: Some(1_000 + 3_600 + 120),
         }];
-        let message = pause_message(&triggers, 1_000);
+        let message = pause_message("zh-CN", &triggers, 1_000);
         assert_eq!(message, PAUSE_MESSAGE);
     }
 
@@ -1909,7 +1929,7 @@ mod tests {
             quota: QuotaKind::FiveHour,
             resets_at: Some(1_000 + 61),
         }];
-        assert_eq!(pause_message(&triggers, 1_000), PAUSE_MESSAGE);
+        assert_eq!(pause_message("zh-CN", &triggers, 1_000), PAUSE_MESSAGE);
     }
 
     #[test]
@@ -1929,7 +1949,7 @@ mod tests {
                 quota: QuotaKind::FiveHour,
                 resets_at,
             }];
-            assert_eq!(pause_message(&triggers, 1_000), PAUSE_MESSAGE);
+            assert_eq!(pause_message("zh-CN", &triggers, 1_000), PAUSE_MESSAGE);
         }
     }
 
@@ -1945,7 +1965,7 @@ mod tests {
                 resets_at: Some(1_000 + 86_400),
             },
         ];
-        assert_eq!(pause_message(&triggers, 1_000), PAUSE_MESSAGE);
+        assert_eq!(pause_message("zh-CN", &triggers, 1_000), PAUSE_MESSAGE);
     }
 
     #[test]
@@ -1954,7 +1974,18 @@ mod tests {
             quota: QuotaKind::Weekly,
             resets_at: Some(1_000 + 86_400),
         }];
-        assert_eq!(pause_message(&triggers, 1_000), PAUSE_MESSAGE);
+        assert_eq!(pause_message("zh-CN", &triggers, 1_000), PAUSE_MESSAGE);
+    }
+
+    #[test]
+    fn pause_message_matches_overlay_display_language() {
+        assert_eq!(pause_message("zh-CN", &[], 0), PAUSE_MESSAGE_ZH_CN);
+        assert_eq!(pause_message("zh-Hant", &[], 0), PAUSE_MESSAGE_ZH_HANT);
+        assert_eq!(pause_message("en-US", &[], 0), PAUSE_MESSAGE_EN);
+        assert_eq!(pause_message_for_locale("zh-CN"), PAUSE_MESSAGE_ZH_CN);
+        assert_eq!(pause_message_for_locale("zh-Hant"), PAUSE_MESSAGE_ZH_HANT);
+        assert_eq!(pause_message_for_locale("en-US"), PAUSE_MESSAGE_EN);
+        assert_eq!(pause_message_for_locale("other"), PAUSE_MESSAGE_EN);
     }
 
     #[test]
