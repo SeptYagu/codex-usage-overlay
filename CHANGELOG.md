@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0-preview.1] - 2026-10-23
+
+### Fixed
+- Replace the Windows PowerShell lifecycle-test helper with the compiled Rust test executable. The first preview's CI timed out waiting for all four shell helpers to become ready, before testing reader cleanup. All four lifecycle regressions remain active with the same startup, request, cancellation and process-exit deadlines.
+
+### Changed
+- Upgrade `actions/setup-node` from v4 to v6 in CI and release workflows to remove the deprecated Node 20 action runtime. The project build continues to use Node 22.
+
 ## [1.4.0-preview] - 2026-10-23
 
 ### Added

@@ -1,5 +1,12 @@
 # Status
 
+## CI and Node runtime follow-up — 2026-10-23
+
+- The first preview's CI failed in all four owned-process lifecycle tests while waiting for PowerShell fixture readiness at the ten-second setup boundary. The production cleanup assertions had not run. The release run for `v1.4.0-preview` was cancelled; the original tag is retained.
+- The test helper now uses the compiled Rust test executable and keeps a real owned process alive for cleanup verification. The four regression tests and all deadlines remain active. Its ignored child entry point is invoked explicitly by those tests; Cargo now reports five ignored entries (four existing estimator replays plus this helper), with the same 330 regular tests.
+- CI already installed Node 22.23.4; the local runtime is 22.19.0. The deprecation warning referred to `actions/setup-node@v4`'s bundled Node 20 runtime. Both workflows now use v6 (Node 24 action runtime) while continuing to install Node 22 for the build.
+- The intended corrected release tag is `v1.4.0-preview.1`, after the corrected main-branch CI passes. App/package version remains 1.4.0. [Corrected preview notes](docs/releases/v1.4.0-preview.1.md).
+
 ## v1.4.0-preview release preparation — 2026-10-23
 
 - The user authorized pushing the implementation and starting the release workflow. All app version locations now carry 1.4.0; the intended tag is `v1.4.0-preview` because native smoke checks remain outstanding.
