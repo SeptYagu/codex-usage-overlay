@@ -70,6 +70,8 @@ pub struct OverlaySettings {
     /// must never enable it silently.
     #[serde(default)]
     pub auto_pause_on_low_quota: bool,
+    #[serde(default)]
+    pub auto_resume_after_quota_reset: bool,
     /// The remaining 5-hour percentage at or below which the pause request
     /// fires.
     #[serde(default = "default_auto_pause_five_hour_threshold")]
@@ -112,6 +114,7 @@ impl Default for OverlaySettings {
             mouse_passthrough: false,
             show_percentage_grid: false,
             auto_pause_on_low_quota: false,
+            auto_resume_after_quota_reset: false,
             auto_pause_five_hour_threshold_percent: default_auto_pause_five_hour_threshold(),
             auto_pause_weekly_threshold_percent: default_auto_pause_weekly_threshold(),
         }
@@ -186,6 +189,10 @@ impl ConfigManager {
 
     pub fn reset_state_path(&self) -> PathBuf {
         self.runtime_dir.join("reset-state.json")
+    }
+
+    pub fn resume_state_path(&self) -> PathBuf {
+        self.runtime_dir.join("pause-resume-state.json")
     }
 
     pub fn burn_rate_state_path(&self) -> PathBuf {

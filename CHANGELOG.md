@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.4.0-preview] - 2026-10-23
+
+### Added
+- Versioned Smart Pause status in Settings, the tray menu and tooltip, with sample age, effective polling cadence, per-active-period outcomes and separate accepted-request/verified-interruption counters. Connection health retries while protection is enabled.
+- An explicit automatic-resume preference (default off) and schema-versioned resume eligibility store. Raw quota recovery, freshness, account/activity identity, expiry, restart review and unknown-submission safeguards are covered offline. Automatic execution stays disabled on the current cooperative connection.
+
+### Fixed
+- Cancel unsent Smart Pause requests when newer quota data, read failures or settings changes supersede a delivery batch. Preserve accepted requests for de-duplication when a newer low sample describes the same account, active period and quota cycle.
+- Reject malformed bridge listings instead of treating them as a successful observation of no active sessions.
+- Await Codex initialization before requesting usage, report initialization errors immediately, and clean up the owned reader process on cancellation and early errors with a bounded cleanup deadline.
+- Match quota windows by their reported duration and reject malformed or unrelated buckets. Retain positional compatibility when older responses omit the duration.
+- Rotate delivery attempts after bounded batches so a slow first target cannot permanently starve later chats. Keep inactive-period status history from appearing as a current pause request.
+
+### Changed
+- Poll every 15 seconds near a pause threshold while protection is enabled, recover to the user's normal interval with two-sample hysteresis, and back off after failures. Settings changes interrupt the old polling sleep; long reads do not queue catch-up bursts.
+- Send pause-only cooperative requests. Do not ask Codex to create external continuation timers. Existing external tasks are not cancelled by this change.
+- Clarify in all three settings languages and both READMEs that Smart Pause is cooperative; acceptance does not verify actual stopping. Direct interruption and automatic continuation require capabilities that have not been established on this desktop connection.
+
 ## [1.3.3] - 2026-10-20
 
 ### Fixed

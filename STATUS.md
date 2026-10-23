@@ -1,5 +1,28 @@
 # Status
 
+## v1.4.0-preview release preparation — 2026-10-23
+
+- The user authorized pushing the implementation and starting the release workflow. All app version locations now carry 1.4.0; the intended tag is `v1.4.0-preview` because native smoke checks remain outstanding.
+- [Release notes](docs/releases/v1.4.0-preview.md) record cooperative stopping, disabled direct interruption/automatic continuation and external-timer migration. The workflow uses these notes when creating the prerelease.
+- Publication/build status must be verified in GitHub Actions; this preparation record does not assert that remote packaging or publication succeeded.
+
+## Smart Pause improvements 1–4 — 2026-10-23
+
+- Implemented versioned protection status in Settings, the tray menu and tooltip, with bounded per-active-period outcomes, sample age/cadence and separate accepted-request/verified-interruption counters.
+- Implemented adaptive 15-second polling near quota thresholds, recovery hysteresis, failure backoff, wakeable monotonic deadlines and fair delivery across bounded batches.
+- Added a default-off resume preference, durable guarded eligibility state and restart/cancellation handling. **Automatic execution remains unavailable**: the investigated desktop connection cannot demonstrate exact-turn interruption/completion and later-user-activity observation. No production continuation sender is wired.
+- Cooperative requests are pause-only. They no longer ask Codex to create an external continuation timer. Existing external tasks may still run and are not cancelled by disabling the overlay.
+- Validation: 330 Rust tests and 107 frontend tests passed; production build, locked all-target check, six packaging cases and 526 Edge layout cases passed. Native installed-package and real control smoke tests remain outstanding. Changes are local and uncommitted; version remains 1.3.3.
+- See the [implementation record](docs/handoff/2026-10-23-smart-pause-improvements-implementation.md) for capability evidence, supported behavior, reader measurements and remaining integration work.
+
+## Quota stopping review — 2026-10-23
+
+- Updated `main` from `61566eb` to upstream `b792bdf` (v1.3.3).
+- Fixed stale queued/in-flight Smart Pause deliveries after recovery, account loss, read failure or settings changes; retained de-duplication of accepted sends. Malformed bridge listings now fail the handshake.
+- Hardened reader initialization and process cleanup; validated Codex buckets and supported quota-window durations.
+- Rust: 311 passed, 4 existing ignored; frontend: 97 passed; production build, locked all-target Rust check and six packaging cases passed.
+- Smart Pause remains cooperative. Accepted messages do not verify stopped inference or scheduled resumption; live pause/timer and packaged GUI smoke tests remain outstanding. See the [review report](docs/handoff/2026-10-23-quota-stop-review.md).
+
 ## v1.3.3 shadow & smart pause remediation — 2026-10-20
 
 - The 6 post-release review findings of the `v1.3.2` and `v1.3.1` lines are fixed: 2×High, 2×Medium, 2×Low. The plan and the implementation record are in `docs/handoff/`.

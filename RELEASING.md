@@ -19,6 +19,8 @@ git push origin v1.1.0-preview
 5. The **Release overlay** workflow installs dependencies, runs frontend/Rust tests, builds NSIS and MSI installers, and packages the standalone executable into a ZIP. It verifies ZIP contents against the source executable and documentation and generates SHA256 checksums for all three packages.
 6. A tag containing a prerelease suffix creates a GitHub prerelease and does not replace the latest stable release. If a draft release already exists for the tag, the workflow uploads assets to that draft; publish it after the workflow succeeds and the expected installers, signatures, portable ZIP, checksums, and `latest.json` are verified.
 
+For a new release, the workflow uses `docs/releases/<tag>.md` as its release body when that file exists; otherwise it generates GitHub release notes. Keep preview limitations and migration changes in that file before pushing the tag.
+
 Expected assets for `v1.1.0-preview`:
 
 - `codex-usage-overlay_1.1.0_x64-setup.exe` and its `.sig`

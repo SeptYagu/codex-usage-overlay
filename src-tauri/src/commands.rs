@@ -16,6 +16,11 @@ use crate::tray::{open_settings_window as show_settings_win, TrayPresentationSin
 pub struct AppState {
     pub client: Mutex<CodexClient>,
     pub refresh_guard: Mutex<()>,
+    pub polling: StdMutex<crate::polling::PollState>,
+    pub poll_wake: tokio::sync::Notify,
+    pub protection_status: StdMutex<crate::pause_control::status::StatusCache>,
+    pub resume: Mutex<crate::pause_control::resume::ResumeManager>,
+    pub resume_update: Mutex<()>,
     pub burn_rate: Mutex<BurnRateTracker>,
     pub settings_patch: Mutex<()>,
     pub config_manager: ConfigManager,
@@ -65,6 +70,11 @@ impl AppState {
         Self {
             client: Mutex::new(CodexClient::new()),
             refresh_guard: Mutex::new(()),
+            polling: StdMutex::new(crate::polling::PollState::default()),
+            poll_wake: tokio::sync::Notify::new(),
+            protection_status: StdMutex::new(Default::default()),
+            resume: Mutex::new(crate::pause_control::resume::ResumeManager::load(&config_manager)),
+            resume_update: Mutex::new(()),
             burn_rate: Mutex::new(BurnRateTracker::load(&config_manager)),
             settings_patch: Mutex::new(()),
             config_manager: config_manager.clone(),
@@ -169,6 +179,7 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
         }
     };
 
+    state.polling.lock().unwrap_or_else(|p| p.into_inner()).started(std::time::Instant::now());
     state.config_manager.write_status("reading", None);
     let raw_result = sink.read_usage(state).await;
 
@@ -205,6 +216,13 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
                 estimate
             };
             let usage = raw.to_ui(estimate.five_hour_per_hour, estimate.weekly_per_hour);
+            crate::pause_control::resume::update(state, Some(&raw)).await;
+            {
+                let settings = state.settings.lock().await;
+                state.polling.lock().unwrap_or_else(|p| p.into_inner())
+                    .completed(&settings, Some(&usage), std::time::Instant::now());
+            }
+            state.poll_wake.notify_one();
             state.config_manager.write_status("ok", None);
             crate::notify::process_usage_success(sink, state, &usage).await;
             // The account identity is read from the raw sample, because the UI
@@ -218,6 +236,13 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
         }
         Err(error) => {
             let error = error.to_string();
+            crate::pause_control::resume::update(state, None).await;
+            {
+                let settings = state.settings.lock().await;
+                state.polling.lock().unwrap_or_else(|p| p.into_inner())
+                    .completed(&settings, None, std::time::Instant::now());
+            }
+            state.poll_wake.notify_one();
             state.config_manager.write_status("error", Some(&error));
             process_usage_error(sink, state).await;
             Err(error)
@@ -225,8 +250,10 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
     }
 }
 
-/// Failure preserves cached usage and only changes presentation read status.
+/// Failure preserves cached usage and cancels unsent pause work from an older read.
 pub(crate) async fn process_usage_error<S: TrayPresentationSink>(sink: &S, state: &AppState) {
+    state.auto_pause.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        .invalidate_pending();
     let settings = state.settings.lock().await;
     let mut status = state.tray_read_status.lock().await;
     *status = TrayReadStatus::Error;
@@ -272,12 +299,19 @@ pub async fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsEnv
 pub async fn get_auto_pause_status(
     state: State<'_, Arc<AppState>>,
 ) -> Result<crate::pause_control::AutoPauseStatus, String> {
-    let enabled = state.settings.lock().await.auto_pause_on_low_quota;
-    let controller = state
-        .auto_pause
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    Ok(controller.status(enabled))
+    Ok(crate::pause_control::status::snapshot(state.inner()).await)
+}
+
+#[tauri::command]
+pub async fn cancel_resume_plans(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+    state.resume.lock().await.cancel_all("cancelledByUser");
+    crate::pause_control::resume::update(state.inner(), None).await;
+    crate::pause_control::status::publish(&app, state.inner()).await;
+    let error = state.resume.lock().await.error.clone();
+    match error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 #[tauri::command]
@@ -301,7 +335,8 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "backgroundTransparencyPercent" => value.as_u64().is_some_and(|n| n <= 80 && n % 5 == 0),
             "showCredits" | "autoCheckUpdates" | "autoInstallUpdates" | "fiveHourResetNotification"
             | "weeklyResetNotification" | "autoEdgeHide" | "mousePassthrough" | "showPercentageGrid"
-            | "showFiveHourQuota" | "showBurnRate" | "autoPauseOnLowQuota" => value.is_boolean(),
+            | "showFiveHourQuota" | "showBurnRate" | "autoPauseOnLowQuota"
+            | "autoResumeAfterQuotaReset" => value.is_boolean(),
             "autoStart" => allow_auto_start && value.is_boolean(),
             "autoPauseFiveHourThresholdPercent" => value.as_u64().is_some_and(|n| (1..=15).contains(&n)),
             "autoPauseWeeklyThresholdPercent" => value.as_u64().is_some_and(|n| (1..=10).contains(&n)),
@@ -530,6 +565,15 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     if auto_pause_just_enabled {
         crate::pause_control::probe_bridge_status(state);
     }
+    {
+        let mut polling = state.polling.lock().unwrap_or_else(|p| p.into_inner());
+        polling.recalculate(&envelope.settings, std::time::Instant::now());
+        if changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota"
+            | "autoPauseFiveHourThresholdPercent" | "autoPauseWeeklyThresholdPercent")) {
+            polling.request_now(std::time::Instant::now());
+        }
+    }
+    state.poll_wake.notify_one();
 
     if let Some(app) = sink.app_handle() {
         if auto_edge_hide_changed {
@@ -592,10 +636,16 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         }
     }
 
+    if changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota"
+        | "autoResumeAfterQuotaReset" | "autoPauseFiveHourThresholdPercent"
+        | "autoPauseWeeklyThresholdPercent")) {
+        crate::pause_control::resume::update(state, None).await;
+    }
     crate::tray::repaint_tray(sink, state).await;
 
     if let Some(app) = sink.app_handle() {
         // Update settings window title
+        crate::pause_control::status::publish(app, state).await;
         if let Some(settings_win) = app.get_webview_window("settings") {
             let title = match resolve_locale(&new_settings.language) {
                 "zh-CN" => "设置",
@@ -1366,11 +1416,11 @@ mod auto_pause_tests {
         usage
     }
 
-    /// The scheduled pause request the plan fixes for a 5-hour trigger.
-    const EXPECTED_SCHEDULED_MESSAGE: &str = "\u{6682}\u{505C}\u{FF0C}\u{8BBE}\u{7F6E}\u{4E00}\u{6B21}\u{6027}\u{5B9A}\u{65F6}\u{4EFB}\u{52A1}\u{FF0C}\u{5728}1h 0min +2min\u{540E}\u{53D1}\u{9001}\u{2018}\u{7EE7}\u{7EED}\u{2019}\u{4E24}\u{4E2A}\u{5B57}";
+    /// Cooperative delivery must never ask for an external continuation timer.
+    const EXPECTED_PAUSE_MESSAGE: &str = "\u{6682}\u{505C}";
 
     #[tokio::test]
-    async fn a_successful_refresh_reaches_the_bridge_with_the_scheduled_pause() {
+    async fn a_successful_refresh_requests_pause_without_an_external_resume_timer() {
         let (state, transport, dir) = armed_state("wiring-success").await;
         let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
 
@@ -1399,7 +1449,7 @@ mod auto_pause_tests {
             .expect("the pause request must be sent");
         assert_eq!(sent.arguments["threadId"], "session-1");
         assert_eq!(sent.arguments["hostId"], "host-1");
-        assert_eq!(sent.arguments["prompt"], EXPECTED_SCHEDULED_MESSAGE);
+        assert_eq!(sent.arguments["prompt"], EXPECTED_PAUSE_MESSAGE);
 
         // A confirmed delivery is reported, not guessed.
         let status = state
@@ -1569,13 +1619,9 @@ mod auto_pause_tests {
             "a new reset cycle must be announced again"
         );
 
-        // The second message belongs to the new cycle, so it names the new
-        // reset time rather than the finished one.
+        // Cycle identity belongs to the ledger; both requests are pause-only.
         let prompts = transport.sent_prompts();
-        assert_ne!(
-            prompts[0], prompts[1],
-            "the two cycles must not share one message"
-        );
+        assert_eq!(prompts, vec![crate::pause_control::PAUSE_MESSAGE; 2]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2209,6 +2255,145 @@ mod auto_pause_tests {
         assert!(transport.sent_prompts().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn wait_for_pause_worker(state: &Arc<AppState>) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while state.auto_pause.lock().unwrap().running_flag() {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the pause worker must finish");
+    }
+
+    #[tokio::test]
+    async fn ineligible_updates_cancel_a_low_quota_batch_waiting_for_the_bridge() {
+        for change in ["recovered", "missing-account", "failed-read", "disabled", "threshold"] {
+            let (state, transport, dir) = armed_state(&format!("cancel-{change}")).await;
+            let gate = transport.hold_handshakes();
+            let low = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+            refresh_usage(&low, &state).await.unwrap();
+            wait_for_handshakes(&transport, 1).await;
+            assert_eq!(transport.calls().len(), 1, "the handshake must be waiting");
+
+            match change {
+                "recovered" => {
+                    refresh_usage(&OfflineSink::with_usage(comfortable_quota_usage(Some("acct-1"))), &state)
+                        .await.unwrap();
+                }
+                "missing-account" => {
+                    refresh_usage(&OfflineSink::with_usage(low_quota_usage(None)), &state)
+                        .await.unwrap();
+                }
+                "failed-read" => {
+                    assert!(refresh_usage(&OfflineSink::failing("offline"), &state).await.is_err());
+                }
+                "disabled" => {
+                    apply_settings_patch(&low, &state,
+                        serde_json::json!({ "autoPauseOnLowQuota": false }), false).await.unwrap();
+                }
+                "threshold" => {
+                    apply_settings_patch(&low, &state,
+                        serde_json::json!({ "autoPauseFiveHourThresholdPercent": 1 }), false).await.unwrap();
+                }
+                _ => unreachable!(),
+            }
+            gate.notify_one();
+            wait_for_pause_worker(&state).await;
+            assert!(transport.sent_prompts().is_empty(), "stale pause sent after {change}");
+            assert_eq!(state.auto_pause.lock().unwrap().pending_len(), 0);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_removes_an_unsent_queued_pause_before_the_worker_starts() {
+        let (state, transport, dir) = armed_state("cancel-queued").await;
+        state.auto_pause.lock().unwrap().set_worker_spawner(Arc::new(|_| {}));
+        refresh_usage(&OfflineSink::with_usage(low_quota_usage(Some("acct-1"))), &state)
+            .await.unwrap();
+        refresh_usage(&OfflineSink::with_usage(comfortable_quota_usage(Some("acct-1"))), &state)
+            .await.unwrap();
+        crate::pause_control::run_delivery_worker(state.clone()).await;
+        assert!(transport.sent_prompts().is_empty());
+        assert_eq!(state.auto_pause.lock().unwrap().sent_len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn disabling_during_one_send_prevents_sends_to_the_remaining_threads() {
+        let (state, transport, dir) = armed_state("cancel-remaining").await;
+        transport.set_list_threads(crate::pause_control::ToolCallOutcome {
+            success: true,
+            text: Some(serde_json::json!({ "threads": [
+                { "id": "session-1", "kind": "codex", "status": "active" },
+                { "id": "session-2", "kind": "codex", "status": "active" }
+            ] }).to_string()),
+        });
+        let gate = transport.hold_sends();
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+        refresh_usage(&sink, &state).await.unwrap();
+        wait_for_prompts(&transport, 1).await;
+        apply_settings_patch(&sink, &state,
+            serde_json::json!({ "autoPauseOnLowQuota": false }), false).await.unwrap();
+        gate.notify_one();
+        wait_for_pause_worker(&state).await;
+        assert_eq!(transport.sent_prompts().len(), 1, "only the already submitted request can complete");
+        assert_eq!(state.auto_pause.lock().unwrap().sent_len(), 0,
+            "an obsolete confirmation must not restore invalidated ledger entries");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_new_low_sample_preserves_an_already_submitted_send_confirmation() {
+        let (state, transport, dir) = armed_state("confirm-newer-low").await;
+        let gate = transport.hold_sends();
+        refresh_usage(&OfflineSink::with_usage(low_quota_usage(Some("acct-1"))), &state)
+            .await.unwrap();
+        wait_for_prompts(&transport, 1).await;
+        let next = quota_usage_at(Some("acct-1"), FETCHED_AT + 1, FETCHED_AT + 3_600);
+        refresh_usage(&OfflineSink::with_usage(next), &state).await.unwrap();
+        gate.notify_one();
+        wait_for_pause_worker(&state).await;
+        assert_eq!(transport.sent_prompts().len(), 1, "the accepted send must still de-duplicate");
+        assert_eq!(state.auto_pause.lock().unwrap().sent_len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_slow_target_does_not_starve_later_chats_after_a_deadline() {
+        let (state, transport, dir) = armed_state("fair-batches").await;
+        transport.set_list_threads(crate::pause_control::ToolCallOutcome {
+            success: true,
+            text: Some(serde_json::json!({ "threads": [
+                { "id": "session-1", "kind": "codex", "status": "active" },
+                { "id": "session-2", "kind": "codex", "status": "active" }
+            ] }).to_string()),
+        });
+        transport.set_send_delay_ms(1000);
+        state.auto_pause.lock().unwrap().set_delivery_deadline(Duration::from_millis(50));
+        refresh_usage(&OfflineSink::with_usage(low_quota_usage(Some("acct-1"))), &state).await.unwrap();
+        wait_for_pause_worker(&state).await;
+        transport.set_send_delay_ms(0);
+        refresh_usage(&OfflineSink::with_usage(low_quota_usage(Some("acct-1"))), &state).await.unwrap();
+        wait_for_pause_worker(&state).await;
+        let sends: Vec<_> = transport.calls().into_iter()
+            .filter(|call| call.tool_name == "send_message_to_thread").collect();
+        assert_eq!(sends[0].arguments["threadId"], "session-1");
+        assert_eq!(sends[1].arguments["threadId"], "session-2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resume_preference_is_explicit_and_validated() {
+        let mut settings = OverlaySettings::default();
+        assert!(!settings.auto_resume_after_quota_reset);
+        let patch = serde_json::json!({ "autoResumeAfterQuotaReset": true });
+        validate_settings_patch(&patch, false).unwrap();
+        merge_settings_patch(&mut settings, &patch).unwrap();
+        assert!(settings.auto_resume_after_quota_reset);
+        assert!(validate_settings_patch(&serde_json::json!({ "autoResumeAfterQuotaReset": "true" }), false).is_err());
+        let legacy: OverlaySettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!legacy.auto_resume_after_quota_reset);
     }
 }
 

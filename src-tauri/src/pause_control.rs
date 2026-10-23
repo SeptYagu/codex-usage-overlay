@@ -37,13 +37,14 @@ use crate::codex::CodexUsage;
 use crate::commands::AppState;
 use crate::config::OverlaySettings;
 
+pub mod status;
+pub mod resume;
+pub use status::AutoPauseStatus;
+
 /// The fixed pause request. The production path never assembles a prompt from
 /// user input, settings or a translation resource.
 pub const PAUSE_MESSAGE: &str = "\u{6682}\u{505C}";
 
-/// The message that asks Codex to schedule a one-time follow-up. It is only
-/// used when the 5-hour window triggered and its reset time is usable.
-const SCHEDULED_PAUSE_MESSAGE: &str = "\u{6682}\u{505C}\u{FF0C}\u{8BBE}\u{7F6E}\u{4E00}\u{6B21}\u{6027}\u{5B9A}\u{65F6}\u{4EFB}\u{52A1}\u{FF0C}\u{5728}";
 
 /// The current Codex desktop client bridge family.
 pub const APP_TOOLS_PIPE_PREFIX: &str = "codex-app-tools-";
@@ -83,13 +84,6 @@ const MAX_COLLECTION_ENTRIES: usize = 512;
 const MAX_SESSION_SCAN_DEPTH: usize = 4;
 /// How many recent session files are inspected for a caller thread identity.
 const MAX_SESSION_FILES: usize = 32;
-/// A sanity bound for the 5-hour reset distance.
-///
-/// The 5-hour window resets within five hours of the moment it started, so a
-/// reset further away than six hours does not belong to that window. Such a
-/// value never produces a scheduled message.
-const MAX_PLAUSIBLE_RESET_DISTANCE_SECS: i64 = 6 * 60 * 60;
-
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// The quota window a pause request belongs to.
@@ -137,59 +131,9 @@ pub fn triggered_quotas(settings: &OverlaySettings, usage: &CodexUsage) -> Vec<T
     triggers
 }
 
-/// Builds the fixed pause message for the triggered windows.
-///
-/// The matrix is:
-///
-/// | Triggered | Message |
-/// | --- | --- |
-/// | 5-hour only, reset time usable | the scheduled pause request |
-/// | 5-hour only, reset time missing, expired or unusable | `暂停` |
-/// | Weekly only | `暂停` |
-/// | both | `暂停`, Weekly wins |
-///
-/// `observed_at` is the `fetchedAt` of the sample that triggered the request,
-/// so the remaining time is computed from the same fresh snapshot rather than
-/// from a slightly later wall clock.
-pub fn pause_message(triggers: &[Trigger], observed_at: i64) -> String {
-    let weekly = triggers
-        .iter()
-        .any(|trigger| trigger.quota == QuotaKind::Weekly);
-    if weekly {
-        return PAUSE_MESSAGE.to_string();
-    }
-
-    let Some(five_hour) = triggers
-        .iter()
-        .find(|trigger| trigger.quota == QuotaKind::FiveHour)
-    else {
-        return PAUSE_MESSAGE.to_string();
-    };
-
-    let Some(resets_at) = five_hour.resets_at else {
-        return PAUSE_MESSAGE.to_string();
-    };
-    // A missing or unusable observation time cannot produce a reliable
-    // remaining duration, so the request falls back to the plain pause.
-    if observed_at <= 0 {
-        return PAUSE_MESSAGE.to_string();
-    }
-    // A malformed reset time must not overflow into a plausible looking
-    // duration.
-    let Some(distance) = resets_at.checked_sub(observed_at) else {
-        return PAUSE_MESSAGE.to_string();
-    };
-    if distance <= 0 || distance > MAX_PLAUSIBLE_RESET_DISTANCE_SECS {
-        return PAUSE_MESSAGE.to_string();
-    }
-
-    // Round a partial minute up so the scheduled task never fires early.
-    let total_minutes = (distance + 59) / 60;
-    let hours = total_minutes / 60;
-    let minutes = total_minutes % 60;
-    format!(
-        "{SCHEDULED_PAUSE_MESSAGE}{hours}h {minutes}min +2min\u{540E}\u{53D1}\u{9001}\u{2018}\u{7EE7}\u{7EED}\u{2019}\u{4E24}\u{4E2A}\u{5B57}"
-    )
+/// The overlay owns resume scheduling; a cooperative message only asks to pause.
+pub fn pause_message(_triggers: &[Trigger], _observed_at: i64) -> String {
+    PAUSE_MESSAGE.to_string()
 }
 
 /// A Codex session that may receive a pause request.
@@ -249,16 +193,14 @@ fn collect_active_threads(
 /// Only `kind == "codex"` and `status == "active"` records with a non-empty id
 /// survive, and the `pinnedThreads` and `threads` groups are merged and
 /// de-duplicated by `(hostId, id)`.
-pub fn parse_active_threads(text: &str) -> Vec<ActiveThread> {
+pub fn parse_active_threads(text: &str) -> Result<Vec<ActiveThread>, BridgeError> {
     // A client that wraps the payload in one more JSON string would otherwise
     // empty the target list without any visible error.
     let value = match serde_json::from_str::<Value>(text) {
-        Ok(Value::String(inner)) => match serde_json::from_str::<Value>(&inner) {
-            Ok(value) => value,
-            Err(_) => return Vec::new(),
-        },
+        Ok(Value::String(inner)) => serde_json::from_str::<Value>(&inner)
+            .map_err(|_| BridgeError::Protocol("invalid thread listing JSON".into()))?,
         Ok(value) => value,
-        Err(_) => return Vec::new(),
+        Err(_) => return Err(BridgeError::Protocol("invalid thread listing JSON".into())),
     };
 
     let mut threads = Vec::new();
@@ -266,15 +208,22 @@ pub fn parse_active_threads(text: &str) -> Vec<ActiveThread> {
     match &value {
         Value::Array(items) => collect_active_threads(items, &mut threads, &mut seen),
         Value::Object(_) => {
+            let mut has_group = false;
             for key in ["pinnedThreads", "threads"] {
-                if let Some(Value::Array(items)) = value.get(key) {
+                if let Some(items) = value.get(key) {
+                    let items = items.as_array().ok_or_else(||
+                        BridgeError::Protocol(format!("invalid thread listing group: {key}")))?;
+                    has_group = true;
                     collect_active_threads(items, &mut threads, &mut seen);
                 }
             }
+            if !has_group {
+                return Err(BridgeError::Protocol("thread listing carries no thread groups".into()));
+            }
         }
-        _ => {}
+        _ => return Err(BridgeError::Protocol("invalid thread listing shape".into())),
     }
-    threads
+    Ok(threads)
 }
 
 /// Strictly checks the 8-4-4-4-12 UUID shape used by the local Codex thread
@@ -543,6 +492,7 @@ pub enum BridgeError {
 /// offline tests substitute a scripted bridge. The trait is object safe so the
 /// controller can hold it and an offline test can replace it.
 pub trait BridgeTransport: Send + Sync {
+    fn capabilities(&self) -> status::ControlCapabilities { status::ControlCapabilities::default() }
     fn call_tool<'a>(
         &'a self,
         pipe: &'a str,
@@ -584,6 +534,9 @@ pub struct UnsupportedTransport;
 
 #[cfg(not(windows))]
 impl BridgeTransport for UnsupportedTransport {
+    fn capabilities(&self) -> status::ControlCapabilities {
+        status::ControlCapabilities { cooperative_delivery: false, ..Default::default() }
+    }
     fn call_tool<'a>(
         &'a self,
         _pipe: &'a str,
@@ -808,7 +761,7 @@ async fn handshake(
             "the list_threads result carries no content".into(),
         ));
     };
-    let threads = parse_active_threads(&text);
+    let threads = parse_active_threads(&text)?;
     if threads.is_empty() {
         return Ok(Handshake::NoActiveSession);
     }
@@ -882,6 +835,7 @@ struct DeliveryKey {
 struct ThreadPeriod {
     /// The identity used in the delivery key.
     period_id: String,
+    host_id: Option<String>,
 }
 
 /// The snapshot a delivery worker consumes.
@@ -890,6 +844,8 @@ pub struct PendingSample {
     pub settings: OverlaySettings,
     pub usage: CodexUsage,
     pub account_id: String,
+    generation: u64,
+    received_at: std::time::Instant,
 }
 
 /// How the candidate list is produced.
@@ -930,18 +886,6 @@ pub enum BridgeConnection {
 }
 
 /// The auto-pause status the settings window reads.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AutoPauseStatus {
-    /// Whether the feature is switched on.
-    pub enabled: bool,
-    /// Whether a bridge candidate is reachable.
-    pub connection: BridgeConnection,
-    /// How many pause requests the bridge positively confirmed.
-    pub confirmed_count: u64,
-    /// When the last positive confirmation happened, in unix seconds.
-    pub last_confirmed_at: Option<i64>,
-}
 
 /// Starts a delivery worker. The production implementation uses the Tauri
 /// runtime; the offline tests replace it so the worker runs on the test
@@ -955,6 +899,8 @@ type WorkerSpawner = Arc<dyn Fn(Arc<AppState>) + Send + Sync>;
 /// wait on I/O, so the delivery worker can take a snapshot and release it
 /// before touching a pipe.
 pub struct AutoPauseController {
+    telemetry: status::Telemetry,
+    delivery_cursor: usize,
     /// The confirmed deliveries.
     sent: Vec<DeliveryKey>,
     /// The reserved but not yet confirmed deliveries.
@@ -963,6 +909,8 @@ pub struct AutoPauseController {
     running: bool,
     /// The newest sample waiting for the running worker.
     queued: Option<PendingSample>,
+    /// Invalidates work when a newer sample or a settings change supersedes it.
+    generation: u64,
     /// The active period of every currently listed session.
     periods: HashMap<String, ThreadPeriod>,
     /// The counter that mints synthetic period identities.
@@ -997,10 +945,13 @@ impl AutoPauseController {
     /// Builds a controller with the production transport.
     pub fn new() -> Self {
         Self {
+            telemetry: status::Telemetry::default(),
+            delivery_cursor: 0,
             sent: Vec::new(),
             pending: Vec::new(),
             running: false,
             queued: None,
+            generation: 0,
             periods: HashMap::new(),
             period_counter: 0,
             current_account: None,
@@ -1025,12 +976,7 @@ impl AutoPauseController {
 
     /// The status the settings window shows.
     pub fn status(&self, enabled: bool) -> AutoPauseStatus {
-        AutoPauseStatus {
-            enabled,
-            connection: self.connection,
-            confirmed_count: self.confirmed_count,
-            last_confirmed_at: self.last_confirmed_at,
-        }
+        AutoPauseStatus::from_controller(self, enabled)
     }
 
     /// The bridge transport, for the offline tests.
@@ -1100,6 +1046,7 @@ impl AutoPauseController {
     /// clears the active period bookkeeping.
     fn prune(&mut self, account: &str, observed_at: i64) {
         if self.current_account.as_deref() != Some(account) {
+            self.telemetry.targets.clear();
             self.sent.clear();
             self.pending.clear();
             self.periods.clear();
@@ -1121,6 +1068,13 @@ impl AutoPauseController {
     /// entries: they belong to the periods that really happened.
     fn clear_active_periods(&mut self) {
         self.periods.clear();
+        self.invalidate_pending();
+    }
+
+    /// Cancels unsent work while preserving confirmed delivery history.
+    pub(crate) fn invalidate_pending(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.queued = None;
     }
 
     /// Refreshes the active periods from a fresh listing.
@@ -1131,17 +1085,17 @@ impl AutoPauseController {
         let active: HashSet<&str> = threads.iter().map(|thread| thread.id.as_str()).collect();
         self.periods.retain(|id, _| active.contains(id.as_str()));
 
-        for thread in threads {
-            if !self.periods.contains_key(&thread.id) {
+        for thread in session_targets(threads) {
+            if self.periods.get(&thread.id).is_none_or(|period| period.host_id != thread.host_id) {
                 let period_id = self.next_period_id(thread);
-                self.periods.insert(thread.id.clone(), ThreadPeriod { period_id });
+                self.periods.insert(thread.id.clone(), ThreadPeriod { period_id, host_id: thread.host_id.clone() });
             } else if let Some(turn) = thread
                 .turn_id
                 .as_deref()
                 .map(str::trim)
                 .filter(|turn| !turn.is_empty())
             {
-                let period_id = format!("{}#t{}", thread.id, turn);
+                let period_id = format!("{}#t{}", period_stem(thread), turn);
                 if let Some(period) = self.periods.get_mut(&thread.id) {
                     period.period_id = period_id;
                 }
@@ -1163,10 +1117,10 @@ impl AutoPauseController {
             .map(str::trim)
             .filter(|turn| !turn.is_empty())
         {
-            Some(turn) => format!("{}#t{}", thread.id, turn),
+            Some(turn) => format!("{}#t{}", period_stem(thread), turn),
             None => {
                 self.period_counter += 1;
-                format!("{}#p{}", thread.id, self.period_counter)
+                format!("{}#p{}", period_stem(thread), self.period_counter)
             }
         }
     }
@@ -1294,6 +1248,17 @@ pub fn schedule(
     usage: CodexUsage,
     account_id: Option<String>,
 ) {
+    // Every new observation supersedes earlier work, including observations
+    // that no longer qualify for delivery or no longer identify the account.
+    let generation = {
+        let mut controller = lock_controller(state);
+        controller.telemetry.account_known = account_id.as_ref().is_some_and(|id| !id.trim().is_empty());
+        if controller.current_account.as_deref() != account_id.as_deref().map(str::trim) {
+            controller.telemetry.targets.clear();
+        }
+        controller.invalidate_pending();
+        controller.generation
+    };
     // A sample without a usable account identity must not trigger a delivery:
     // the de-duplication key would be built from an ambiguous placeholder.
     let Some(account_id) = account_id
@@ -1323,10 +1288,15 @@ pub fn schedule(
         settings,
         usage,
         account_id,
+        generation,
+        received_at: std::time::Instant::now(),
     };
 
     let spawner = {
         let mut controller = lock_controller(state);
+        if controller.generation != generation {
+            return;
+        }
         controller.prune(&sample.account_id, sample.usage.fetched_at);
         // Only the newest snapshot is kept, so a fast refresh cannot pile up
         // stale messages.
@@ -1354,19 +1324,21 @@ pub fn clear_active_periods(state: &Arc<AppState>) {
     lock_controller(state).clear_active_periods();
 }
 
-/// Probes the bridge when the connection status is still unknown.
+/// Rechecks bridge health with bounded retries while protection is enabled.
 ///
 /// The probe is read-only: it performs the `list_threads` handshake and never
 /// sends a message to a session, so it is safe to run while the quota is
 /// comfortable. It runs in the background, because a pipe call may block.
 pub fn probe_bridge_status(state: &Arc<AppState>) {
     let spawner = {
-        let controller = lock_controller(state);
-        // A known status is not replaced by a probe, and a delivery in flight
-        // already reports the bridge state.
-        if controller.connection != BridgeConnection::Unknown || controller.running {
+        let mut controller = lock_controller(state);
+        // Coalesce discovery with a probe or delivery already in flight.
+        let interval = 30i64.saturating_mul(1i64 << controller.telemetry.probe_failures.min(4)).min(300);
+        if controller.running || controller.telemetry.probe_running
+            || controller.telemetry.last_probe_at.is_some_and(|at| unix_now().saturating_sub(at) < interval) {
             return;
         }
+        controller.telemetry.probe_running = true;
         controller.spawn_probe.clone()
     };
     spawner(state.clone());
@@ -1378,6 +1350,18 @@ pub fn probe_bridge_status(state: &Arc<AppState>) {
 /// that the bridge is reachable, and a candidate that reported targets also
 /// refreshes the active periods.
 pub(crate) async fn probe_bridge(state: &Arc<AppState>) {
+    let result = tokio::time::timeout(DELIVERY_DEADLINE, probe_bridge_inner(state)).await;
+    let mut controller = lock_controller(state);
+    controller.telemetry.probe_running = false;
+    controller.telemetry.last_probe_at = Some(unix_now());
+    if result.is_err() { controller.connection = BridgeConnection::Unavailable; }
+    if controller.connection == BridgeConnection::Unavailable {
+        controller.telemetry.probe_failures = controller.telemetry.probe_failures.saturating_add(1);
+    } else { controller.telemetry.probe_failures = 0; }
+}
+
+async fn probe_bridge_inner(state: &Arc<AppState>) {
+    let generation = lock_controller(state).generation;
     let (transport, override_discovery) = {
         let controller = lock_controller(state);
         (
@@ -1412,9 +1396,9 @@ pub(crate) async fn probe_bridge(state: &Arc<AppState>) {
     } else {
         BridgeConnection::Unavailable
     };
-    if let Some(threads) = threads {
+    if controller.generation == generation { if let Some(threads) = threads {
         controller.refresh_periods(&threads);
-    }
+    } }
 }
 
 /// Consumes the queued samples until the queue is empty.
@@ -1442,12 +1426,32 @@ pub(crate) async fn run_delivery_worker(state: Arc<AppState>) {
     }
 }
 
+async fn delivery_is_current(state: &Arc<AppState>, sample: &PendingSample) -> bool {
+    if sample.received_at.elapsed() > Duration::from_secs(30) { return false; }
+    let settings = state.settings.lock().await;
+    if !settings.auto_pause_on_low_quota
+        || settings.auto_pause_five_hour_threshold_percent
+            != sample.settings.auto_pause_five_hour_threshold_percent
+        || settings.auto_pause_weekly_threshold_percent
+            != sample.settings.auto_pause_weekly_threshold_percent
+    {
+        return false;
+    }
+    let controller = lock_controller(state);
+    controller.generation == sample.generation
+        && controller.current_account.as_deref() == Some(sample.account_id.as_str())
+}
+
 /// Delivers one batch: discover, handshake, reserve and send.
 async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
+    if !delivery_is_current(state, sample).await {
+        return;
+    }
     let triggers = triggered_quotas(&sample.settings, &sample.usage);
     if triggers.is_empty() {
         return;
     }
+    // Continuation scheduling belongs to the gated resume manager.
     let prompt = pause_message(&triggers, sample.usage.fetched_at);
 
     // The transport and the discovery override are read under the lock, but
@@ -1482,6 +1486,9 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
     // read-only call against a pipe that is already known to be idle.
     let mut exhausted_pipes: HashSet<String> = HashSet::new();
     for candidate in candidates {
+        if !delivery_is_current(state, sample).await {
+            return;
+        }
         if exhausted_pipes.contains(&candidate.pipe.to_ascii_lowercase()) {
             continue;
         }
@@ -1502,6 +1509,9 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
         }
     }
 
+    if !delivery_is_current(state, sample).await {
+        return;
+    }
     let Some((candidate, threads)) = reported else {
         // No candidate reported a target. When a candidate answered, the
         // observation is that nothing is active, so every active period ends
@@ -1509,6 +1519,7 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
         // observation a returning session would keep its old period identity
         // and could never be prompted again in the same quota cycle.
         let mut controller = lock_controller(state);
+        controller.telemetry.last_probe_at = Some(unix_now());
         controller.connection = if answered {
             BridgeConnection::Available
         } else {
@@ -1523,9 +1534,20 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
     {
         let mut controller = lock_controller(state);
         controller.connection = BridgeConnection::Available;
+        controller.telemetry.last_probe_at = Some(unix_now());
         controller.refresh_periods(&threads);
     }
-    for thread in session_targets(&threads) {
+    let targets = session_targets(&threads);
+    let start = lock_controller(state).delivery_cursor % targets.len();
+    for offset in 0..targets.len() {
+        let index = (start + offset) % targets.len();
+        let thread = targets[index];
+        lock_controller(state).delivery_cursor = (index + 1) % targets.len();
+        // Recheck after every await: a disabled switch, recovered quota or
+        // account switch must prevent any further requests from this batch.
+        if !delivery_is_current(state, sample).await {
+            return;
+        }
         let period_id = { lock_controller(state).period_id(&thread.id) };
         let Some(period_id) = period_id else {
             continue;
@@ -1540,17 +1562,44 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
         // The guard releases the reservation on every failure path,
         // including a cancelled batch, so a timeout never blocks a retry.
         let mut guard = ReservationGuard::new(state.clone(), keys.clone());
+        lock_controller(state).telemetry.record(thread, &period_id, "requested", None);
         let confirmed = send_pause(transport.as_ref(), &candidate, thread, &prompt)
             .await
             .unwrap_or(false);
         if confirmed {
             let mut controller = lock_controller(state);
-            controller.confirm(&keys);
+            // A newer low sample may arrive while an already submitted send
+            // completes. Carry that confirmation forward only for the same
+            // account, active period and still-triggered quota cycle.
+            let carries_forward = controller.queued.as_ref().is_some_and(|next| {
+                next.account_id == sample.account_id && keys.iter().all(|key| {
+                    controller.periods.values().any(|period| period.period_id == key.thread_id)
+                        && triggered_quotas(&next.settings, &next.usage).iter().any(|trigger| {
+                            trigger.quota == key.quota && trigger.resets_at == key.resets_at
+                        })
+                })
+            });
+            if controller.generation == sample.generation || carries_forward {
+                controller.confirm(&keys);
+                guard.mark_confirmed();
+            }
             controller.confirmed_count += 1;
             controller.last_confirmed_at = Some(unix_now());
+            if controller.generation == sample.generation || carries_forward {
+                controller.telemetry.record(thread, &period_id, "accepted", Some("stoppingUnconfirmed"));
+            }
             drop(controller);
-            guard.mark_confirmed();
+        } else if lock_controller(state).generation == sample.generation {
+            lock_controller(state).telemetry.record(thread, &period_id, "failed", Some("deliveryFailed"));
         }
+    }
+}
+
+/// Binds active-period identities to the host that currently owns the chat.
+fn period_stem(thread: &ActiveThread) -> String {
+    match &thread.host_id {
+        Some(host) => format!("{}@{}", thread.id, host),
+        None => thread.id.clone(),
     }
 }
 
@@ -1632,6 +1681,8 @@ pub(crate) mod testing {
         send_success: bool,
         send_error: Option<String>,
         send_delay_ms: u64,
+        handshake_gate: Option<Arc<tokio::sync::Notify>>,
+        send_gate: Option<Arc<tokio::sync::Notify>>,
     }
 
     impl ScriptedTransport {
@@ -1682,6 +1733,19 @@ pub(crate) mod testing {
             self.inner.lock().unwrap().send_delay_ms = delay_ms;
         }
 
+        /// Holds a handshake at an await boundary for cancellation tests.
+        pub(crate) fn hold_handshakes(&self) -> Arc<tokio::sync::Notify> {
+            let gate = Arc::new(tokio::sync::Notify::new());
+            self.inner.lock().unwrap().handshake_gate = Some(gate.clone());
+            gate
+        }
+
+        pub(crate) fn hold_sends(&self) -> Arc<tokio::sync::Notify> {
+            let gate = Arc::new(tokio::sync::Notify::new());
+            self.inner.lock().unwrap().send_gate = Some(gate.clone());
+            gate
+        }
+
         /// Every recorded call.
         pub(crate) fn calls(&self) -> Vec<RecordedCall> {
             self.inner.lock().unwrap().calls.clone()
@@ -1714,7 +1778,7 @@ pub(crate) mod testing {
             arguments: Value,
         ) -> Pin<Box<dyn Future<Output = Result<ToolCallOutcome, BridgeError>> + Send + 'a>> {
             Box::pin(async move {
-                let (list_threads, send_success, send_error, send_delay_ms) = {
+                let (list_threads, send_success, send_error, send_delay_ms, handshake_gate, send_gate) = {
                     let mut state = self.inner.lock().unwrap();
                     state.calls.push(RecordedCall {
                         pipe: pipe.to_owned(),
@@ -1727,15 +1791,23 @@ pub(crate) mod testing {
                         state.send_success,
                         state.send_error.clone(),
                         state.send_delay_ms,
+                        state.handshake_gate.clone(),
+                        state.send_gate.clone(),
                     )
                 };
                 if tool_name == "list_threads" {
+                    if let Some(gate) = handshake_gate {
+                        gate.notified().await;
+                    }
                     return match list_threads {
                         Some(outcome) => Ok(outcome),
                         None => Err(BridgeError::Protocol(
                             "the list_threads call was not confirmed".into(),
                         )),
                     };
+                }
+                if let Some(gate) = send_gate {
+                    gate.notified().await;
                 }
                 if send_delay_ms > 0 {
                     // The send hangs, so the batch deadline has to cut it off.
@@ -1822,27 +1894,22 @@ mod tests {
     }
 
     #[test]
-    fn the_five_hour_message_schedules_a_one_time_task() {
+    fn a_five_hour_pause_does_not_delegate_unverified_resume_scheduling() {
         let triggers = vec![Trigger {
             quota: QuotaKind::FiveHour,
             resets_at: Some(1_000 + 3_600 + 120),
         }];
         let message = pause_message(&triggers, 1_000);
-        // 3720 seconds is exactly 62 minutes, so the remaining time reads
-        // "1h 2min".
-        assert_eq!(
-            message,
-            "\u{6682}\u{505C}\u{FF0C}\u{8BBE}\u{7F6E}\u{4E00}\u{6B21}\u{6027}\u{5B9A}\u{65F6}\u{4EFB}\u{52A1}\u{FF0C}\u{5728}1h 2min +2min\u{540E}\u{53D1}\u{9001}\u{2018}\u{7EE7}\u{7EED}\u{2019}\u{4E24}\u{4E2A}\u{5B57}"
-        );
+        assert_eq!(message, PAUSE_MESSAGE);
     }
 
     #[test]
-    fn a_partial_minute_rounds_up() {
+    fn a_partial_minute_reset_still_requests_pause_only() {
         let triggers = vec![Trigger {
             quota: QuotaKind::FiveHour,
             resets_at: Some(1_000 + 61),
         }];
-        assert!(pause_message(&triggers, 1_000).contains("0h 2min"));
+        assert_eq!(pause_message(&triggers, 1_000), PAUSE_MESSAGE);
     }
 
     #[test]
@@ -1906,7 +1973,7 @@ mod tests {
         })
         .to_string();
 
-        let threads = parse_active_threads(&payload);
+        let threads = parse_active_threads(&payload).unwrap();
         assert_eq!(threads.len(), 2);
         assert_eq!(threads[0].id, "a");
         assert_eq!(threads[0].host_id.as_deref(), Some("h"));
@@ -1915,9 +1982,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unparseable_payload_yields_no_target() {
-        assert!(parse_active_threads("not json").is_empty());
-        assert!(parse_active_threads("{}").is_empty());
+    fn an_unparseable_payload_is_not_an_idle_observation() {
+        assert!(parse_active_threads("not json").is_err());
+        assert!(parse_active_threads("{}").is_err());
     }
 
     /// The shape the live Codex client returns, observed through a read-only
@@ -1956,7 +2023,7 @@ mod tests {
         })
         .to_string();
 
-        let threads = parse_active_threads(&payload);
+        let threads = parse_active_threads(&payload).unwrap();
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id, "0199b0d2-4444-7000-8000-000000000004");
         assert_eq!(threads[0].host_id.as_deref(), Some("local"));
@@ -1964,7 +2031,21 @@ mod tests {
         // A client that adds one more layer of JSON encoding must not empty
         // the target list.
         let wrapped = serde_json::to_string(&Value::String(payload)).unwrap();
-        assert_eq!(parse_active_threads(&wrapped).len(), 1);
+        assert_eq!(parse_active_threads(&wrapped).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn malformed_listings_fail_the_handshake_while_real_empty_lists_are_idle() {
+        let transport = testing::ScriptedTransport::new();
+        let candidate = BridgeCandidate { pipe: "test".into(), caller_thread_id: "caller".into() };
+        for text in ["not json", "{}", "null", "{\"threads\":null}", "{\"threads\":\"bad\"}"] {
+            transport.set_list_threads(ToolCallOutcome { success: true, text: Some(text.into()) });
+            assert!(matches!(handshake(&transport, &candidate).await, Err(BridgeError::Protocol(_))));
+        }
+        for text in ["[]", "{\"threads\":[]}", "{\"pinnedThreads\":[],\"threads\":[]}"] {
+            transport.set_list_threads(ToolCallOutcome { success: true, text: Some(text.into()) });
+            assert!(matches!(handshake(&transport, &candidate).await, Ok(Handshake::NoActiveSession)));
+        }
     }
 
     #[test]
@@ -2238,6 +2319,17 @@ mod tests {
             controller.period_id("session-1").as_deref(),
             Some("session-1#tturn-9")
         );
+    }
+
+    #[test]
+    fn an_owner_change_creates_a_distinct_period_even_with_the_same_turn_id() {
+        let mut controller = AutoPauseController::new();
+        let mut thread = ActiveThread { id: "session-1".into(), host_id: Some("host-a".into()), turn_id: Some("turn-9".into()) };
+        controller.refresh_periods(std::slice::from_ref(&thread));
+        let first = controller.period_id(&thread.id).unwrap();
+        thread.host_id = Some("host-b".into());
+        controller.refresh_periods(std::slice::from_ref(&thread));
+        assert_ne!(controller.period_id(&thread.id).unwrap(), first);
     }
 
     #[test]

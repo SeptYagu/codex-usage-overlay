@@ -84,6 +84,9 @@ jobs:
           } else {
             $previewArgs = @()
             if ($releaseTag -match '-') { $previewArgs = @('--prerelease', '--latest=false') }
-            gh release create $releaseTag @assets --verify-tag --generate-notes --title $releaseTag @previewArgs
+            $notesArgs = @('--generate-notes')
+            $notesPath = Join-Path $env:GITHUB_WORKSPACE "docs/releases/$releaseTag.md"
+            if (Test-Path -LiteralPath $notesPath) { $notesArgs = @('--notes-file', $notesPath) }
+            gh release create $releaseTag @assets --verify-tag @notesArgs --title $releaseTag @previewArgs
           }
           if ($LASTEXITCODE -ne 0) { throw 'GitHub Release publication failed.' }

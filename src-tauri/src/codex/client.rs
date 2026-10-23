@@ -5,13 +5,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Lines};
+use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
 use super::finder::find_codex_executable;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -49,7 +50,11 @@ pub struct CodexUsage {
 }
 
 impl RawCodexUsage {
-    pub fn to_ui(&self, five_hour_burn_rate_per_hour: Option<f64>, week_burn_rate_per_hour: Option<f64>) -> CodexUsage {
+    pub fn to_ui(
+        &self,
+        five_hour_burn_rate_per_hour: Option<f64>,
+        week_burn_rate_per_hour: Option<f64>,
+    ) -> CodexUsage {
         CodexUsage {
             five_hour_remaining_percent: remaining_percent(self.five_hour.used_percent),
             five_hour_burn_rate_per_hour,
@@ -115,17 +120,31 @@ impl CodexClient {
     }
 
     pub async fn fetch_usage(&mut self, timeout_duration: Duration) -> Result<RawCodexUsage> {
-        let mut child = self.spawn_with_recovery(find_codex_executable, |exe| {
-            Command::new(exe)
-                .arg("app-server")
-                .arg("--stdio")
-                .creation_flags(CREATE_NO_WINDOW)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
+        let child = self.spawn_with_recovery(find_codex_executable, |exe| {
+            // Stdio is the default, including on older CLIs without --stdio.
+            usage_command(exe).arg("app-server").spawn()
         })?;
+        fetch_usage_from_child(child, timeout_duration).await
+    }
+}
 
+fn usage_command(exe: &Path) -> Command {
+    let mut command = Command::new(exe);
+    command
+        .creation_flags(CREATE_NO_WINDOW)
+        // Also covers cancellation and early errors before explicit cleanup.
+        .kill_on_drop(true)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
+async fn fetch_usage_from_child(
+    mut child: Child,
+    timeout_duration: Duration,
+) -> Result<RawCodexUsage> {
+    let request_future = async {
         let mut stdin = child
             .stdin
             .take()
@@ -136,47 +155,96 @@ impl CodexClient {
             .ok_or_else(|| anyhow!("无法连接子进程 stdout"))?;
         let mut reader = BufReader::new(stdout).lines();
 
-        let request_future = async move {
-            let init_req = r#"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codex-usage-overlay","title":"Codex Usage Overlay","version":"0.3.0"},"capabilities":{"experimentalApi":true}}}"#;
-            let init_notif = r#"{"method":"initialized","params":{}}"#;
-            let query_req = r#"{"id":2,"method":"account/rateLimits/read","params":{"excludeResetCreditDetails":true,"supportsLunaReserveFallback":false}}"#;
+        request_usage(&mut reader, &mut stdin).await
+    };
 
-            stdin
-                .write_all(format!("{}\n{}\n{}\n", init_req, init_notif, query_req).as_bytes())
-                .await?;
-            stdin.flush().await?;
+    let usage_result = match timeout(timeout_duration, request_future).await {
+        Ok(res) => res,
+        Err(_) => Err(anyhow!("读取 Codex 用量超时")),
+    };
 
-            while let Some(line) = reader.next_line().await? {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-
-                if let Ok(msg) = serde_json::from_str::<Value>(trimmed) {
-                    if msg.get("id").and_then(|id| id.as_i64()) == Some(2) {
-                        if let Some(err) = msg.get("error") {
-                            return Err(anyhow!("Codex usage request failed: {}", err));
-                        }
-                        if let Some(result) = msg.get("result") {
-                            return parse_usage_result(result);
-                        }
-                    }
-                }
-            }
-
-            Err(anyhow!("Codex app-server 关闭且未返回有效用量数据"))
-        };
-
-        let usage_result = match timeout(timeout_duration, request_future).await {
-            Ok(res) => res,
-            Err(_) => Err(anyhow!("读取 Codex 用量超时")),
-        };
-
-        // Ensure child process is killed cleanly
-        let _ = child.kill().await;
-
-        usage_result
+    // Only terminate the child owned by this read. Bound cleanup so a stuck
+    // process cannot hold the refresh guard indefinitely; Drop retries the kill.
+    match timeout(PROCESS_CLEANUP_TIMEOUT, child.kill()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("Could not stop the usage reader: {error}"),
+        Err(_) => eprintln!("Timed out stopping the usage reader"),
     }
+    usage_result
+}
+
+async fn send_message<W: AsyncWrite + Unpin>(writer: &mut W, message: Value) -> Result<()> {
+    let mut bytes = serde_json::to_vec(&message)?;
+    bytes.push(b'\n');
+    writer.write_all(&bytes).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+async fn read_response<R: AsyncBufRead + Unpin>(
+    reader: &mut Lines<R>,
+    id: i64,
+    method: &str,
+) -> Result<Value> {
+    while let Some(line) = reader.next_line().await? {
+        let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        // Notifications and server requests are not responses to our request.
+        if message.get("method").is_some() || message.get("id").and_then(Value::as_i64) != Some(id)
+        {
+            continue;
+        }
+        if let Some(error) = message.get("error").filter(|value| !value.is_null()) {
+            return Err(anyhow!("Codex {method} request failed: {error}"));
+        }
+        return message
+            .get("result")
+            .filter(|value| value.is_object())
+            .cloned()
+            .ok_or_else(|| anyhow!("Codex {method} returned an invalid result"));
+    }
+    Err(anyhow!(
+        "Codex app-server closed before responding to {method}"
+    ))
+}
+
+async fn request_usage<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut Lines<R>,
+    writer: &mut W,
+) -> Result<RawCodexUsage> {
+    send_message(
+        writer,
+        serde_json::json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "codex-usage-overlay",
+                    "title": "Codex Usage Overlay",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "capabilities": { "experimentalApi": true }
+            }
+        }),
+    )
+    .await?;
+    read_response(reader, 1, "initialize").await?;
+    send_message(
+        writer,
+        serde_json::json!({ "method": "initialized", "params": {} }),
+    )
+    .await?;
+    send_message(
+        writer,
+        serde_json::json!({
+            "id": 2,
+            "method": "account/rateLimits/read",
+            "params": { "excludeResetCreditDetails": true, "supportsLunaReserveFallback": false }
+        }),
+    )
+    .await?;
+    parse_usage_result(&read_response(reader, 2, "account/rateLimits/read").await?)
 }
 
 fn parse_quota(value: Option<&Value>) -> QuotaSnapshot {
@@ -202,10 +270,19 @@ fn parse_quota(value: Option<&Value>) -> QuotaSnapshot {
 fn extract_account_id(result: &Value, bucket: &Value) -> Option<String> {
     [
         result.get("accountId").and_then(Value::as_str),
-        result.get("account").and_then(|a| a.get("id")).and_then(Value::as_str),
-        result.get("account").and_then(|a| a.get("accountId")).and_then(Value::as_str),
+        result
+            .get("account")
+            .and_then(|a| a.get("id"))
+            .and_then(Value::as_str),
+        result
+            .get("account")
+            .and_then(|a| a.get("accountId"))
+            .and_then(Value::as_str),
         bucket.get("accountId").and_then(Value::as_str),
-        bucket.get("account").and_then(|a| a.get("id")).and_then(Value::as_str),
+        bucket
+            .get("account")
+            .and_then(|a| a.get("id"))
+            .and_then(Value::as_str),
     ]
     .into_iter()
     .flatten()
@@ -214,15 +291,21 @@ fn extract_account_id(result: &Value, bucket: &Value) -> Option<String> {
 }
 
 fn parse_usage_result(result: &Value) -> Result<RawCodexUsage> {
-    let bucket = if let Some(by_limit) = result.get("rateLimitsByLimitId") {
-        by_limit.get("codex").or_else(|| result.get("rateLimits"))
-    } else {
-        result.get("rateLimits")
-    };
-
+    let bucket = result
+        .get("rateLimitsByLimitId")
+        .and_then(|by_limit| by_limit.get("codex"))
+        .filter(|bucket| bucket.is_object())
+        .or_else(|| {
+            result.get("rateLimits").filter(|bucket| {
+                bucket.is_object()
+                    && bucket
+                        .get("limitId")
+                        .is_none_or(|id| id.is_null() || id.as_str() == Some("codex"))
+            })
+        });
     let bucket = bucket.ok_or_else(|| anyhow!("未在返回结果中找到 rateLimits 数据"))?;
-    let five_hour = parse_quota(bucket.get("primary"));
-    let weekly = parse_quota(bucket.get("secondary"));
+    let five_hour = quota_for_window(bucket, 300, "primary");
+    let weekly = quota_for_window(bucket, 10080, "secondary");
 
     let mut credits_display = "—".to_string();
     let mut credits_balance = None;
@@ -263,6 +346,24 @@ fn parse_usage_result(result: &Value) -> Result<RawCodexUsage> {
         fetched_at,
     })
 }
+
+fn quota_for_window(bucket: &Value, duration_mins: u32, legacy_key: &str) -> QuotaSnapshot {
+    let value = [bucket.get("primary"), bucket.get("secondary")]
+        .into_iter()
+        .flatten()
+        .find(|value| {
+            value.get("windowDurationMins").and_then(Value::as_u64) == Some(duration_mins as u64)
+        })
+        .or_else(|| {
+            bucket
+                .get(legacy_key)
+                .filter(|value| value.get("windowDurationMins").is_none_or(Value::is_null))
+        });
+    parse_quota(value)
+}
+
+#[cfg(test)]
+mod transport_tests;
 
 #[cfg(test)]
 mod tests {
@@ -507,5 +608,77 @@ mod tests {
         assert_eq!(parsed.five_hour, QuotaSnapshot::default());
         assert_eq!(parsed.weekly, QuotaSnapshot::default());
         assert_eq!(parsed.credits_display, "0");
+    }
+
+    #[test]
+    fn null_multi_bucket_entry_falls_back_to_valid_legacy_codex_bucket() {
+        let parsed = parse_usage_result(&json!({
+            "rateLimitsByLimitId": { "codex": null },
+            "rateLimits": { "limitId": "codex", "primary": { "usedPercent": 97.5 } }
+        }))
+        .unwrap();
+        assert_eq!(parsed.five_hour.used_percent, Some(97.5));
+    }
+
+    #[test]
+    fn malformed_or_unrelated_buckets_are_not_successful_codex_reads() {
+        for result in [
+            json!({ "rateLimits": null }),
+            json!({ "rateLimits": [] }),
+            json!({ "rateLimitsByLimitId": { "codex": false } }),
+            json!({ "rateLimitsByLimitId": { "codex_other": {} },
+                "rateLimits": { "limitId": "codex_other", "primary": { "usedPercent": 1 } } }),
+        ] {
+            assert!(parse_usage_result(&result).is_err(), "{result}");
+        }
+    }
+
+    #[test]
+    fn explicit_codex_bucket_takes_priority_over_other_legacy_bucket() {
+        let parsed = parse_usage_result(&json!({
+            "rateLimitsByLimitId": { "codex": { "primary": { "usedPercent": 99 } } },
+            "rateLimits": { "limitId": "codex_other", "primary": { "usedPercent": 1 } }
+        }))
+        .unwrap();
+        assert_eq!(parsed.five_hour.used_percent, Some(99.0));
+    }
+
+    #[test]
+    fn quota_windows_are_identified_by_duration_even_when_swapped() {
+        let parsed = parse_usage_result(&json!({ "rateLimits": {
+            "primary": { "usedPercent": 99.75, "windowDurationMins": 10080, "resetsAt": 2000 },
+            "secondary": { "usedPercent": 95.25, "windowDurationMins": 300, "resetsAt": 1000 }
+        }}))
+        .unwrap();
+        assert_eq!(parsed.five_hour.used_percent, Some(95.25));
+        assert_eq!(parsed.five_hour.resets_at, Some(1000));
+        assert_eq!(parsed.weekly.used_percent, Some(99.75));
+        assert_eq!(parsed.weekly.resets_at, Some(2000));
+    }
+
+    #[test]
+    fn unsupported_or_invalid_durations_do_not_masquerade_as_five_hour_quota() {
+        for duration in [json!(15), json!(0), json!(-300), json!("300"), json!(300.5)] {
+            let parsed = parse_usage_result(&json!({ "rateLimits": {
+                "primary": { "usedPercent": 99, "windowDurationMins": duration, "resetsAt": 1000 },
+                "secondary": { "usedPercent": 98, "windowDurationMins": 10080 },
+                "credits": { "hasCredits": true, "balance": "12.50" }
+            }}))
+            .unwrap();
+            assert_eq!(parsed.five_hour, QuotaSnapshot::default());
+            assert_eq!(parsed.weekly.used_percent, Some(98.0));
+            assert_eq!(parsed.credits_display, "12.50");
+        }
+    }
+
+    #[test]
+    fn null_duration_keeps_backward_compatible_positional_mapping() {
+        let parsed = parse_usage_result(&json!({ "rateLimits": {
+            "primary": { "usedPercent": 99.5, "windowDurationMins": null },
+            "secondary": { "usedPercent": 98.5 }
+        }}))
+        .unwrap();
+        assert_eq!(parsed.five_hour.used_percent, Some(99.5));
+        assert_eq!(parsed.weekly.used_percent, Some(98.5));
     }
 }

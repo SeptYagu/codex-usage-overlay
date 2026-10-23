@@ -5,6 +5,7 @@ import { OverlaySettings } from '../types';
 import { APP_VERSION } from '../version';
 import { useTranslation } from 'react-i18next';
 import { SoundPicker } from './SoundPicker';
+import { ProtectionStatusView } from './ProtectionStatus';
 
 interface SettingsViewProps {
   settings: OverlaySettings;
@@ -267,6 +268,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <p className="px-1 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
               {t('autoPauseHint')}
             </p>
+            <ProtectionStatusView settings={settings} onPatchSettings={onPatchSettings} />
           </div>
 
           {/* Autostart (only meaningful for installed builds) */}

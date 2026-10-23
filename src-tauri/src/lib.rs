@@ -4,6 +4,7 @@ mod config;
 mod dock;
 mod notify;
 mod pause_control;
+mod polling;
 mod tray;
 #[cfg(windows)]
 mod audio;
@@ -27,6 +28,11 @@ pub fn run() {
     let app_state = Arc::new(AppState {
         client: Mutex::new(CodexClient::new()),
         refresh_guard: Mutex::new(()),
+        polling: std::sync::Mutex::new(polling::PollState::default()),
+        poll_wake: tokio::sync::Notify::new(),
+        protection_status: std::sync::Mutex::new(Default::default()),
+        resume: Mutex::new(pause_control::resume::ResumeManager::load(&config_manager)),
+        resume_update: Mutex::new(()),
         burn_rate: Mutex::new(BurnRateTracker::load(&config_manager)),
         settings_patch: Mutex::new(()),
         config_manager: config_manager.clone(),
@@ -137,6 +143,7 @@ pub fn run() {
             commands::get_last_usage,
             commands::get_settings,
             commands::get_auto_pause_status,
+            commands::cancel_resume_plans,
             commands::patch_settings,
             commands::open_settings_window,
             commands::is_installed_version,
@@ -234,21 +241,22 @@ pub fn run() {
             let state_for_ticker = app_state_clone.clone();
 
             tauri::async_runtime::spawn(async move {
-                // Initial small delay
-                tokio::time::sleep(Duration::from_millis(500)).await;
-
                 loop {
-                    // Determine refresh interval
-                    let interval_secs = {
-                        let cfg = state_for_ticker.settings.lock().await;
-                        cfg.refresh_interval_seconds.max(15) as u64
-                    };
-
-                    // Auto fetch usage
+                    polling::wait_until_due(&state_for_ticker).await;
                     let _ = fetch_usage_background(&handle, &state_for_ticker).await;
+                }
+            });
 
-                    // Sleep for the configured interval
-                    tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+            // Publish protection changes and retry read-only connection health.
+            let status_handle = app.handle().clone();
+            let status_state = app_state_clone.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    if status_state.settings.lock().await.auto_pause_on_low_quota {
+                        pause_control::probe_bridge_status(&status_state);
+                    }
+                    pause_control::status::publish(&status_handle, &status_state).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             });
 

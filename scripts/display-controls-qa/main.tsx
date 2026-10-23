@@ -2,6 +2,8 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { OverlayView } from '/src/components/OverlayView';
 import { SettingsView } from '/src/components/SettingsView';
+import { TrayMenuView } from '/src/components/TrayMenuView';
+import { setProtectionFixture } from './tauri-stub.js';
 import { DEFAULT_SETTINGS } from '/src/types';
 import i18n from '/src/i18n';
 import '/src/index.css';
@@ -10,8 +12,11 @@ const usage = { fiveHourRemainingPercent: 69, fiveHourBurnRatePerHour: 16.8, wee
 window.qa = { render: async (settings, edge = null, missing = false, view = 'overlay', fixture = 'normal') => {
         await i18n.changeLanguage(settings.language);
         const s = { ...DEFAULT_SETTINGS, ...settings };
+        setProtectionFixture(fixture);
         const sample = fixture === 'full' ? { ...usage, fiveHourRemainingPercent: 100, weekRemainingPercent: 100 } : usage;
-        root.render(view === 'settings' ? <SettingsView settings={s} onPatchSettings={() => { }}/> : <OverlayView settings={s} usage={missing ? null : sample} isLoading={missing} dockState={edge ? { docked: true, expanded: false, hidden: false, edge } : undefined}/>);
+        root.render(view === 'settings' ? <SettingsView settings={s} onPatchSettings={() => { }}/> : view === 'tray'
+            ? <TrayMenuView settings={s} onPatchSettings={() => { }}/>
+            : <OverlayView settings={s} usage={missing ? null : sample} isLoading={missing} dockState={edge ? { docked: true, expanded: false, hidden: false, edge } : undefined}/>);
         await document.fonts.ready;
         await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
     } };

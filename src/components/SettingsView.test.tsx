@@ -310,5 +310,8 @@ it.each([
   expect(rate.disabled).toBe(false);
   fireEvent.click(rate);
   expect(onPatchSettings).toHaveBeenLastCalledWith({ showBurnRate: false }, false);
-  expect(within(right).getAllByRole('checkbox').every((box) => (box as HTMLInputElement).disabled === false)).toBe(true);
+  const resume = within(right).getByRole('checkbox', { name: i18n.t('autoResumeAfterQuotaReset') });
+  expect((resume as HTMLInputElement).disabled).toBe(true);
+  expect(within(right).getAllByRole('checkbox').filter(box => box !== resume)
+    .every(box => !(box as HTMLInputElement).disabled)).toBe(true);
 });

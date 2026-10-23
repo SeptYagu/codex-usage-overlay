@@ -89,10 +89,16 @@ pub fn tray_presentation(
 /// Lock settings first in every presentation entry point so refresh/settings
 /// races cannot repaint a saved new preference with an older snapshot.
 pub async fn repaint_tray<S: TrayPresentationSink>(sink: &S, state: &crate::commands::AppState) {
+    let protection = crate::pause_control::status::snapshot(state).await;
     let settings = state.settings.lock().await;
     let status = state.tray_read_status.lock().await;
     let usage = state.last_usage.lock().await;
-    sink.present(tray_presentation(&settings, usage.as_ref(), *status));
+    let mut presentation = tray_presentation(&settings, usage.as_ref(), *status);
+    if protection.enabled {
+        presentation.tooltip.push_str("\n");
+        presentation.tooltip.push_str(protection.tooltip(&settings.language));
+    }
+    sink.present(presentation);
 }
 
 pub const TRAY_ID: &str = "main-tray";

@@ -69,6 +69,41 @@ const fs = require('node:fs');
                 if (dpr === 1)
                     await page.screenshot({ path: `output/display-qa/settings-${language}.png` });
             }
+            for (const language of ['en-US', 'zh-CN', 'zh-Hant'])
+              for (const fixture of ['normal', 'protection-requested', 'protection-error', 'protection-low']) {
+                for (const size of [{ width: 960, height: 620 }, { width: 760, height: 500 }])
+                  for (const expanded of [false, true]) {
+                    await page.setViewportSize(size);
+                    await page.evaluate(({ language, fixture }) => window.qa.render({ language, autoPauseOnLowQuota: true }, null, false, 'settings', fixture), { language, fixture });
+                    await page.evaluate(expanded => { document.querySelector('[data-protection-status] details').open = expanded; }, expanded);
+                    const metrics = await page.evaluate(() => {
+                        const panel = document.querySelector('[data-protection-status]');
+                        const column = panel.closest('section');
+                        column.scrollTop = column.scrollHeight;
+                        const r = column.getBoundingClientRect();
+                        const overflow = [...column.querySelectorAll('input, button, summary, [data-protection-status]')]
+                            .some(el => { const a = el.getBoundingClientRect(); return a.width > 0 && (a.left < r.left - 1 || a.right > r.right + 1); });
+                        return { horizontalOverflow: overflow, rootScroll: document.documentElement.scrollHeight > innerHeight,
+                            status: panel.querySelector('[role=status]').textContent, resumeDisabled: panel.querySelector('input').disabled };
+                    });
+                    results.push({ protection: true, language, fixture, size, expanded, dpr, ...metrics });
+                    if (metrics.horizontalOverflow || metrics.rootScroll || !metrics.resumeDisabled || /protectionSummaries\.|protectionReasons\./.test(metrics.status))
+                        failures.push({ language, fixture, size, expanded, dpr, ...metrics });
+                    if (dpr === 1 && fixture === 'protection-requested' && expanded) {
+                        await page.evaluate(() => document.querySelector('[data-protection-status]').parentElement.scrollIntoView({ block: 'start' }));
+                        await page.screenshot({ path: `output/display-qa/protection-${language}-${size.width}.png` });
+                    }
+                  }
+                await page.setViewportSize({ width: 500, height: 620 });
+                await page.evaluate(({ language, fixture }) => window.qa.render({ language, autoPauseOnLowQuota: true }, null, false, 'tray', fixture), { language, fixture });
+                const layout = await page.evaluate(() => window.qaTrayLayout);
+                if (layout?.widthLogical) await page.setViewportSize({ width: Math.ceil(layout.widthLogical), height: 620 });
+                const tray = await page.evaluate(() => ({ width: innerWidth,
+                    horizontalOverflow: document.documentElement.scrollWidth > innerWidth,
+                    status: document.querySelector('[role=status][aria-label]')?.textContent }));
+                results.push({ trayProtection: true, language, fixture, dpr, ...tray });
+                if (tray.horizontalOverflow || !tray.status) failures.push({ language, fixture, dpr, ...tray });
+              }
             await context.close();
         }
         fs.writeFileSync('output/display-qa/results.json', JSON.stringify({ cases: results.length, failures, results }, null, 2));

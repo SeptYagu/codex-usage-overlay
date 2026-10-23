@@ -5,6 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTranslation } from 'react-i18next';
 import { OverlaySettings } from '../types';
 import { APP_VERSION } from '../version';
+import { ProtectionStatusView } from './ProtectionStatus';
 
 interface UpdateInfo {
   version: string;
@@ -289,6 +290,7 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
   return (
     <div className="overflow-y-auto bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 p-2.5 font-sans select-none" style={{ maxHeight: maxCssHeight }}>
       <div ref={menuRef} role="menu" aria-label={t('menuSettings')} className="space-y-0.5">
+        <ProtectionStatusView settings={settings} compact />
         <button className="tray-menu-item" role="menuitem" onClick={() => runMenuAction(() => invoke('toggle_overlay_window'))}>
           {t('menuToggleOverlay')}
         </button>

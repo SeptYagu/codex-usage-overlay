@@ -33,6 +33,7 @@ export interface OverlaySettings {
   mousePassthrough: boolean;
   showPercentageGrid: boolean;
   autoPauseOnLowQuota: boolean;
+  autoResumeAfterQuotaReset: boolean;
   autoPauseFiveHourThresholdPercent: number;
   autoPauseWeeklyThresholdPercent: number;
 }
@@ -75,6 +76,7 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   showPercentageGrid: false,
   // Smart pause is opt-in: an upgrade must never silently arm the feature.
   autoPauseOnLowQuota: false,
+  autoResumeAfterQuotaReset: false,
   autoPauseFiveHourThresholdPercent: 5,
   autoPauseWeeklyThresholdPercent: 2,
 };
@@ -83,4 +85,40 @@ export interface UsageStatus {
   state: 'reading' | 'ok' | 'error';
   updatedAt: string;
   error?: string;
+}
+
+export interface ProtectionStatus {
+  revision: number;
+  enabled: boolean;
+  autoResumeEnabled: boolean;
+  connection: 'unknown' | 'available' | 'unavailable';
+  capabilities: {
+    cooperativeDelivery: boolean;
+    directInterrupt: boolean;
+    completionObservation: boolean;
+    userActivityObservation: boolean;
+    continuationControl: boolean;
+  };
+  mode: 'cooperative' | 'direct';
+  summary: 'off' | 'checking' | 'armed' | 'quotaLow' | 'pauseRequested' | 'needsAttention';
+  reason: string | null;
+  confirmedCount: number;
+  acceptedRequestCount: number;
+  confirmedInterruptionCount: number;
+  lastConfirmedAt: number | null;
+  lastProbeAt: number | null;
+  lastSuccessfulSampleAt: number | null;
+  effectiveIntervalSeconds: number;
+  nextPollAt: number | null;
+  quotaHealth: 'pending' | 'success' | 'error' | 'stale';
+  targets: Array<{
+    periodId: string; active: boolean;
+    threadId: string; hostId: string | null; turnId: string | null;
+    phase: string; reason: string | null; requestedAt: number;
+    acceptedAt: number | null; interruptedAt: number | null;
+  }>;
+  resumePlans: Array<{
+    id: string; threadId: string; phase: string; eligibleAfter: number; reason: string | null;
+  }>;
+  resumeStateError: string | null;
 }

@@ -1,5 +1,35 @@
-export const invoke = async (cmd) => cmd === 'is_installed_version' ? true : cmd === 'get_notification_status' ? 'enabled' : null;
-export const listen = async () => () => { };
+const listeners = new Map();
+let protection = null;
+let revision = 0;
+export const setProtectionFixture = (fixture) => {
+    const now = Math.floor(Date.now() / 1000);
+    const summary = fixture === 'protection-requested' ? 'pauseRequested' : fixture === 'protection-error'
+        ? 'needsAttention' : fixture === 'protection-low' ? 'quotaLow' : 'armed';
+    protection = { revision: ++revision, enabled: true, autoResumeEnabled: false, mode: 'cooperative',
+        connection: fixture === 'protection-error' ? 'unavailable' : 'available',
+        capabilities: { cooperativeDelivery: true, directInterrupt: false, completionObservation: false,
+            userActivityObservation: false, continuationControl: false },
+        summary, reason: fixture === 'protection-error' ? 'bridgeUnavailable' : fixture === 'protection-requested' ? 'stoppingUnconfirmed' : null,
+        confirmedCount: 1, acceptedRequestCount: 1, confirmedInterruptionCount: 0, lastConfirmedAt: now,
+        lastProbeAt: now, lastSuccessfulSampleAt: now, effectiveIntervalSeconds: 15, nextPollAt: now + 15,
+        quotaHealth: 'success', targets: fixture === 'protection-requested' ? [{ threadId: '0199b0d2-4444-7000-8000-000000000004', periodId: 'fixture-period', active: true,
+            hostId: 'local', turnId: null, phase: 'accepted', reason: 'stoppingUnconfirmed', requestedAt: now,
+            acceptedAt: now, interruptedAt: null }] : [], resumePlans: [], resumeStateError: null };
+    for (const callback of listeners.get('auto_pause_status_changed') ?? []) callback({ payload: protection });
+};
+export const invoke = async (cmd, args) => {
+    if (cmd === 'is_installed_version') return true;
+    if (cmd === 'get_notification_status') return 'enabled';
+    if (cmd === 'get_auto_pause_status') return protection;
+    if (cmd === 'get_tray_menu_generation') return 1;
+    if (cmd === 'layout_tray_menu') { window.qaTrayLayout = args; return args.heightLogical; }
+    return null;
+};
+export const listen = async (name, callback) => {
+    if (!listeners.has(name)) listeners.set(name, new Set());
+    listeners.get(name).add(callback);
+    return () => listeners.get(name)?.delete(callback);
+};
 export class LogicalSize {
     constructor(width, height) { this.width = width; this.height = height; }
 }
