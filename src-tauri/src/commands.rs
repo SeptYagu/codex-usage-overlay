@@ -303,6 +303,67 @@ pub async fn get_auto_pause_status(
 }
 
 #[tauri::command]
+pub async fn resume_chat(
+    thread_id: Option<String>,
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<String, String> {
+    let settings = state.settings.lock().await.clone();
+    let (five_hour_low, weekly_low) = {
+        let last_usage = state.last_usage.lock().await;
+        if let Some(ref usage) = *last_usage {
+            let five_low = usage.five_hour_remaining_percent.is_some_and(|v| {
+                v <= settings.auto_pause_five_hour_threshold_percent
+            });
+            let weekly_low = usage.week_remaining_percent.is_some_and(|v| {
+                v <= settings.auto_pause_weekly_threshold_percent
+            });
+            (five_low, weekly_low)
+        } else {
+            (false, false)
+        }
+    };
+    if five_hour_low || weekly_low {
+        return Err("quotaStillLow".into());
+    }
+    let target_thread_id = {
+        let mut manager = state.resume.lock().await;
+        if let Some(ref tid) = thread_id {
+            manager.complete_plan_for_thread(tid, "resumedByUser");
+            tid.clone()
+        } else {
+            let ready_tid = manager.plans().into_iter().find(|p| {
+                matches!(
+                    p.phase,
+                    crate::pause_control::resume::ResumePhase::Ready
+                        | crate::pause_control::resume::ResumePhase::NeedsReview
+                )
+            }).map(|p| p.thread_id);
+            if let Some(tid) = ready_tid {
+                manager.complete_plan_for_thread(&tid, "resumedByUser");
+                tid
+            } else {
+                return Err("noResumePlanAvailable".into());
+            }
+        }
+    };
+    let prompt = crate::pause_control::resume_message_for_language(&settings.language);
+    let transport = {
+        let controller = state.auto_pause.lock().unwrap();
+        controller.transport()
+    };
+    let outcome = crate::pause_control::send_resume_to_thread(
+        transport.as_ref(),
+        &target_thread_id,
+        prompt,
+    )
+    .await;
+    crate::pause_control::resume::update(state.inner(), None).await;
+    crate::pause_control::status::publish(&app, state.inner()).await;
+    outcome
+}
+
+#[tauri::command]
 pub async fn cancel_resume_plans(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
     state.resume.lock().await.cancel_all("cancelledByUser");
     crate::pause_control::resume::update(state.inner(), None).await;

@@ -234,6 +234,79 @@ impl ResumeManager {
         Ok(())
     }
 
+    pub fn record_pause(
+        &mut self,
+        evidence: PauseEvidence<'_>,
+        settings: &OverlaySettings,
+        now: i64,
+    ) -> Result<(), &'static str> {
+        if self.error.as_deref() == Some("resumeStateInvalid") {
+            return Err("resumeStateInvalid");
+        }
+        if !settings.auto_pause_on_low_quota {
+            return Err("pauseDisabled");
+        }
+        if evidence.weekly_triggered
+            || evidence.reset_at <= now
+            || evidence
+                .reset_at
+                .checked_sub(now)
+                .is_none_or(|distance| distance > 21600)
+        {
+            return Err("resumeIneligible");
+        }
+        if self.file.plans.iter().any(|p| p.id == evidence.action_id || (p.thread_id == evidence.thread_id && !p.phase.terminal())) {
+            return Ok(());
+        }
+        self.file
+            .plans
+            .retain(|p| !p.phase.terminal() || now < p.expires_at);
+        if self.file.plans.len() >= MAX_PLANS {
+            return Err("resumePlanLimit");
+        }
+        let eligible_after = evidence
+            .reset_at
+            .checked_add(120)
+            .ok_or("resumeIneligible")?;
+        let plan = ResumePlan {
+            id: evidence.action_id.into(),
+            account_id: evidence.account_id.into(),
+            host_id: evidence.host_id.into(),
+            thread_id: evidence.thread_id.into(),
+            interrupted_turn_id: evidence.turn_id.into(),
+            activity_revision: evidence.activity_revision.into(),
+            eligible_after,
+            expires_at: eligible_after
+                .checked_add(86400)
+                .ok_or("resumeIneligible")?,
+            phase: ResumePhase::WaitingForQuota,
+            reason: None,
+            first_recovered_at: None,
+            last_observed_at: None,
+        };
+        if !plan.valid() {
+            return Err("resumeIneligible");
+        }
+        self.file.plans.push(plan);
+        self.changed();
+        Ok(())
+    }
+
+    pub fn complete_plan_for_thread(&mut self, thread_id: &str, reason: &str) -> bool {
+        let mut completed = false;
+        for plan in &mut self.file.plans {
+            if plan.thread_id == thread_id && !plan.phase.terminal() {
+                plan.phase = ResumePhase::Completed;
+                plan.reason = Some(reason.into());
+                completed = true;
+            }
+        }
+        if completed {
+            self.changed();
+        }
+        completed
+    }
+
     pub fn cancel_all(&mut self, reason: &str) {
         let mut changed = false;
         for plan in &mut self.file.plans {
@@ -281,7 +354,7 @@ impl ResumeManager {
                     continue;
                 }
             }
-            if !capabilities.can_auto_resume() {
+            if !capabilities.can_auto_resume() && plan.activity_revision != "cooperative" {
                 plan.phase = ResumePhase::NeedsReview;
                 plan.reason = Some("resumeUnsupported".into());
                 plan.first_recovered_at = None;
@@ -675,5 +748,43 @@ mod tests {
         }
         std::fs::remove_file(config.resume_state_path()).unwrap();
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn cooperative_pause_records_plan_and_transitions_to_ready_on_quota_recovery() {
+        let mut m = manager();
+        let mut e = evidence();
+        e.action_id = "plan-test";
+        e.thread_id = "thread-123";
+        e.activity_revision = "cooperative";
+        e.reset_at = 1000;
+        m.record_pause(e, &settings(), 900).unwrap();
+        assert_eq!(m.file.plans.len(), 1);
+        assert_eq!(m.file.plans[0].thread_id, "thread-123");
+        assert_eq!(m.file.plans[0].phase, ResumePhase::WaitingForQuota);
+
+        // First sample showing quota recovered (e.g. 50% used vs default threshold 95%)
+        // Sample at 1120 (after reset_at 1000 + 120s = eligible_after 1120)
+        m.observe(
+            Some(&raw(1120, 50.0, Some(50.0))),
+            &settings(),
+            ControlCapabilities::default(),
+            1120,
+        );
+        assert_eq!(m.file.plans[0].phase, ResumePhase::WaitingForQuota);
+        assert_eq!(m.file.plans[0].first_recovered_at, Some(1120));
+
+        // Second sample 15 seconds later
+        m.observe(
+            Some(&raw(1135, 50.0, Some(50.0))),
+            &settings(),
+            ControlCapabilities::default(),
+            1135,
+        );
+        assert_eq!(m.file.plans[0].phase, ResumePhase::Ready);
+
+        // Completing plan for thread marks it completed
+        assert!(m.complete_plan_for_thread("thread-123", "manualResume"));
+        assert_eq!(m.file.plans[0].phase, ResumePhase::Completed);
     }
 }

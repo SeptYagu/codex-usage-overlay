@@ -13,6 +13,8 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
   const { status, unavailable } = useProtectionStatus();
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   const [actionError, setActionError] = useState(false);
+  const [resumingThreadId, setResumingThreadId] = useState<string | null>(null);
+  const [resumeError, setResumeError] = useState<string | null>(null);
   useEffect(() => {
     const timer = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
     return () => clearInterval(timer);
@@ -27,8 +29,21 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
   const reason = unavailable ? 'statusUnavailable' : status?.reason;
   const cancel = async () => {
     setActionError(false);
+    setResumeError(null);
     try { await invoke('cancel_resume_plans'); }
     catch { setActionError(true); }
+  };
+  const resume = async (threadId: string) => {
+    setResumingThreadId(threadId);
+    setResumeError(null);
+    try {
+      await invoke('resume_chat', { threadId });
+    } catch (err: unknown) {
+      const errMsg = typeof err === 'string' ? err : err instanceof Error ? err.message : '';
+      setResumeError(errMsg.includes('quotaStillLow') ? 'quotaStillLow' : 'generic');
+    } finally {
+      setResumingThreadId(null);
+    }
   };
   return <div className="space-y-1 text-xs" data-protection-status>
     <div role="status" aria-label={t('protectionStatus')}
@@ -61,14 +76,27 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
           {t('protectionChat', { id: target.threadId.slice(0, 12) })}: {t(`protectionPhases.${target.phase}`, { defaultValue: target.phase })}
           {!target.active && <> · {t('protectionHistorical')}</>}
         </p>)}
-        {status?.resumePlans.map(plan => <p key={plan.id}>
-          {t('protectionChat', { id: plan.threadId })}: {t(`resumePhases.${plan.phase}`, { defaultValue: plan.phase })}
-        </p>)}
+        {status?.resumePlans.map(plan => <div key={plan.id} className="flex items-center justify-between gap-2 py-0.5">
+          <span>{t('protectionChat', { id: plan.threadId })}: {t(`resumePhases.${plan.phase}`, { defaultValue: plan.phase })}</span>
+          {['ready', 'waitingForQuota', 'needsReview'].includes(plan.phase) && (
+            <button
+              type="button"
+              onClick={() => resume(plan.threadId)}
+              disabled={resumingThreadId === plan.threadId}
+              className="px-2 py-0.5 text-[11px] font-medium bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white rounded cursor-pointer transition-colors"
+            >
+              {resumingThreadId === plan.threadId ? t('resumingChat') : t('resumeChat')}
+            </button>
+          )}
+        </div>)}
         {status?.resumePlans.some(plan => ['needsReview', 'submissionUnknown'].includes(plan.phase))
           && <p>{t('protectionManualReview')}</p>}
         {status?.resumeStateError && <p role="alert">{t(`protectionReasons.${status.resumeStateError}`)}</p>}
         {status?.resumePlans.some(plan => ['waitingForQuota', 'ready', 'needsReview'].includes(plan.phase))
           && <button type="button" onClick={cancel} className="underline">{t('cancelResumePlans')}</button>}
+        {resumeError && <p role="alert" className="text-amber-700 dark:text-amber-300">
+          {resumeError === 'quotaStillLow' ? t('quotaStillLow') : t('resumeFailed')}
+        </p>}
         {actionError && <p role="alert">{t('protectionReasons.resumeStateWriteFailed')}</p>}
       </div>
     </details>

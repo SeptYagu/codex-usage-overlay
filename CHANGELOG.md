@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-23
+
+### Added
+- Localized pause requests matching the overlay display language (`"暂停"` for zh-CN, `"暫停"` for zh-Hant, `"Pause"` for en-US/default).
+- Assisted safe resume mechanism: when quota resets and completes verification (two samples $\ge 15$s apart, $\ge \text{threshold} + 2\%$), the resume plan transitions to `Ready`. Settings provides a one-click `[Resume chat]` action button to dispatch localized continuation signals (`"继续"` / `"繼續"` / `"Continue"`).
+- Quota check safeguard preventing premature manual resumption when quota is still below the threshold (`quotaStillLow`).
+- Versioned Smart Pause status in Settings, the tray menu and tooltip, with sample age, effective polling cadence, per-active-period outcomes and separate accepted-request/verified-interruption counters.
+
+### Fixed
+- In-thread message routing: Route `tools/call` caller identity to the target thread ID rather than an arbitrary transcript UUID, eliminating empty "ghost" chats in the desktop client and avoiding cross-chat badges.
+- Cancel unsent Smart Pause requests when newer quota data, read failures or settings changes supersede a delivery batch.
+- Replace PowerShell test fixtures with compiled Rust test helpers, resolving setup timeouts in CI while preserving cleanup regression coverage.
+- Bounded batch delivery and rotation to prevent starvation of later sessions by a slow target.
+- Await Codex initialization before requesting usage, report initialization errors immediately, and clean up the reader process with bounded timeout.
+
+### Changed
+- Poll every 15 seconds near a pause threshold while protection is enabled, returning to the normal interval with two-sample hysteresis.
+- Upgrade `actions/setup-node` from v4 to v6 in CI and release workflows.
+- Send pause-only cooperative requests without asking Codex to create external continuation timers.
+
 ## [1.4.0-preview.1] - 2026-10-23
 
 ### Fixed

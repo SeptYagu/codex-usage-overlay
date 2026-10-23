@@ -65,6 +65,27 @@ pub fn pause_message_for_language(language: &str) -> &'static str {
     pause_message_for_locale(locale)
 }
 
+/// The localized resume message literals.
+pub const RESUME_MESSAGE_ZH_CN: &str = "\u{7EE7}\u{7EED}";
+pub const RESUME_MESSAGE_ZH_HANT: &str = "\u{7E7C}\u{7E8C}";
+pub const RESUME_MESSAGE_EN: &str = "Continue";
+
+#[allow(dead_code)]
+pub const RESUME_MESSAGE: &str = RESUME_MESSAGE_ZH_CN;
+
+pub fn resume_message_for_locale(locale: &str) -> &'static str {
+    match locale {
+        "zh-Hant" => RESUME_MESSAGE_ZH_HANT,
+        "zh-CN" => RESUME_MESSAGE_ZH_CN,
+        _ => RESUME_MESSAGE_EN,
+    }
+}
+
+pub fn resume_message_for_language(language: &str) -> &'static str {
+    let locale = crate::commands::resolve_locale(language);
+    resume_message_for_locale(locale)
+}
+
 
 /// The current Codex desktop client bridge family.
 pub const APP_TOOLS_PIPE_PREFIX: &str = "codex-app-tools-";
@@ -822,11 +843,16 @@ async fn send_pause(
     if let Some(host_id) = target.host_id.as_deref() {
         arguments["hostId"] = json!(host_id);
     }
+    let caller = if looks_like_thread_id(&target.id) {
+        &target.id
+    } else {
+        &candidate.caller_thread_id
+    };
     let outcome = tokio::time::timeout(
         CALL_TIMEOUT,
         transport.call_tool(
             &candidate.pipe,
-            &candidate.caller_thread_id,
+            caller,
             "send_message_to_thread",
             arguments,
         ),
@@ -834,6 +860,42 @@ async fn send_pause(
     .await
     .map_err(|_| BridgeError::Unavailable("the send_message_to_thread call timed out".into()))??;
     Ok(outcome.success)
+}
+
+/// Sends a resume message to the specified thread over an available bridge candidate.
+pub async fn send_resume_to_thread(
+    transport: &dyn BridgeTransport,
+    target_thread_id: &str,
+    prompt: &str,
+) -> Result<String, String> {
+    let discovery = discover_bridge().await;
+    let candidates = AutoPauseController::candidates(&discovery);
+    if candidates.is_empty() {
+        return Err("bridgeUnavailable".into());
+    }
+    let arguments = json!({
+        "threadId": target_thread_id,
+        "prompt": prompt,
+    });
+    for candidate in &candidates {
+        let caller = if looks_like_thread_id(target_thread_id) {
+            target_thread_id
+        } else {
+            &candidate.caller_thread_id
+        };
+        let call = transport.call_tool(
+            &candidate.pipe,
+            caller,
+            "send_message_to_thread",
+            arguments.clone(),
+        );
+        if let Ok(Ok(outcome)) = tokio::time::timeout(CALL_TIMEOUT, call).await {
+            if outcome.success {
+                return Ok(prompt.to_string());
+            }
+        }
+    }
+    Err("resumeDeliveryFailed".into())
 }
 
 /// The de-duplication key of one delivered request.
@@ -962,6 +1024,10 @@ impl Default for AutoPauseController {
 }
 
 impl AutoPauseController {
+    pub fn transport(&self) -> Arc<dyn BridgeTransport> {
+        self.transport.clone()
+    }
+
     /// Builds a controller with the production transport.
     pub fn new() -> Self {
         Self {
@@ -1587,28 +1653,47 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
             .await
             .unwrap_or(false);
         if confirmed {
-            let mut controller = lock_controller(state);
-            // A newer low sample may arrive while an already submitted send
-            // completes. Carry that confirmation forward only for the same
-            // account, active period and still-triggered quota cycle.
-            let carries_forward = controller.queued.as_ref().is_some_and(|next| {
-                next.account_id == sample.account_id && keys.iter().all(|key| {
-                    controller.periods.values().any(|period| period.period_id == key.thread_id)
-                        && triggered_quotas(&next.settings, &next.usage).iter().any(|trigger| {
-                            trigger.quota == key.quota && trigger.resets_at == key.resets_at
-                        })
-                })
-            });
-            if controller.generation == sample.generation || carries_forward {
-                controller.confirm(&keys);
-                guard.mark_confirmed();
+            let record_reset_at = {
+                let mut controller = lock_controller(state);
+                let carries_forward = controller.queued.as_ref().is_some_and(|next| {
+                    next.account_id == sample.account_id && keys.iter().all(|key| {
+                        controller.periods.values().any(|period| period.period_id == key.thread_id)
+                            && triggered_quotas(&next.settings, &next.usage).iter().any(|trigger| {
+                                trigger.quota == key.quota && trigger.resets_at == key.resets_at
+                            })
+                    })
+                });
+                if controller.generation == sample.generation || carries_forward {
+                    controller.confirm(&keys);
+                    guard.mark_confirmed();
+                }
+                controller.confirmed_count += 1;
+                controller.last_confirmed_at = Some(unix_now());
+                if controller.generation == sample.generation || carries_forward {
+                    controller.telemetry.record(thread, &period_id, "accepted", Some("stoppingUnconfirmed"));
+                    triggers.iter().find(|t| t.quota == QuotaKind::FiveHour).and_then(|t| t.resets_at)
+                } else {
+                    None
+                }
+            };
+            if let Some(reset_at) = record_reset_at {
+                let now = unix_now();
+                let action_id = format!("{}-{}", period_id, now);
+                let evidence = resume::PauseEvidence {
+                    action_id: &action_id,
+                    account_id: &sample.account_id,
+                    host_id: thread.host_id.as_deref().unwrap_or(""),
+                    thread_id: &thread.id,
+                    turn_id: thread.turn_id.as_deref().unwrap_or(""),
+                    activity_revision: "cooperative",
+                    reset_at,
+                    weekly_triggered: triggers.iter().any(|t| t.quota == QuotaKind::Weekly),
+                };
+                let mut manager = state.resume.lock().await;
+                let _ = manager.record_pause(evidence, &sample.settings, now);
+                drop(manager);
+                resume::update(state, None).await;
             }
-            controller.confirmed_count += 1;
-            controller.last_confirmed_at = Some(unix_now());
-            if controller.generation == sample.generation || carries_forward {
-                controller.telemetry.record(thread, &period_id, "accepted", Some("stoppingUnconfirmed"));
-            }
-            drop(controller);
         } else if lock_controller(state).generation == sample.generation {
             lock_controller(state).telemetry.record(thread, &period_id, "failed", Some("deliveryFailed"));
         }
@@ -1986,6 +2071,12 @@ mod tests {
         assert_eq!(pause_message_for_locale("zh-Hant"), PAUSE_MESSAGE_ZH_HANT);
         assert_eq!(pause_message_for_locale("en-US"), PAUSE_MESSAGE_EN);
         assert_eq!(pause_message_for_locale("other"), PAUSE_MESSAGE_EN);
+        assert_eq!(resume_message_for_locale("zh-CN"), RESUME_MESSAGE_ZH_CN);
+        assert_eq!(resume_message_for_locale("zh-Hant"), RESUME_MESSAGE_ZH_HANT);
+        assert_eq!(resume_message_for_locale("en-US"), RESUME_MESSAGE_EN);
+        assert_eq!(resume_message_for_language("zh-CN"), "继续");
+        assert_eq!(resume_message_for_language("zh-Hant"), "繼續");
+        assert_eq!(resume_message_for_language("en-US"), "Continue");
     }
 
     #[test]

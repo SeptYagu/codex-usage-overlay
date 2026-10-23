@@ -1,5 +1,14 @@
 # Status
 
+## v1.4.0 stable release preparation — 2026-10-23
+
+- Implemented safe assisted resume mechanism: transition cooperative pause plans to `Ready` once quota reset is verified (2 fresh samples >= 15s apart, >= threshold + 2%), providing a one-click `[Resume chat]` action button in Settings that dispatches localized `"继续"` / `"繼續"` / `"Continue"`.
+- Fixed phantom chat creation in desktop client: routed `tools/call` caller thread ID directly to target thread ID instead of an arbitrary transcript UUID, eliminating empty sidebar chats and cross-chat warning badges.
+- Localized pause signal to match overlay display language (`"暂停"` / `"暫停"` / `"Pause"`).
+- Added quota check guarding manual resume against low quota (`quotaStillLow`).
+- Validation: 109 frontend tests, 334 regular Rust tests, production build, locked all-target Cargo check, and 6 packaging fixtures passed cleanly.
+- Target release tag: `v1.4.0`. All version locations remain aligned at 1.4.0. [Release notes](docs/releases/v1.4.0.md).
+
 ## CI and Node runtime follow-up — 2026-10-23
 
 - The first preview's CI failed in all four owned-process lifecycle tests while waiting for PowerShell fixture readiness at the ten-second setup boundary. The production cleanup assertions had not run. The release run for `v1.4.0-preview` was cancelled; the original tag is retained.

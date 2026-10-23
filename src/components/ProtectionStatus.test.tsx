@@ -97,6 +97,35 @@ describe('protection status', () => {
     fireEvent.click(await screen.findByText('Cancel pending resume plans'));
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('cancel_resume_plans'));
   });
+  it('resumes a chat when clicking the resume button', async () => {
+    tauri.invoke.mockImplementation(async (cmd) => {
+      if (cmd === 'get_auto_pause_status') {
+        return snapshot({ resumePlans: [
+          { id: 'plan', threadId: 'chat-abc', phase: 'ready', eligibleAfter: 100, reason: null }
+        ] });
+      }
+      return null;
+    });
+    render(<ProtectionStatusView settings={settings} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Resume chat' }));
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('resume_chat', { threadId: 'chat-abc' }));
+  });
+  it('displays error when resume fails because quota is still low', async () => {
+    tauri.invoke.mockImplementation(async (cmd) => {
+      if (cmd === 'get_auto_pause_status') {
+        return snapshot({ resumePlans: [
+          { id: 'plan', threadId: 'chat-abc', phase: 'waitingForQuota', eligibleAfter: 100, reason: null }
+        ] });
+      }
+      if (cmd === 'resume_chat') {
+        throw 'quotaStillLow';
+      }
+      return null;
+    });
+    render(<ProtectionStatusView settings={settings} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Resume chat' }));
+    await screen.findByText('Quota is still below the pause threshold.');
+  });
   it.each([
     ['en-US', 'Pause requested — stopping unconfirmed'],
     ['zh-CN', '已请求暂停，尚未确认停止'],

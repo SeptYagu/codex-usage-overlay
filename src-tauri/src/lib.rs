@@ -144,6 +144,7 @@ pub fn run() {
             commands::get_settings,
             commands::get_auto_pause_status,
             commands::cancel_resume_plans,
+            commands::resume_chat,
             commands::patch_settings,
             commands::open_settings_window,
             commands::is_installed_version,
