@@ -1,4 +1,6 @@
-use anyhow::{anyhow, Context, Result};
+#[cfg(test)]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io;
@@ -7,12 +9,16 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, Command};
+#[cfg(test)]
 use tokio::time::timeout;
 
-use super::finder::find_codex_executable;
+use super::reader::{
+    self, AttemptSource, FailureKind, ObservationTiming, ObservedUsage, ReadDiagnostic, ReadEvent,
+    ReadFailure, ReadObserver, ReadStage, StderrSummary,
+};
+use tokio::time::{timeout_at, Instant};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-const PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -80,11 +86,10 @@ pub struct CodexClient {
 
 impl CodexClient {
     pub fn new() -> Self {
-        Self {
-            exe_path: find_codex_executable(),
-        }
+        Self { exe_path: None }
     }
 
+    #[cfg(test)]
     fn spawn_with_recovery<T>(
         &mut self,
         mut find_executable: impl FnMut() -> Option<PathBuf>,
@@ -119,12 +124,96 @@ impl CodexClient {
         unreachable!("each spawn attempt returns or retries once")
     }
 
-    pub async fn fetch_usage(&mut self, timeout_duration: Duration) -> Result<RawCodexUsage> {
-        let child = self.spawn_with_recovery(find_codex_executable, |exe| {
-            // Stdio is the default, including on older CLIs without --stdio.
-            usage_command(exe).arg("app-server").spawn()
-        })?;
-        fetch_usage_from_child(child, timeout_duration).await
+    pub async fn fetch_usage(
+        &mut self,
+        observer: &mut impl ReadObserver,
+    ) -> std::result::Result<ObservedUsage, ReadFailure> {
+        reader::read_with_policy(self, observer, reader::REFRESH_BUDGET).await
+    }
+}
+
+impl AttemptSource for CodexClient {
+    async fn attempt(
+        &mut self,
+        deadline: Instant,
+        attempt: u8,
+        observer: &mut impl ReadObserver,
+    ) -> std::result::Result<ObservedUsage, ReadFailure> {
+        let started = Instant::now();
+        let mut report = ReadDiagnostic::new(attempt);
+        let result = async {
+            if !self.exe_path.as_ref().is_some_and(|p| p.is_file()) {
+                self.exe_path =
+                    super::finder::find_codex_executable(deadline - reader::CLEANUP_BUDGET).await?;
+            }
+            for spawn_attempt in 0..2 {
+                let exe = self.exe_path.as_ref().ok_or_else(|| {
+                    ReadFailure::new(ReadStage::Discovery, FailureKind::MissingExecutable)
+                })?;
+                report.executable_kind = Some(
+                    if exe
+                        .file_name()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("codex.exe"))
+                    {
+                        reader::ExecutableKind::Codex
+                    } else {
+                        reader::ExecutableKind::Custom
+                    },
+                );
+                report.executable_modified_at = exe
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|at| at.as_secs());
+                // Check the shared deadline after discovery, before launching anything.
+                if Instant::now() >= deadline - reader::CLEANUP_BUDGET {
+                    return Err(ReadFailure::timeout(ReadStage::Discovery));
+                }
+                match usage_command(exe).arg("app-server").spawn() {
+                    Ok(child) => {
+                        let modified = report.executable_modified_at;
+                        report.cli_version = cached_cli_version(exe, modified);
+                        let mut version_probe = report
+                            .cli_version
+                            .is_none()
+                            .then(|| start_version_probe(exe, deadline));
+                        let result = attempt_child(child, deadline, observer, &mut report).await;
+                        // Version metadata never delays the quota result.
+                        if let Some(probe) = &mut version_probe {
+                            if probe.0.is_finished() {
+                                if let Ok(Some(version)) = (&mut probe.0).await {
+                                    *CLI_VERSION.lock().unwrap_or_else(|p| p.into_inner()) =
+                                        Some((exe.clone(), modified, version.clone()));
+                                    report.cli_version = Some(version);
+                                }
+                            }
+                        }
+                        return result;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound && spawn_attempt == 0 => {
+                        self.exe_path =
+                            super::finder::find_codex_executable(deadline - reader::CLEANUP_BUDGET)
+                                .await?;
+                    }
+                    Err(error) => return Err(ReadFailure::io(ReadStage::Spawn, &error)),
+                }
+            }
+            unreachable!()
+        }
+        .await;
+        // Protocol failures are reported before cleanup; discovery/spawn failures
+        // reach the observer here, before the recovery delay.
+        if report.failure.is_none() {
+            if let Err(error) = &result {
+                observer.event(ReadEvent::Failed(error.clone())).await;
+            }
+        }
+        report.success = result.is_ok();
+        report.failure = result.as_ref().err().cloned();
+        report.elapsed_ms = reader::millis(started.elapsed());
+        observer.event(ReadEvent::Finished(report)).await;
+        result
     }
 }
 
@@ -136,45 +225,207 @@ fn usage_command(exe: &Path) -> Command {
         .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     command
 }
 
-async fn fetch_usage_from_child(
+#[cfg(test)]
+async fn fetch_usage_from_child(child: Child, timeout_duration: Duration) -> Result<RawCodexUsage> {
+    let mut observer = |_| async {};
+    let mut report = ReadDiagnostic::new(1);
+    attempt_child(
+        child,
+        Instant::now() + timeout_duration,
+        &mut observer,
+        &mut report,
+    )
+    .await
+    .map(|value| value.usage)
+    .map_err(Into::into)
+}
+
+async fn attempt_child(
     mut child: Child,
-    timeout_duration: Duration,
-) -> Result<RawCodexUsage> {
+    deadline: Instant,
+    observer: &mut impl ReadObserver,
+    report: &mut ReadDiagnostic,
+) -> std::result::Result<ObservedUsage, ReadFailure> {
+    let stderr = std::sync::Arc::new(std::sync::Mutex::new(StderrSummary::default()));
+    let mut drain = child.stderr.take().map(|stream| {
+        let stderr = stderr.clone();
+        DrainGuard(tokio::spawn(
+            async move { drain_stderr(stream, stderr).await },
+        ))
+    });
+    // For very short test budgets, still allow a request before Drop cleanup.
+    let request_deadline = deadline
+        .checked_sub(reader::CLEANUP_BUDGET)
+        .filter(|d| *d > Instant::now())
+        .unwrap_or(deadline);
     let request_future = async {
         let mut stdin = child
             .stdin
             .take()
-            .ok_or_else(|| anyhow!("无法连接子进程 stdin"))?;
+            .ok_or_else(|| ReadFailure::new(ReadStage::Spawn, FailureKind::InvalidResponse))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| anyhow!("无法连接子进程 stdout"))?;
+            .ok_or_else(|| ReadFailure::new(ReadStage::Spawn, FailureKind::InvalidResponse))?;
         let mut reader = BufReader::new(stdout).lines();
 
-        request_usage(&mut reader, &mut stdin).await
+        request_usage_observed(&mut reader, &mut stdin, request_deadline, observer, report).await
     };
 
-    let usage_result = match timeout(timeout_duration, request_future).await {
+    let usage_result = match timeout_at(request_deadline, request_future).await {
         Ok(res) => res,
-        Err(_) => Err(anyhow!("读取 Codex 用量超时")),
+        Err(_) => Err(ReadFailure::timeout(ReadStage::Quota)),
     };
+
+    if let Err(error) = &usage_result {
+        report.failure = Some(error.clone());
+        observer.event(ReadEvent::Failed(error.clone())).await;
+    }
 
     // Only terminate the child owned by this read. Bound cleanup so a stuck
     // process cannot hold the refresh guard indefinitely; Drop retries the kill.
-    match timeout(PROCESS_CLEANUP_TIMEOUT, child.kill()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => eprintln!("Could not stop the usage reader: {error}"),
-        Err(_) => eprintln!("Timed out stopping the usage reader"),
+    report.cleanup_failed = !matches!(
+        timeout_at(
+            deadline.min(Instant::now() + reader::CLEANUP_BUDGET),
+            child.kill()
+        )
+        .await,
+        Ok(Ok(()))
+    );
+    if let Some(drain) = &mut drain {
+        let _ = timeout_at(
+            deadline.min(Instant::now() + Duration::from_millis(50)),
+            &mut drain.0,
+        )
+        .await;
     }
+    report.stderr = stderr.lock().unwrap_or_else(|p| p.into_inner()).clone();
     usage_result
 }
 
-async fn send_message<W: AsyncWrite + Unpin>(writer: &mut W, message: Value) -> Result<()> {
-    let mut bytes = serde_json::to_vec(&message)?;
+struct DrainGuard(tokio::task::JoinHandle<()>);
+impl Drop for DrainGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+type VersionIdentity = (PathBuf, Option<u64>, String);
+static CLI_VERSION: std::sync::Mutex<Option<VersionIdentity>> = std::sync::Mutex::new(None);
+fn cached_cli_version(exe: &Path, modified: Option<u64>) -> Option<String> {
+    CLI_VERSION
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .filter(|(path, at, _)| path == exe && *at == modified)
+        .map(|(_, _, version)| version.clone())
+}
+struct VersionProbe(tokio::task::JoinHandle<Option<String>>);
+impl Drop for VersionProbe {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+fn start_version_probe(exe: &Path, deadline: Instant) -> VersionProbe {
+    use tokio::io::AsyncReadExt;
+    let exe = exe.to_owned();
+    VersionProbe(tokio::spawn(async move {
+        timeout_at(
+            deadline.min(Instant::now() + Duration::from_secs(2)),
+            async {
+                let mut child = Command::new(exe)
+                    .arg("--version")
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .kill_on_drop(true)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .ok()?;
+                let stdout = child.stdout.take()?;
+                let mut bytes = Vec::new();
+                stdout.take(256).read_to_end(&mut bytes).await.ok()?;
+                let _ = child.kill().await;
+                let text = std::str::from_utf8(&bytes).ok()?.trim();
+                let version = text.strip_prefix("codex-cli ")?;
+                reader::safe_version(version).then(|| version.to_owned())
+            },
+        )
+        .await
+        .ok()
+        .flatten()
+    }))
+}
+
+async fn drain_stderr(
+    mut stream: impl tokio::io::AsyncRead + Unpin,
+    summary: std::sync::Arc<std::sync::Mutex<StderrSummary>>,
+) {
+    use tokio::io::AsyncReadExt;
+    let mut chunk = [0u8; 4096];
+    let mut line = Vec::with_capacity(4096);
+    let mut oversized = false;
+    loop {
+        let Ok(count) = stream.read(&mut chunk).await else {
+            break;
+        };
+        if count == 0 {
+            break;
+        }
+        for &byte in &chunk[..count] {
+            if byte == b'\n' {
+                let mut summary = summary.lock().unwrap_or_else(|p| p.into_inner());
+                if oversized {
+                    summary.oversized_lines = summary.oversized_lines.saturating_add(1);
+                } else if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+                    match (
+                        value.get("target").and_then(Value::as_str),
+                        value.pointer("/fields/message").and_then(Value::as_str),
+                    ) {
+                        (
+                            Some("codex_models_manager::manager"),
+                            Some("failed to refresh available models: request timed out"),
+                        ) => summary.model_timeouts = summary.model_timeouts.saturating_add(1),
+                        (
+                            Some("codex_core_plugins::manager"),
+                            Some(
+                                "failed to load recommended plugins"
+                                | "failed to warm featured plugin ids cache",
+                            ),
+                        ) => summary.plugin_failures = summary.plugin_failures.saturating_add(1),
+                        _ => summary.other_lines = summary.other_lines.saturating_add(1),
+                    }
+                } else {
+                    summary.other_lines = summary.other_lines.saturating_add(1);
+                }
+                line.clear();
+                oversized = false;
+            } else if !oversized {
+                if line.len() < 4096 {
+                    line.push(byte);
+                } else {
+                    line.clear();
+                    oversized = true;
+                }
+            }
+        }
+    }
+    if oversized || !line.is_empty() {
+        let mut summary = summary.lock().unwrap_or_else(|p| p.into_inner());
+        if oversized {
+            summary.oversized_lines = summary.oversized_lines.saturating_add(1);
+        } else {
+            summary.other_lines = summary.other_lines.saturating_add(1);
+        }
+    }
+}
+
+async fn send_message<W: AsyncWrite + Unpin>(writer: &mut W, message: Value) -> io::Result<()> {
+    let mut bytes = serde_json::to_vec(&message).map_err(io::Error::other)?;
     bytes.push(b'\n');
     writer.write_all(&bytes).await?;
     writer.flush().await?;
@@ -185,8 +436,17 @@ async fn read_response<R: AsyncBufRead + Unpin>(
     reader: &mut Lines<R>,
     id: i64,
     method: &str,
-) -> Result<Value> {
-    while let Some(line) = reader.next_line().await? {
+) -> std::result::Result<Value, ReadFailure> {
+    let stage = if method == "initialize" {
+        ReadStage::Initialize
+    } else {
+        ReadStage::Quota
+    };
+    while let Some(line) = reader
+        .next_line()
+        .await
+        .map_err(|e| ReadFailure::io(stage, &e))?
+    {
         let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
@@ -196,46 +456,81 @@ async fn read_response<R: AsyncBufRead + Unpin>(
             continue;
         }
         if let Some(error) = message.get("error").filter(|value| !value.is_null()) {
-            return Err(anyhow!("Codex {method} request failed: {error}"));
+            return Err(ReadFailure::rpc(stage, error));
         }
         return message
             .get("result")
             .filter(|value| value.is_object())
             .cloned()
-            .ok_or_else(|| anyhow!("Codex {method} returned an invalid result"));
+            .ok_or_else(|| ReadFailure::new(stage, FailureKind::InvalidResponse));
     }
-    Err(anyhow!(
-        "Codex app-server closed before responding to {method}"
-    ))
+    Err(ReadFailure::new(stage, FailureKind::Transport))
 }
 
+#[cfg(test)]
 async fn request_usage<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
     reader: &mut Lines<R>,
     writer: &mut W,
-) -> Result<RawCodexUsage> {
-    send_message(
+) -> std::result::Result<RawCodexUsage, ReadFailure> {
+    let mut observer = |_| async {};
+    let mut report = ReadDiagnostic::new(1);
+    request_usage_observed(
+        reader,
         writer,
-        serde_json::json!({
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {
-                    "name": "codex-usage-overlay",
-                    "title": "Codex Usage Overlay",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "capabilities": { "experimentalApi": true }
-            }
-        }),
+        Instant::now() + reader::REFRESH_BUDGET,
+        &mut observer,
+        &mut report,
     )
-    .await?;
-    read_response(reader, 1, "initialize").await?;
+    .await
+    .map(|v| v.usage)
+}
+
+async fn request_usage_observed<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut Lines<R>,
+    writer: &mut W,
+    deadline: Instant,
+    observer: &mut impl ReadObserver,
+    report: &mut ReadDiagnostic,
+) -> std::result::Result<ObservedUsage, ReadFailure> {
+    observer.event(ReadEvent::Initializing).await;
+    let initialize_started = Instant::now();
+    let initialize = async {
+        send_message(
+            writer,
+            serde_json::json!({
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "codex-usage-overlay",
+                        "title": "Codex Usage Overlay",
+                        "version": env!("CARGO_PKG_VERSION")
+                    },
+                    "capabilities": { "experimentalApi": true }
+                }
+            }),
+        )
+        .await
+        .map_err(|e| ReadFailure::io(ReadStage::Initialize, &e))?;
+        read_response(reader, 1, "initialize").await
+    };
+    let initialize_result = timeout_at(
+        deadline.min(initialize_started + reader::INITIALIZE_BUDGET),
+        initialize,
+    )
+    .await;
+    report.initialize_ms = Some(reader::millis(initialize_started.elapsed()));
+    initialize_result.map_err(|_| ReadFailure::timeout(ReadStage::Initialize))??;
     send_message(
         writer,
         serde_json::json!({ "method": "initialized", "params": {} }),
     )
-    .await?;
-    send_message(
+    .await
+    .map_err(|e| ReadFailure::io(ReadStage::Initialize, &e))?;
+    observer.event(ReadEvent::Quota).await;
+    let quota_started = Instant::now();
+    let quota = async {
+        send_message(
         writer,
         serde_json::json!({
             "id": 2,
@@ -243,8 +538,24 @@ async fn request_usage<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
             "params": { "excludeResetCreditDetails": true, "supportsLunaReserveFallback": false }
         }),
     )
-    .await?;
-    parse_usage_result(&read_response(reader, 2, "account/rateLimits/read").await?)
+    .await.map_err(|e| ReadFailure::io(ReadStage::Quota, &e))?;
+        read_response(reader, 2, "account/rateLimits/read").await
+    };
+    let result = timeout_at(deadline, quota)
+        .await
+        .map_err(|_| ReadFailure::timeout(ReadStage::Quota));
+    report.quota_ms = Some(reader::millis(quota_started.elapsed()));
+    let result = result??;
+    let received = Instant::now();
+    let usage = parse_usage_result(&result)
+        .map_err(|_| ReadFailure::new(ReadStage::Parse, FailureKind::InvalidQuota))?;
+    Ok(ObservedUsage {
+        usage,
+        timing: ObservationTiming {
+            quota_started,
+            received,
+        },
+    })
 }
 
 fn parse_quota(value: Option<&Value>) -> QuotaSnapshot {

@@ -111,6 +111,12 @@ export interface ProtectionStatus {
   effectiveIntervalSeconds: number;
   nextPollAt: number | null;
   quotaHealth: 'pending' | 'success' | 'error' | 'stale';
+  reader?: {
+    phase: string;
+    attempt: number;
+    lastSuccess: QuotaReadDiagnostic | null;
+    lastFailure: QuotaReadDiagnostic | null;
+  } | null;
   targets: Array<{
     periodId: string; active: boolean;
     threadId: string; hostId: string | null; turnId: string | null;
@@ -121,4 +127,23 @@ export interface ProtectionStatus {
     id: string; threadId: string; phase: string; eligibleAfter: number; reason: string | null;
   }>;
   resumeStateError: string | null;
+}
+
+export interface QuotaReadDiagnostic {
+  startedAt: number;
+  attempt: number;
+  elapsedMs: number;
+  initializeMs: number | null;
+  quotaMs: number | null;
+  success: boolean;
+  failure: {
+    stage: string;
+    kind: string;
+    rpcCode: number | null;
+    httpStatus: number | null;
+    retryAfterSeconds: number | null;
+  } | null;
+  cliVersion: string | null;
+  stderr: { modelTimeouts: number; pluginFailures: number; otherLines: number; oversizedLines: number };
+  cleanupFailed: boolean;
 }

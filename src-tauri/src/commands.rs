@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 #[cfg(windows)]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(test)]
 use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -9,6 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 use crate::codex::{BurnRateTracker, CodexClient, CodexUsage, RawCodexUsage};
+use crate::codex::reader::{self, FailureKind, ReadDiagnostic, ReadEvent, ReadFailure, ReaderState, ReadStage};
 use crate::config::{ConfigManager, OverlaySettings};
 use crate::notify::{PendingResetFetches, ResetStateFile};
 use crate::tray::{open_settings_window as show_settings_win, TrayPresentationSink, TrayReadStatus};
@@ -16,6 +18,8 @@ use crate::tray::{open_settings_window as show_settings_win, TrayPresentationSin
 pub struct AppState {
     pub client: Mutex<CodexClient>,
     pub refresh_guard: Mutex<()>,
+    pub last_refresh_result: StdMutex<Option<Result<CodexUsage, String>>>,
+    pub reader: StdMutex<ReaderState>,
     pub polling: StdMutex<crate::polling::PollState>,
     pub poll_wake: tokio::sync::Notify,
     pub protection_status: StdMutex<crate::pause_control::status::StatusCache>,
@@ -70,6 +74,8 @@ impl AppState {
         Self {
             client: Mutex::new(CodexClient::new()),
             refresh_guard: Mutex::new(()),
+            last_refresh_result: StdMutex::new(None),
+            reader: StdMutex::new(ReaderState::load(&config_manager)),
             polling: StdMutex::new(crate::polling::PollState::default()),
             poll_wake: tokio::sync::Notify::new(),
             protection_status: StdMutex::new(Default::default()),
@@ -160,7 +166,116 @@ pub(crate) trait UsageSource: TrayPresentationSink {
 impl UsageSource for AppHandle {
     async fn read_usage(&self, state: &AppState) -> Result<RawCodexUsage, String> {
         let mut client = state.client.lock().await;
-        client.fetch_usage(Duration::from_secs(20)).await.map_err(|error| error.to_string())
+        let started_at = reader::unix_now();
+        // Cancellation of an earlier read must not carry recovery evidence into
+        // the next sample. This is also idempotent after an ordinary failure.
+        let previous_failed = state.reader.lock().unwrap_or_else(|p| p.into_inner()).failure.is_some();
+        if previous_failed { crate::pause_control::resume::update(state, None).await; }
+        let server_wait = state.polling.lock().unwrap_or_else(|p| p.into_inner()).server_wait(std::time::Instant::now());
+        if let Some(wait) = server_wait {
+            let mut failure = ReadFailure::new(ReadStage::Quota, FailureKind::Rpc);
+            failure.http_status = Some(429);
+            failure.retry_after_seconds = Some(wait.as_secs().saturating_add(1));
+            let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+            reader.failure = Some(failure.clone());
+            reader.phase = "error";
+            return Err(failure.to_string());
+        }
+        let mut observer = |event| async move {
+            let finished = matches!(&event, ReadEvent::Finished(_));
+            observe_read_event(self, state, event).await;
+            if finished { queue_reader_history(self); }
+        };
+        let result = client.fetch_usage(&mut observer).await;
+        let mut status = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+        match result {
+            Ok(value) => {
+                status.observation = Some(value.timing);
+                status.failure = None;
+                status.phase = if status.display_only() { "stale" } else { "success" };
+                Ok(value.usage)
+            }
+            Err(error) => {
+                status.phase = "error";
+                status.failure = Some(error.clone());
+                if error.stage == ReadStage::Refresh {
+                    let mut diagnostic = ReadDiagnostic::new(status.attempt.max(1));
+                    diagnostic.started_at = started_at;
+                    diagnostic.failure = Some(error.clone());
+                    diagnostic.elapsed_ms = reader::REFRESH_BUDGET.as_millis() as u64;
+                    status.record(diagnostic);
+                    drop(status);
+                    queue_reader_history(self);
+                }
+                Err(error.to_string())
+            }
+        }
+    }
+}
+
+pub(crate) async fn observe_read_event<S: TrayPresentationSink>(sink: &S, state: &AppState, event: ReadEvent) {
+    match event {
+        ReadEvent::Failed(error) => {
+            {
+                let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+                reader.phase = "error";
+                reader.failure = Some(error);
+            }
+            // Invalidate immediately, before any cleanup or recovery wait.
+            process_usage_error(sink, state).await;
+            crate::pause_control::resume::update(state, None).await;
+        }
+        event => {
+            let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+            match event {
+                ReadEvent::Started(attempt) => { reader.attempt = attempt; reader.phase = "initializing"; }
+                ReadEvent::Initializing => reader.phase = "initializing",
+                ReadEvent::Quota => reader.phase = "reading",
+                ReadEvent::Retrying => reader.phase = "retrying",
+                ReadEvent::Finished(report) => reader.record(report),
+                ReadEvent::Failed(_) => unreachable!(),
+            }
+        }
+    }
+}
+
+// Coalesce persistence work: one writer per app, snapshots taken after acquiring
+// ownership, and at most one latest revision waiting behind a slow disk write.
+fn queue_reader_history(app: &AppHandle) {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    {
+        let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+        if reader.writer_running { return; }
+        reader.writer_running = true;
+    }
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let (history, revision) = {
+                let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+                (reader.history.clone(), reader.revision)
+            };
+            let path = state.config_manager.quota_history_path();
+            let saved = tokio::task::spawn_blocking(move || history.save(&path)).await;
+            let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+            if !matches!(saved, Ok(Ok(()))) || reader.revision == revision {
+                reader.writer_running = false;
+                break;
+            }
+        }
+    });
+}
+
+struct RefreshCompletion<'a> { state: &'a AppState, completed: bool }
+impl Drop for RefreshCompletion<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            let failure = ReadFailure::new(ReadStage::Refresh, FailureKind::Cancelled);
+            *self.state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()) = Some(Err(failure.to_string()));
+            let mut reader = self.state.reader.lock().unwrap_or_else(|p| p.into_inner());
+            reader.phase = "error"; reader.failure = Some(failure);
+            drop(reader);
+            self.state.auto_pause.lock().unwrap_or_else(|p| p.into_inner()).invalidate_pending();
+        }
     }
 }
 
@@ -169,21 +284,21 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
         Ok(guard) => guard,
         Err(_) => {
             let guard = state.refresh_guard.lock().await;
+            let result = state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()).clone()
+                .unwrap_or_else(|| Err("Usage refresh completed without a result".into()));
             drop(guard);
-            return state
-                .last_usage
-                .lock()
-                .await
-                .clone()
-                .ok_or_else(|| "Usage refresh completed without a usable sample".to_string());
+            return result;
         }
     };
+
+    *state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    let mut completion = RefreshCompletion { state, completed: false };
 
     state.polling.lock().unwrap_or_else(|p| p.into_inner()).started(std::time::Instant::now());
     state.config_manager.write_status("reading", None);
     let raw_result = sink.read_usage(state).await;
 
-    match raw_result {
+    let result = match raw_result {
         Ok(raw) => {
             let estimate = {
                 let mut tracker = state.burn_rate.lock().await;
@@ -219,8 +334,9 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
             crate::pause_control::resume::update(state, Some(&raw)).await;
             {
                 let settings = state.settings.lock().await;
+                let display_only = state.reader.lock().unwrap_or_else(|p| p.into_inner()).display_only();
                 state.polling.lock().unwrap_or_else(|p| p.into_inner())
-                    .completed(&settings, Some(&usage), std::time::Instant::now());
+                    .completed_with_recovery(&settings, Some(&usage), std::time::Instant::now(), crate::polling::ReadRecovery { display_only, ..Default::default() });
             }
             state.poll_wake.notify_one();
             state.config_manager.write_status("ok", None);
@@ -239,15 +355,23 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
             crate::pause_control::resume::update(state, None).await;
             {
                 let settings = state.settings.lock().await;
+                let failure = state.reader.lock().unwrap_or_else(|p| p.into_inner()).failure.clone();
                 state.polling.lock().unwrap_or_else(|p| p.into_inner())
-                    .completed(&settings, None, std::time::Instant::now());
+                    .completed_with_recovery(&settings, None, std::time::Instant::now(), crate::polling::ReadRecovery {
+                        transient: failure.as_ref().is_some_and(ReadFailure::transient),
+                        retry_after_seconds: failure.as_ref().and_then(|f| f.retry_after_seconds),
+                        display_only: false,
+                    });
             }
             state.poll_wake.notify_one();
             state.config_manager.write_status("error", Some(&error));
             process_usage_error(sink, state).await;
             Err(error)
         }
-    }
+    };
+    *state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()) = Some(result.clone());
+    completion.completed = true;
+    result
 }
 
 /// Failure preserves cached usage and cancels unsent pause work from an older read.
@@ -308,28 +432,22 @@ pub async fn resume_chat(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<String, String> {
-    let settings = state.settings.lock().await.clone();
-    let (five_hour_low, weekly_low) = {
-        let last_usage = state.last_usage.lock().await;
-        if let Some(ref usage) = *last_usage {
-            let five_low = usage.five_hour_remaining_percent.is_some_and(|v| {
-                v <= settings.auto_pause_five_hour_threshold_percent
-            });
-            let weekly_low = usage.week_remaining_percent.is_some_and(|v| {
-                v <= settings.auto_pause_weekly_threshold_percent
-            });
-            (five_low, weekly_low)
-        } else {
-            (false, false)
-        }
+    refresh_usage(&app, state.inner()).await?;
+    // A newer refresh may finish while this caller is being resumed. Capture
+    // matching cached values/timing under the refresh guard, then release it
+    // before bridge I/O. The dispatch guard rejects subsequent observations.
+    let (usage, settings, settings_revision, observation) = {
+        let _refresh = state.refresh_guard.lock().await;
+        let usage = state.last_usage.lock().await.clone().ok_or_else(|| "quotaStale".to_string())?;
+        let settings = state.settings.lock().await;
+        let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+        (usage, settings.clone(), state.settings_revision.load(Ordering::Acquire),
+            reader.observation.filter(|o| reader.failure.is_none() && o.action_eligible()))
     };
-    if five_hour_low || weekly_low {
-        return Err("quotaStillLow".into());
-    }
+    resume_quota_gate(&settings, &usage, observation.is_some())?;
     let target_thread_id = {
-        let mut manager = state.resume.lock().await;
+        let manager = state.resume.lock().await;
         if let Some(ref tid) = thread_id {
-            manager.complete_plan_for_thread(tid, "resumedByUser");
             tid.clone()
         } else {
             let ready_tid = manager.plans().into_iter().find(|p| {
@@ -340,7 +458,6 @@ pub async fn resume_chat(
                 )
             }).map(|p| p.thread_id);
             if let Some(tid) = ready_tid {
-                manager.complete_plan_for_thread(&tid, "resumedByUser");
                 tid
             } else {
                 return Err("noResumePlanAvailable".into());
@@ -356,11 +473,25 @@ pub async fn resume_chat(
         transport.as_ref(),
         &target_thread_id,
         prompt,
+        || {
+            let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+            state.settings_revision.load(Ordering::Acquire) == settings_revision
+                && reader.failure.is_none()
+                && reader.observation.is_some_and(|o| o.action_eligible() && observation.is_some_and(|original| original.quota_started == o.quota_started))
+        },
     )
     .await;
+    if outcome.is_ok() { state.resume.lock().await.complete_plan_for_thread(&target_thread_id, "resumedByUser"); }
     crate::pause_control::resume::update(state.inner(), None).await;
     crate::pause_control::status::publish(&app, state.inner()).await;
     outcome
+}
+
+fn resume_quota_gate(settings: &OverlaySettings, usage: &CodexUsage, fresh: bool) -> Result<(), String> {
+    let (Some(five), Some(week)) = (usage.five_hour_remaining_percent, usage.week_remaining_percent) else { return Err("quotaStale".into()); };
+    if !fresh { return Err("quotaStale".into()); }
+    if five <= settings.auto_pause_five_hour_threshold_percent || week <= settings.auto_pause_weekly_threshold_percent { return Err("quotaStillLow".into()); }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1286,6 +1417,61 @@ mod tests {
         assert_eq!(resolve_locale("zh-CN"), "zh-CN");
         assert_eq!(resolve_locale("zh-Hant"), "zh-Hant");
         assert_eq!(resolve_locale("en-US"), "en-US");
+    }
+}
+
+#[cfg(test)]
+mod refresh_coalescing_tests {
+    use super::*;
+    use std::{future::{poll_fn, Future}, task::Poll};
+    struct WaitingSource { release: tokio::sync::Notify, reads: AtomicU64, result: Result<RawCodexUsage, String> }
+    impl TrayPresentationSink for WaitingSource {
+        fn present(&self, _: crate::tray::TrayPresentation) {}
+        fn app_handle(&self) -> Option<&AppHandle> { None }
+    }
+    impl UsageSource for WaitingSource {
+        async fn read_usage(&self, _: &AppState) -> Result<RawCodexUsage, String> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.release.notified().await;
+            self.result.clone()
+        }
+    }
+    fn sample() -> RawCodexUsage {
+        RawCodexUsage { account_id: Some("test".into()), five_hour: Default::default(), weekly: Default::default(), credits_display: "—".into(), credits_balance: None, has_credits: false, fetched_at: reader::unix_now() }
+    }
+    #[tokio::test]
+    async fn concurrent_callers_share_success_or_failure_even_with_cached_usage() {
+        for failed in [false, true] {
+            let dir = std::env::temp_dir().join(format!("quota-coalescing-{}-{failed}", std::process::id()));
+            let state = Arc::new(AppState::for_test(ConfigManager::with_runtime_dir(dir.clone())));
+            *state.last_usage.lock().await = Some(sample().to_ui(None, None));
+            let source = WaitingSource { release: Default::default(), reads: AtomicU64::new(0), result: if failed { Err("shared failure".into()) } else { Ok(sample()) } };
+            let mut leader = Box::pin(refresh_usage(&source, &state));
+            poll_fn(|cx| { assert!(leader.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            let mut follower = Box::pin(refresh_usage(&source, &state));
+            poll_fn(|cx| { assert!(follower.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            source.release.notify_one();
+            let (a, b) = tokio::join!(leader, follower);
+            assert_eq!(a, b);
+            assert_eq!(a.is_err(), failed);
+            assert_eq!(source.reads.load(Ordering::SeqCst), 1);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+    #[tokio::test]
+    async fn cancelling_the_leader_does_not_return_old_cached_success_to_a_waiter() {
+        let dir = std::env::temp_dir().join(format!("quota-cancel-leader-{}", std::process::id()));
+        let state = Arc::new(AppState::for_test(ConfigManager::with_runtime_dir(dir.clone())));
+        *state.last_usage.lock().await = Some(sample().to_ui(None, None));
+        let source = WaitingSource { release: Default::default(), reads: AtomicU64::new(0), result: Ok(sample()) };
+        let mut leader = Box::pin(refresh_usage(&source, &state));
+        poll_fn(|cx| { assert!(leader.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+        let mut follower = Box::pin(refresh_usage(&source, &state));
+        poll_fn(|cx| { assert!(follower.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+        drop(leader);
+        assert!(follower.await.unwrap_err().contains("Cancelled"));
+        assert_eq!(state.reader.lock().unwrap().phase, "error");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
@@ -2393,6 +2579,50 @@ mod auto_pause_tests {
             assert_eq!(state.auto_pause.lock().unwrap().pending_len(), 0);
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[tokio::test]
+    async fn an_attempt_failure_invalidates_delivery_before_the_inline_retry() {
+        let (state, transport, dir) = armed_state("retry-invalidation").await;
+        let gate = transport.hold_handshakes();
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+        refresh_usage(&sink, &state).await.unwrap();
+        wait_for_handshakes(&transport, 1).await;
+        observe_read_event(&sink, &state, ReadEvent::Failed(ReadFailure::new(ReadStage::Quota, FailureKind::Transport))).await;
+        observe_read_event(&sink, &state, ReadEvent::Retrying).await;
+        gate.notify_one();
+        wait_for_pause_worker(&state).await;
+        assert!(transport.sent_prompts().is_empty());
+        assert_eq!(crate::pause_control::status::snapshot(&state).await.reason.as_deref(), Some("quotaReadRetrying"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_samples_keep_only_the_remaining_action_lifetime() {
+        let (state, transport, dir) = armed_state("slow-action-age").await;
+        state.auto_pause.lock().unwrap().set_worker_spawner(Arc::new(|_| {}));
+        let now = tokio::time::Instant::now();
+        state.reader.lock().unwrap().observation = Some(reader::ObservationTiming { quota_started: now - Duration::from_millis(27_474), received: now });
+        refresh_usage(&OfflineSink::with_usage(low_quota_usage(Some("acct-1"))), &state).await.unwrap();
+        tokio::time::advance(Duration::from_millis(2_527)).await;
+        crate::pause_control::run_delivery_worker(state.clone()).await;
+        assert!(transport.calls().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn display_only_samples_update_the_account_but_cannot_schedule_actions() {
+        let (state, transport, dir) = armed_state("display-only").await;
+        let now = tokio::time::Instant::now();
+        state.reader.lock().unwrap().observation = Some(reader::ObservationTiming { quota_started: now - Duration::from_secs(35), received: now });
+        let sample = refresh_usage(&OfflineSink::with_usage(low_quota_usage(Some("new-account"))), &state).await.unwrap();
+        assert_eq!(sample.five_hour_remaining_percent, Some(3));
+        assert!(transport.calls().is_empty());
+        assert!(!state.auto_pause.lock().unwrap().running_flag());
+        assert_eq!(crate::pause_control::status::snapshot(&state).await.quota_health, "stale");
+        assert_eq!(state.polling.lock().unwrap().effective_interval_seconds, 15);
+        assert_eq!(resume_quota_gate(&OverlaySettings::default(), &sample, false), Err("quotaStale".into()));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

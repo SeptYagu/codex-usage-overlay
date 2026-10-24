@@ -867,9 +867,18 @@ pub async fn send_resume_to_thread(
     transport: &dyn BridgeTransport,
     target_thread_id: &str,
     prompt: &str,
+    is_current: impl Fn() -> bool + Send,
 ) -> Result<String, String> {
+    if !is_current() { return Err("quotaStale".into()); }
     let discovery = discover_bridge().await;
     let candidates = AutoPauseController::candidates(&discovery);
+    send_resume_with_candidates(transport, target_thread_id, prompt, &candidates, is_current).await
+}
+
+async fn send_resume_with_candidates(
+    transport: &dyn BridgeTransport, target_thread_id: &str, prompt: &str,
+    candidates: &[BridgeCandidate], is_current: impl Fn() -> bool + Send,
+) -> Result<String, String> {
     if candidates.is_empty() {
         return Err("bridgeUnavailable".into());
     }
@@ -877,7 +886,8 @@ pub async fn send_resume_to_thread(
         "threadId": target_thread_id,
         "prompt": prompt,
     });
-    for candidate in &candidates {
+    for candidate in candidates {
+        if !is_current() { return Err("quotaStale".into()); }
         let caller = if looks_like_thread_id(target_thread_id) {
             target_thread_id
         } else {
@@ -927,7 +937,7 @@ pub struct PendingSample {
     pub usage: CodexUsage,
     pub account_id: String,
     generation: u64,
-    received_at: std::time::Instant,
+    received_at: tokio::time::Instant,
 }
 
 /// How the candidate list is produced.
@@ -1353,6 +1363,13 @@ pub fn schedule(
     else {
         return;
     };
+    let timing = state.reader.lock().unwrap_or_else(|p| p.into_inner()).observation;
+    if timing.is_some_and(|timing| !timing.action_eligible()) {
+        // Account changes still invalidate the old account even when this
+        // response is suitable only for display.
+        lock_controller(state).prune(&account_id, usage.fetched_at);
+        return;
+    }
     if !settings.auto_pause_on_low_quota {
         // The switch is off: the active periods are released, so a session
         // that comes back later starts a new period instead of reusing the
@@ -1375,7 +1392,7 @@ pub fn schedule(
         usage,
         account_id,
         generation,
-        received_at: std::time::Instant::now(),
+        received_at: timing.map(|v| v.quota_started).unwrap_or_else(tokio::time::Instant::now),
     };
 
     let spawner = {
@@ -1934,6 +1951,22 @@ pub(crate) mod testing {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test(start_paused = true)]
+    async fn manual_resume_rechecks_freshness_before_each_candidate() {
+        let transport = testing::ScriptedTransport::new();
+        transport.set_send_success(false);
+        transport.set_send_delay_ms(1500);
+        let candidates = vec![
+            BridgeCandidate { pipe: "first".into(), caller_thread_id: "caller".into() },
+            BridgeCandidate { pipe: "second".into(), caller_thread_id: "caller".into() },
+        ];
+        let started = tokio::time::Instant::now();
+        let result = send_resume_with_candidates(&transport, "test-thread", "Continue", &candidates,
+            || started.elapsed() < Duration::from_secs(1)).await;
+        assert_eq!(result, Err("quotaStale".into()));
+        assert_eq!(transport.calls().len(), 1);
+    }
 
     fn settings() -> OverlaySettings {
         let mut settings = OverlaySettings::default();

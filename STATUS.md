@@ -1,5 +1,12 @@
 # Status
 
+## v1.4.1 quota read reliability — 2026-10-23
+
+- Implemented the [quota reliability plan](docs/handoff/2026-10-23-quota-read-reliability-plan.md): one 45-second refresh budget, one bounded early transient retry, completion-based recovery polling starting at 15 seconds, shared failures for concurrent callers, conservative action freshness, and bounded retained diagnostics.
+- Settings shows reading/retry progress, recovery countdown and last failure/success timing in all three languages. Slow responses update display without extending the 30-second pause/resume action window.
+- Validation: 355 regular Rust tests, locked all-target check, 113 frontend tests, production build, six packaging fixtures and 616 Edge rendering cases passed. Three native read-only quota samples at normal cadence succeeded with owned-process cleanup. [Implementation record and smoke limits](docs/handoff/2026-10-23-quota-read-reliability-implementation.md).
+- All release versions are aligned at 1.4.1. Target tag: `v1.4.1`; [release notes](docs/releases/v1.4.1.md). Published packages are built and signed by GitHub Actions from the tag.
+
 ## v1.4.0 stable release preparation — 2026-10-23
 
 - Implemented safe assisted resume mechanism: transition cooperative pause plans to `Ready` once quota reset is verified (2 fresh samples >= 15s apart, >= threshold + 2%), providing a one-click `[Resume chat]` action button in Settings that dispatches localized `"继续"` / `"繼續"` / `"Continue"`.

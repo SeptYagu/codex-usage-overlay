@@ -187,6 +187,10 @@ impl ConfigManager {
         self.runtime_dir.join("usage-status.json")
     }
 
+    pub fn quota_history_path(&self) -> PathBuf {
+        self.runtime_dir.join("quota-read-history.json")
+    }
+
     pub fn reset_state_path(&self) -> PathBuf {
         self.runtime_dir.join("reset-state.json")
     }

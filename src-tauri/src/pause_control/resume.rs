@@ -321,12 +321,20 @@ impl ResumeManager {
         }
     }
 
+    #[cfg(test)]
     pub fn observe(
         &mut self,
         raw: Option<&RawCodexUsage>,
         settings: &OverlaySettings,
         capabilities: ControlCapabilities,
         now: i64,
+    ) {
+        self.observe_with_freshness(raw, settings, capabilities, now, true);
+    }
+
+    pub fn observe_with_freshness(
+        &mut self, raw: Option<&RawCodexUsage>, settings: &OverlaySettings,
+        capabilities: ControlCapabilities, now: i64, action_fresh: bool,
     ) {
         if !settings.auto_pause_on_low_quota || !settings.auto_resume_after_quota_reset {
             self.cancel_all("resumeDisabled");
@@ -363,7 +371,7 @@ impl ResumeManager {
             if plan.phase == ResumePhase::NeedsReview {
                 continue;
             }
-            let recovered = raw.is_some_and(|raw| {
+            let recovered = action_fresh && raw.is_some_and(|raw| {
                 raw.fetched_at <= now
                     && now.saturating_sub(raw.fetched_at) <= 30
                     && raw.fetched_at >= plan.eligible_after
@@ -488,8 +496,12 @@ pub async fn update(state: &crate::commands::AppState, raw: Option<&RawCodexUsag
         .transport
         .capabilities();
     let pending = {
+        let action_fresh = {
+            let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+            reader.failure.is_none() && reader.observation.is_none_or(|o| o.action_eligible())
+        };
         let mut manager = state.resume.lock().await;
-        manager.observe(raw, &settings, capabilities, super::unix_now());
+        manager.observe_with_freshness(raw, &settings, capabilities, super::unix_now(), action_fresh);
         manager.pending_write()
     };
     match pending {
@@ -628,6 +640,19 @@ mod tests {
         );
         assert_eq!(m.file.plans[0].phase, ResumePhase::Cancelled);
     }
+    #[test]
+    fn a_slow_display_only_response_clears_recovery_but_still_cancels_an_old_account() {
+        let mut m = manager();
+        m.record_confirmed(evidence(), &settings(), caps(), 900).unwrap();
+        m.observe(Some(&raw(1120, 0.0, Some(0.0))), &settings(), caps(), 1120);
+        m.observe_with_freshness(Some(&raw(1135, 0.0, Some(0.0))), &settings(), caps(), 1135, false);
+        assert_eq!(m.file.plans[0].first_recovered_at, None);
+        assert_ne!(m.file.plans[0].phase, ResumePhase::Ready);
+        let mut sample = raw(1150, 0.0, Some(0.0)); sample.account_id = Some("other".into());
+        m.observe_with_freshness(Some(&sample), &settings(), caps(), 1150, false);
+        assert_eq!(m.file.plans[0].phase, ResumePhase::Cancelled);
+    }
+
     #[test]
     fn a_failed_read_resets_recovery_and_account_changes_cancel() {
         let mut m = manager();

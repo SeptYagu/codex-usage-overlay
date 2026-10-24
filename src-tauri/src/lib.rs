@@ -28,6 +28,8 @@ pub fn run() {
     let app_state = Arc::new(AppState {
         client: Mutex::new(CodexClient::new()),
         refresh_guard: Mutex::new(()),
+        last_refresh_result: std::sync::Mutex::new(None),
+        reader: std::sync::Mutex::new(codex::reader::ReaderState::load(&config_manager)),
         polling: std::sync::Mutex::new(polling::PollState::default()),
         poll_wake: tokio::sync::Notify::new(),
         protection_status: std::sync::Mutex::new(Default::default()),

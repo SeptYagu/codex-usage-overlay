@@ -70,7 +70,7 @@ const fs = require('node:fs');
                     await page.screenshot({ path: `output/display-qa/settings-${language}.png` });
             }
             for (const language of ['en-US', 'zh-CN', 'zh-Hant'])
-              for (const fixture of ['normal', 'protection-requested', 'protection-error', 'protection-low']) {
+              for (const fixture of ['normal', 'protection-requested', 'protection-error', 'protection-low', 'protection-retrying', 'protection-quota-error', 'protection-stale']) {
                 for (const size of [{ width: 960, height: 620 }, { width: 760, height: 500 }])
                   for (const expanded of [false, true]) {
                     await page.setViewportSize(size);
@@ -92,6 +92,10 @@ const fs = require('node:fs');
                     if (dpr === 1 && fixture === 'protection-requested' && expanded) {
                         await page.evaluate(() => document.querySelector('[data-protection-status]').parentElement.scrollIntoView({ block: 'start' }));
                         await page.screenshot({ path: `output/display-qa/protection-${language}-${size.width}.png` });
+                    }
+                    if (dpr === 1 && fixture === 'protection-retrying' && expanded) {
+                        await page.evaluate(() => document.querySelector('[data-protection-status]').parentElement.scrollIntoView({ block: 'start' }));
+                        await page.screenshot({ path: `output/display-qa/quota-retry-${language}-${size.width}.png` });
                     }
                   }
                 await page.setViewportSize({ width: 500, height: 620 });

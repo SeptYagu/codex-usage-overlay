@@ -68,7 +68,7 @@ async fn failed_initialization_returns_immediately_without_querying_usage() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(error.contains("initialize") && error.contains("unsupported client"));
+    assert!(error.contains("initialize") && error.contains("Rpc"));
     let requests = String::from_utf8(written).unwrap();
     assert_eq!(requests.lines().count(), 1);
     assert!(!requests.contains("account/rateLimits/read"));
@@ -83,6 +83,147 @@ async fn missing_or_malformed_response_fails_without_waiting_for_timeout() {
 }
 
 use serde_json::json;
+
+#[test]
+#[ignore = "requires an explicitly selected installed Codex and live authenticated quota service"]
+fn live_quota_reader_smoke() {
+    let exe = std::env::var_os("CODEX_OVERLAY_SMOKE_EXE")
+        .expect("select the installed helper explicitly");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut client = CodexClient {
+            exe_path: Some(PathBuf::from(exe)),
+        };
+        let samples = std::env::var("CODEX_OVERLAY_SMOKE_SAMPLES")
+            .ok()
+            .and_then(|v| v.parse::<u8>().ok())
+            .unwrap_or(3)
+            .clamp(1, 3);
+        for index in 0..samples {
+            let started = Instant::now();
+            let mut observer = |event| {
+                if let ReadEvent::Finished(report) = event {
+                    println!(
+                        "quota-reader-smoke {}",
+                        serde_json::to_string(&report).unwrap()
+                    );
+                }
+                async {}
+            };
+            let result = client.fetch_usage(&mut observer).await.unwrap();
+            assert_eq!(result.usage.five_hour.window_duration_mins, Some(300));
+            assert_eq!(result.usage.weekly.window_duration_mins, Some(10080));
+            println!(
+                "quota-reader-smoke sample={} valid=true actionFresh={}",
+                index + 1,
+                result.timing.action_eligible()
+            );
+            if index + 1 < samples {
+                tokio::time::sleep_until(started + Duration::from_secs(60)).await;
+            }
+        }
+    });
+}
+
+#[tokio::test(start_paused = true)]
+async fn real_protocol_accepts_slow_quota_and_keeps_request_start_for_action_age() {
+    for delay in [24_110, 27_474, 35_000] {
+        let (client, server) = duplex(4096);
+        let (client_read, mut writer) = tokio::io::split(client);
+        let (server_read, mut server_write) = tokio::io::split(server);
+        let mut reader = BufReader::new(client_read).lines();
+        let server = async move {
+            let mut requests = BufReader::new(server_read).lines();
+            let _: Value =
+                serde_json::from_str(&requests.next_line().await.unwrap().unwrap()).unwrap();
+            send_message(
+                &mut server_write,
+                json!({"id":1,"result":{"userAgent":"codex_cli_rs/0.163.0-alpha.11.2"}}),
+            )
+            .await
+            .unwrap();
+            requests.next_line().await.unwrap().unwrap();
+            let query: Value =
+                serde_json::from_str(&requests.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(query["method"], "account/rateLimits/read");
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            send_message(
+                &mut server_write,
+                json!({"id":2,"result":{"rateLimits":{"primary":{"usedPercent":80}}}}),
+            )
+            .await
+            .unwrap();
+        };
+        let mut report = ReadDiagnostic::new(1);
+        let mut observer = |_| async {};
+        let (result, ()) = tokio::join!(
+            request_usage_observed(
+                &mut reader,
+                &mut writer,
+                Instant::now() + Duration::from_secs(43),
+                &mut observer,
+                &mut report
+            ),
+            server
+        );
+        let result = result.unwrap();
+        assert_eq!(result.usage.five_hour.used_percent, Some(80.0));
+        assert_eq!(report.quota_ms, Some(delay));
+        assert_eq!(
+            report.cli_version, None,
+            "initialize userAgent is not authoritative CLI version metadata"
+        );
+        assert_eq!(result.timing.action_eligible(), delay <= 30_000);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn initialization_has_its_own_cap_and_quota_stall_uses_remaining_budget() {
+    for initialize_ok in [false, true] {
+        let (client, server) = duplex(4096);
+        let (client_read, mut writer) = tokio::io::split(client);
+        let (server_read, mut server_write) = tokio::io::split(server);
+        let mut reader = BufReader::new(client_read).lines();
+        let server = tokio::spawn(async move {
+            let mut requests = BufReader::new(server_read).lines();
+            requests.next_line().await.unwrap();
+            if initialize_ok {
+                send_message(&mut server_write, json!({"id":1,"result":{}}))
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(Duration::from_secs(100)).await;
+        });
+        let started = Instant::now();
+        let mut report = ReadDiagnostic::new(1);
+        let error = request_usage_observed(
+            &mut reader,
+            &mut writer,
+            started + Duration::from_secs(43),
+            &mut |_| async {},
+            &mut report,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(
+            error.stage,
+            if initialize_ok {
+                ReadStage::Quota
+            } else {
+                ReadStage::Initialize
+            }
+        );
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(if initialize_ok { 43 } else { 10 })
+        );
+        server.abort();
+    }
+}
 
 // These process tests exercise the real cleanup boundary without using a Codex
 // account or terminating any pre-existing application. Each helper self-exits
@@ -120,6 +261,9 @@ mod process_tests {
 
         if mode != "wait" {
             assert_eq!(read_request(&mut input)["method"], "initialize");
+            if mode == "early-eof" {
+                return;
+            }
             let initialized = if mode == "init-error" {
                 json!({"id": 1, "error": {"message": "init failed"}})
             } else {
@@ -133,8 +277,16 @@ mod process_tests {
                     read_request(&mut input)["method"],
                     "account/rateLimits/read"
                 );
+                if mode == "stderr-noise" {
+                    let mut stderr = std::io::stderr().lock();
+                    stderr.write_all(&vec![b'x'; 128 * 1024]).unwrap();
+                    writeln!(stderr).unwrap();
+                    writeln!(stderr, "private user@host token=should-never-be-saved").unwrap();
+                    writeln!(stderr, "{{\"target\":\"codex_models_manager::manager\",\"fields\":{{\"message\":\"failed to refresh available models: request timed out\"}}}}").unwrap();
+                    stderr.flush().unwrap();
+                }
                 let usage = match mode.as_str() {
-                    "success" => {
+                    "success" | "stderr-noise" => {
                         json!({"id": 2, "result": {"rateLimits": {"primary": {"usedPercent": 99}}}})
                     }
                     "usage-error" => json!({"id": 2, "error": {"message": "usage failed"}}),
@@ -159,7 +311,11 @@ mod process_tests {
                 "--format=terse",
             ])
             .env(FIXTURE_MODE, mode)
-            .stderr(Stdio::inherit())
+            .stderr(if mode == "stderr-noise" {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
             .spawn()
             .unwrap();
         let pid = child.id().unwrap();
@@ -203,11 +359,90 @@ mod process_tests {
     }
 
     #[tokio::test]
+    async fn noisy_stderr_cannot_block_the_reader_or_enter_diagnostics() {
+        let (child, handle) = mock_child("stderr-noise").await;
+        let mut report = ReadDiagnostic::new(1);
+        let result = attempt_child(
+            child,
+            Instant::now() + Duration::from_secs(5),
+            &mut |_| async {},
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_stopped(handle).await;
+        assert_eq!(report.stderr.oversized_lines, 1);
+        assert_eq!(report.stderr.model_timeouts, 1);
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("user@host") && !json.contains("should-never"));
+    }
+
+    struct Helpers {
+        modes: Vec<&'static str>,
+        handles: Vec<OwnedHandle>,
+    }
+    impl reader::AttemptSource for Helpers {
+        async fn attempt(
+            &mut self,
+            deadline: Instant,
+            attempt: u8,
+            observer: &mut impl ReadObserver,
+        ) -> std::result::Result<ObservedUsage, ReadFailure> {
+            let (child, handle) = mock_child(self.modes.remove(0)).await;
+            self.handles.push(handle);
+            attempt_child(child, deadline, observer, &mut ReadDiagnostic::new(attempt)).await
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_and_cancellation_stop_every_owned_helper() {
+        let mut helpers = Helpers {
+            modes: vec!["early-eof", "success"],
+            handles: Vec::new(),
+        };
+        assert!(
+            reader::read_with_policy(&mut helpers, &mut |_| async {}, Duration::from_secs(20))
+                .await
+                .is_ok()
+        );
+        assert_eq!(helpers.handles.len(), 2);
+        for handle in helpers.handles {
+            assert_stopped(handle).await;
+        }
+        let mut helpers = Helpers {
+            modes: vec!["early-eof", "success"],
+            handles: Vec::new(),
+        };
+        let retry_seen = std::sync::Arc::new(tokio::sync::Notify::new());
+        {
+            let notify = retry_seen.clone();
+            let mut observer = move |event| {
+                if matches!(event, ReadEvent::Retrying) {
+                    notify.notify_one();
+                }
+                async {}
+            };
+            let read =
+                reader::read_with_policy(&mut helpers, &mut observer, Duration::from_secs(20));
+            tokio::pin!(read);
+            tokio::select! {
+                _ = retry_seen.notified() => {},
+                result = &mut read => panic!("reader completed before retry cancellation: {}", result.is_ok()),
+            }
+            // Dropping the policy future here cancels the recovery delay.
+        }
+        assert_eq!(helpers.handles.len(), 1);
+        for handle in helpers.handles {
+            assert_stopped(handle).await;
+        }
+    }
+
+    #[tokio::test]
     async fn success_and_protocol_errors_stop_the_owned_process() {
         for (mode, expected_error) in [
             ("success", None),
-            ("init-error", Some("init failed")),
-            ("usage-error", Some("usage failed")),
+            ("init-error", Some("initialize")),
+            ("usage-error", Some("account/rateLimits/read")),
         ] {
             let (child, handle) = mock_child(mode).await;
             let result = fetch_usage_from_child(child, Duration::from_secs(5)).await;
@@ -237,7 +472,7 @@ mod process_tests {
             .await
             .unwrap_err();
         assert_stopped(handle).await;
-        assert!(error.to_string().contains("stdout"));
+        assert!(error.to_string().contains("process spawn"));
     }
 
     #[tokio::test]

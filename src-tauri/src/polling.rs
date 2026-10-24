@@ -11,6 +11,15 @@ pub struct PollState {
     last_completed: Option<Instant>,
     deadline: Option<Instant>,
     pub effective_interval_seconds: u64,
+    recovery: ReadRecovery,
+    server_not_before: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReadRecovery {
+    pub transient: bool,
+    pub retry_after_seconds: Option<u64>,
+    pub display_only: bool,
 }
 
 impl PollState {
@@ -18,12 +27,19 @@ impl PollState {
         self.last_started = Some(now);
     }
 
+    #[cfg(test)]
     pub fn completed(
         &mut self,
         settings: &OverlaySettings,
         usage: Option<&CodexUsage>,
         now: Instant,
     ) {
+        self.completed_with_recovery(settings, usage, now, ReadRecovery::default());
+    }
+
+    pub fn completed_with_recovery(&mut self, settings: &OverlaySettings, usage: Option<&CodexUsage>, now: Instant, recovery: ReadRecovery) {
+        self.recovery = recovery;
+        self.server_not_before = recovery.retry_after_seconds.and_then(|secs| now.checked_add(Duration::from_secs(secs)));
         self.last_completed = Some(now);
         if let Some(usage) = usage {
             self.failures = 0;
@@ -78,20 +94,31 @@ impl PollState {
         } else {
             normal
         };
-        self.effective_interval_seconds = base
+        self.effective_interval_seconds = if self.recovery.display_only { 15 }
+        else if self.recovery.transient && self.failures > 0 {
+            15u64.saturating_mul(1u64 << self.failures.saturating_sub(1).min(10)).min(normal.max(300))
+        } else { base
             .saturating_mul(1u64 << self.failures.min(10))
-            .min(normal.max(300));
-        let start = self.last_started.unwrap_or(now);
+            .min(normal.max(300)) };
+        let start = if self.recovery.transient || self.recovery.display_only { self.last_completed } else { self.last_started }.unwrap_or(now);
         let floor = self
             .last_completed
             .map(|at| at + Duration::from_secs(5))
             .unwrap_or(now);
         self.deadline =
-            Some((start + Duration::from_secs(self.effective_interval_seconds)).max(floor));
+            Some((start + Duration::from_secs(self.effective_interval_seconds)).max(floor).max(self.server_not_before.unwrap_or(now)));
     }
 
     pub fn request_now(&mut self, now: Instant) {
-        self.deadline = Some(now);
+        self.deadline = Some(now.max(self.server_not_before.unwrap_or(now)));
+    }
+
+    pub fn server_wait(&self, now: Instant) -> Option<Duration> {
+        self.server_not_before.filter(|at| *at > now).map(|at| at.duration_since(now))
+    }
+
+    pub fn healthy_interval_seconds(&self, settings: &OverlaySettings) -> u64 {
+        if settings.auto_pause_on_low_quota && self.fast { 15 } else { u64::from(settings.refresh_interval_seconds.clamp(15, 3600)) }
     }
 
     pub fn deadline(&mut self, now: Instant) -> Instant {
@@ -191,6 +218,42 @@ mod tests {
         poll.completed(&settings, Some(&usage(Some(5), Some(50))), now);
         assert_eq!(poll.effective_interval_seconds, 15);
     }
+    #[test]
+    fn transient_recovery_starts_after_completion_and_does_not_reset_on_settings_changes() {
+        let now = Instant::now();
+        let mut poll = PollState::default();
+        let mut settings = settings();
+        for expected in [15, 30, 60, 120, 240, 300, 300] {
+            poll.started(now);
+            let completed = now + Duration::from_secs(45);
+            poll.completed_with_recovery(&settings, None, completed, ReadRecovery { transient: true, ..Default::default() });
+            assert_eq!(poll.effective_interval_seconds, expected);
+            assert_eq!(poll.deadline(completed), completed + Duration::from_secs(expected));
+            settings.language = "en-US".into();
+            poll.recalculate(&settings, completed);
+            assert_eq!(poll.effective_interval_seconds, expected);
+            assert_eq!(poll.healthy_interval_seconds(&settings), 60);
+        }
+        poll.completed(&settings, Some(&usage(Some(80), Some(80))), now);
+        assert_eq!(poll.effective_interval_seconds, 60);
+    }
+
+    #[test]
+    fn server_delay_and_display_only_recovery_are_respected() {
+        let now = Instant::now();
+        let mut poll = PollState::default();
+        let settings = settings();
+        poll.started(now);
+        poll.completed_with_recovery(&settings, None, now, ReadRecovery { transient: true, retry_after_seconds: Some(90), display_only: false });
+        poll.request_now(now + Duration::from_secs(1));
+        assert_eq!(poll.deadline(now), now + Duration::from_secs(90));
+        assert_eq!(poll.server_wait(now), Some(Duration::from_secs(90)));
+        let received = now + Duration::from_secs(100);
+        poll.completed_with_recovery(&settings, Some(&usage(Some(70), Some(80))), received, ReadRecovery { display_only: true, ..Default::default() });
+        assert_eq!(poll.deadline(received), received + Duration::from_secs(15));
+        assert_eq!(poll.server_wait(received), None);
+    }
+
     #[test]
     fn disabling_and_immediate_wake_replace_the_old_deadline() {
         let now = Instant::now();

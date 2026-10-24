@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-10-23
+
+### Fixed
+- Accept delayed quota responses within a shared 45-second refresh budget, with one bounded retry for early transient failures and cancellable helper cleanup.
+- Recover from transient read failures after 15 seconds, then back off progressively, instead of immediately waiting two minutes at the default polling interval.
+- Return the actual shared failure to concurrent refresh callers instead of treating cached usage as a successful refresh.
+- Count pause/resume observation freshness from quota-request start; responses older than 30 seconds remain usable for display while protection waits for fresh data. Manual resume refreshes quota and checks freshness and settings again before dispatch.
+- Keep protection freshness independent of failure backoff, so a longer retry interval cannot make old quota appear fresh again.
+
+### Added
+- Bounded local quota-read history with per-stage timings, structured error categories, safe executable/version metadata, and summarized helper diagnostics. Successful recovery retains the last failure evidence.
+- Localized reading, retrying, next-check countdown, and retained failure/timing details in Settings.
+
 ## [1.4.0] - 2026-10-23
 
 ### Added

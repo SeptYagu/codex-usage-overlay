@@ -27,6 +27,10 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
   const capable = !!status?.capabilities.directInterrupt && status.capabilities.completionObservation
     && status.capabilities.userActivityObservation && status.capabilities.continuationControl;
   const reason = unavailable ? 'statusUnavailable' : status?.reason;
+  const reader = status?.reader;
+  const reading = reader && ['initializing', 'reading'].includes(reader.phase);
+  const retrying = reader && (reader.phase === 'retrying' || (reading && reader.attempt > 1));
+  const lastFailure = reader?.lastFailure;
   const cancel = async () => {
     setActionError(false);
     setResumeError(null);
@@ -40,7 +44,7 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
       await invoke('resume_chat', { threadId });
     } catch (err: unknown) {
       const errMsg = typeof err === 'string' ? err : err instanceof Error ? err.message : '';
-      setResumeError(errMsg.includes('quotaStillLow') ? 'quotaStillLow' : 'generic');
+      setResumeError(errMsg.includes('quotaStillLow') ? 'quotaStillLow' : errMsg.includes('quotaStale') ? 'quotaStale' : 'generic');
     } finally {
       setResumingThreadId(null);
     }
@@ -51,12 +55,22 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
       {label}
       {reason && <span className="block text-[11px]">{t(`protectionReasons.${reason}`, { defaultValue: t('protectionReasons.statusUnavailable') })}</span>}
     </div>
+    {retrying ? <p>{t('quotaReadRetrying')}</p> : reading ? <p>{t('quotaReadReading')}</p>
+      : reader?.phase === 'error' && status?.nextPollAt != null && <p>
+        {t('quotaReadRetryCountdown', { seconds: Math.max(0, status.nextPollAt - now) })}
+      </p>}
     {settings.autoPauseOnLowQuota && status?.lastSuccessfulSampleAt != null && <p className="text-[11px] text-slate-500 dark:text-slate-400">
       {t('protectionSampleAge', { seconds: Math.max(0, now - status.lastSuccessfulSampleAt), interval: status.effectiveIntervalSeconds })}
     </p>}
     <details className="text-slate-500 dark:text-slate-400">
       <summary className="cursor-pointer">{t('protectionDetails')}</summary>
       <div className="space-y-1 pt-1 break-words">
+        {lastFailure?.failure && <p data-quota-last-failure>{t('quotaReadLastFailure', {
+          reason: t(`quotaReadFailures.${lastFailure.failure.kind}`, { defaultValue: t('quotaReadFailures.rpc') }),
+          stage: t(`quotaReadStages.${lastFailure.failure.stage}`, { defaultValue: t('quotaReadStages.refresh') }),
+          time: new Date(lastFailure.startedAt * 1000).toLocaleTimeString(),
+        })}</p>}
+        {reader?.lastSuccess && <p>{t('quotaReadTiming', { milliseconds: reader.lastSuccess.elapsedMs, attempt: reader.lastSuccess.attempt })}</p>}
         <p>{t('protectionCooperative')}</p>
         {!capable && <p>{t('protectionResumeUnavailable')}</p>}
         {onPatchSettings && <label className="flex items-center justify-between gap-3 py-1">
@@ -95,7 +109,7 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
         {status?.resumePlans.some(plan => ['waitingForQuota', 'ready', 'needsReview'].includes(plan.phase))
           && <button type="button" onClick={cancel} className="underline">{t('cancelResumePlans')}</button>}
         {resumeError && <p role="alert" className="text-amber-700 dark:text-amber-300">
-          {resumeError === 'quotaStillLow' ? t('quotaStillLow') : t('resumeFailed')}
+          {resumeError === 'quotaStillLow' ? t('quotaStillLow') : resumeError === 'quotaStale' ? t('protectionReasons.quotaStale') : t('resumeFailed')}
         </p>}
         {actionError && <p role="alert">{t('protectionReasons.resumeStateWriteFailed')}</p>}
       </div>

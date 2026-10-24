@@ -1,5 +1,7 @@
 # Handoff index
 
+2026-10-23 v1.4.1 quota read reliability: [implementation and verification](2026-10-23-quota-read-reliability-implementation.md), [plan](2026-10-23-quota-read-reliability-plan.md). Shared 45-second budget, bounded transient retry, earlier recovery polling, request-based protection freshness, retained local diagnostics and localized recovery status. Includes native reader and Edge rendering evidence and remaining manual smoke limits.
+
 2026-10-23 Smart Pause improvements 1–4: [implementation record](2026-10-23-smart-pause-improvements-implementation.md), [plan](2026-10-23-smart-pause-improvement-plan.md). Visible protection status and adaptive polling are implemented. Resume persistence/policy and review UI are present, but automatic execution remains unavailable: the current connection has no demonstrated exact-turn interruption/completion or later-user-activity observation. Records the capability investigation, migration from external timers, 330 Rust tests, 107 frontend tests, 526 Edge layout cases and reader-cost measurements.
 
 2026-10-23 quota stopping review: [review and fixes](2026-10-23-quota-stop-review.md), upstream baseline `b792bdf` (v1.3.3). Covers cancellation of stale Smart Pause batches, malformed bridge listings, reader lifecycle and quota-window validation, with explicit cooperative-stop limitations.

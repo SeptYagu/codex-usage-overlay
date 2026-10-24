@@ -32,6 +32,38 @@ beforeEach(async () => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('protection status', () => {
+  it.each([
+    ['en-US', 'Retrying quota read…'],
+    ['zh-CN', '正在重试读取额度…'],
+    ['zh-Hant', '正在重試讀取額度…'],
+  ])('shows localized quota recovery in %s', async (locale, label) => {
+    await i18n.changeLanguage(locale);
+    tauri.invoke.mockResolvedValue(snapshot({ summary: 'needsAttention', reason: 'quotaReadRetrying', quotaHealth: 'error',
+      reader: { phase: 'retrying', attempt: 1, lastSuccess: null, lastFailure: null } }));
+    render(<ProtectionStatusView settings={{ ...settings, language: locale }} />);
+    await screen.findByText(label);
+    expect(screen.queryByText('Protection armed')).toBeNull();
+  });
+  it('shows the next recovery and keeps failure details after successful recovery', async () => {
+    const now = 1_792_800_000;
+    vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+    const diagnostic = { startedAt: now - 5, attempt: 1, elapsedMs: 43000, initializeMs: 200,
+      quotaMs: 42800, success: false, failure: { stage: 'quota', kind: 'timeout', rpcCode: null, httpStatus: null, retryAfterSeconds: null },
+      cliVersion: null, stderr: { modelTimeouts: 0, pluginFailures: 0, otherLines: 0, oversizedLines: 0 }, cleanupFailed: false };
+    tauri.invoke.mockResolvedValue(snapshot({ summary: 'needsAttention', reason: 'quotaReadFailed', quotaHealth: 'error', nextPollAt: now + 15,
+      reader: { phase: 'error', attempt: 1, lastSuccess: null, lastFailure: diagnostic } }));
+    render(<ProtectionStatusView settings={settings} />);
+    await screen.findByText('Next quota check in 15s.');
+    expect(screen.getByText(/Last failure: Timed out during quota request/)).toBeTruthy();
+    await act(async () => {
+      tauri.listeners.get('auto_pause_status_changed')!({ payload: snapshot({ revision: 2, summary: 'armed', reason: null,
+        reader: { phase: 'success', attempt: 1, lastSuccess: { ...diagnostic, success: true, failure: null, elapsedMs: 450 }, lastFailure: diagnostic } }) });
+    });
+    expect(screen.getByText('Protection armed')).toBeTruthy();
+    expect(screen.getByText(/Last failure: Timed out during quota request/)).toBeTruthy();
+    expect(screen.getByText('Last successful read: 450 ms · attempt 1.')).toBeTruthy();
+    expect(screen.queryByText('Next quota check in 15s.')).toBeNull();
+  });
   it('shows acceptance separately from verified stopping and gates resume', async () => {
     const patch = vi.fn();
     render(<ProtectionStatusView settings={settings} onPatchSettings={patch} />);

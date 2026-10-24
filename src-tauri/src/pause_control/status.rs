@@ -123,6 +123,7 @@ pub struct AutoPauseStatus {
     pub effective_interval_seconds: u64,
     pub next_poll_at: Option<i64>,
     pub quota_health: String,
+    pub reader: Option<crate::codex::reader::ReaderSnapshot>,
     pub targets: Vec<TargetStatus>,
     pub resume_plans: Vec<super::resume::ResumePlanSummary>,
     pub resume_state_error: Option<String>,
@@ -148,6 +149,7 @@ impl AutoPauseStatus {
             effective_interval_seconds: 60,
             next_poll_at: None,
             quota_health: "pending".into(),
+            reader: None,
             targets: controller
                 .telemetry
                 .targets
@@ -224,8 +226,10 @@ pub async fn snapshot(state: &AppState) -> AutoPauseStatus {
         )
     };
     let now = unix_now();
+    let healthy_interval;
     {
         let polling = state.polling.lock().unwrap_or_else(|p| p.into_inner());
+        healthy_interval = polling.healthy_interval_seconds(&settings);
         status.effective_interval_seconds = if polling.effective_interval_seconds == 0 {
             u64::from(settings.refresh_interval_seconds.clamp(15, 3600))
         } else {
@@ -235,12 +239,18 @@ pub async fn snapshot(state: &AppState) -> AutoPauseStatus {
     }
     status.auto_resume_enabled = settings.auto_resume_after_quota_reset;
     status.last_successful_sample_at = usage.as_ref().map(|v| v.fetched_at);
-    let stale = usage.as_ref().is_some_and(|u| {
+    let (reader_snapshot, reader_failed, display_only) = {
+        let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+        (reader.snapshot(), reader.failure.is_some(), reader.display_only())
+    };
+    status.reader = Some(reader_snapshot);
+    let stale = display_only || usage.as_ref().is_some_and(|u| {
         u.fetched_at > now.saturating_add(5)
             || now.saturating_sub(u.fetched_at)
-                > (status.effective_interval_seconds.saturating_mul(2).max(60) as i64)
+                > (healthy_interval.saturating_mul(2).max(60) as i64)
     });
     status.quota_health = match read {
+        _ if reader_failed => "error",
         TrayReadStatus::Pending => "pending",
         TrayReadStatus::Error => "error",
         TrayReadStatus::Success if stale => "stale",
@@ -286,7 +296,9 @@ fn derive_summary(
         return;
     }
     let reason = if status.quota_health == "error" {
-        Some("quotaReadFailed")
+        if status.reader.as_ref().is_some_and(|r| r.phase == "retrying" || (r.attempt > 1 && matches!(r.phase.as_str(), "reading" | "initializing"))) {
+            Some("quotaReadRetrying")
+        } else { Some("quotaReadFailed") }
     } else if status.quota_health == "stale" {
         Some("quotaStale")
     } else if usage.is_some() && !account_known {
@@ -480,6 +492,42 @@ mod tests {
         );
         let _ = std::fs::remove_dir(dir);
     }
+    #[test]
+    fn a_failure_backoff_never_extends_the_health_freshness_window() {
+        let settings = OverlaySettings { refresh_interval_seconds: 60, ..Default::default() };
+        let mut poll = crate::polling::PollState::default();
+        let now = std::time::Instant::now();
+        for _ in 0..6 { poll.completed_with_recovery(&settings, None, now, crate::polling::ReadRecovery { transient: true, ..Default::default() }); }
+        assert_eq!(poll.effective_interval_seconds, 300);
+        assert_eq!(poll.healthy_interval_seconds(&settings), 60);
+    }
+
+    #[tokio::test]
+    async fn delayed_response_and_retry_are_not_armed_even_with_recent_receipt() {
+        let (state, dir) = state("delayed-health");
+        state.settings.lock().await.auto_pause_on_low_quota = true;
+        *state.last_usage.lock().await = Some(usage(Some(80)));
+        *state.tray_read_status.lock().await = TrayReadStatus::Success;
+        {
+            let mut controller = state.auto_pause.lock().unwrap();
+            controller.connection = BridgeConnection::Available;
+            controller.telemetry.account_known = true;
+        }
+        let now = tokio::time::Instant::now();
+        state.reader.lock().unwrap().observation = Some(crate::codex::reader::ObservationTiming { quota_started: now - std::time::Duration::from_secs(35), received: now });
+        assert_eq!(snapshot(&state).await.quota_health, "stale");
+        {
+            let mut reader = state.reader.lock().unwrap();
+            reader.observation = Some(crate::codex::reader::ObservationTiming { quota_started: now, received: now });
+            reader.phase = "retrying";
+            reader.failure = Some(crate::codex::reader::ReadFailure::timeout(crate::codex::reader::ReadStage::Quota));
+        }
+        let status = snapshot(&state).await;
+        assert_eq!(status.quota_health, "error");
+        assert_eq!(status.reason.as_deref(), Some("quotaReadRetrying"));
+        let _ = std::fs::remove_dir(dir);
+    }
+
     #[test]
     fn target_history_is_bounded_and_transport_health_retries_are_coalesced() {
         use std::sync::{
