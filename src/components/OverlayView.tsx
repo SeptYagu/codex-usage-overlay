@@ -56,6 +56,9 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
   const scale = settings.scalePercent / 100;
   const layout = settings.overlayLayout === 'stacks' ? 'stacks' : 'grouped';
   const collapsed = Boolean(dockState?.docked && !dockState.expanded);
+  // Claude has no credit balance; its capsule carries a provider label instead.
+  const claude = settings.provider === 'claude';
+  const showCredits = settings.showCredits && !claude;
 
   // WebView2 renders content at devicePixelRatio = monitor DPI scale x system
   // text scaling (Windows "make text bigger"), while Tauri converts window
@@ -137,7 +140,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
       lastSizeRef.current = { width: 0, height: 0 };
     }
     void fitCapsuleSize();
-  }, [scale, layout, settings.showCredits, settings.showFiveHourQuota, settings.showBurnRate, settings.language, usage, fitCapsuleSize, dprComp, dockState, sizeInvalidation]);
+  }, [scale, layout, showCredits, claude, settings.showFiveHourQuota, settings.showBurnRate, settings.language, usage, fitCapsuleSize, dprComp, dockState, sizeInvalidation]);
 
   useEffect(() => {
     const el = rootRef.current;
@@ -262,6 +265,12 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
         } as React.CSSProperties}
         className={`overlay-surface overlay-capsule overlay-${layout}`}
       >
+        {claude && (
+          <>
+            <span className="overlay-label overlay-provider">{t('providerClaude')}</span>
+            {layout === 'grouped' && <span aria-hidden="true" className="overlay-divider" />}
+          </>
+        )}
         {visibleQuotas.map((quota, index) => (
           <React.Fragment key={quota.key}>
             {index > 0 && layout === 'grouped' && <span aria-hidden="true" className="overlay-divider" />}
@@ -279,7 +288,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
             </div>
           </React.Fragment>
         ))}
-        {settings.showCredits && (
+        {showCredits && (
           <>
             {layout === 'grouped' && <span aria-hidden="true" className="overlay-divider" />}
             <div className="overlay-credit" role="group" aria-label={t('creditsLabel')}>

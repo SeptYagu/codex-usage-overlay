@@ -315,3 +315,68 @@ it.each([
   expect(within(right).getAllByRole('checkbox').filter(box => box !== resume)
     .every(box => !(box as HTMLInputElement).disabled)).toBe(true);
 });
+
+describe('usage provider', () => {
+  const claudeStatus = {
+    statusLine: false, hooks: false, bridgeAvailable: true,
+    settingsPath: 'C:\\Users\\me\\.claude\\settings.json',
+    snapshotCapturedAt: null, claudeVersion: null, blockedCount: 0, lastBlockedAt: null, error: null,
+  };
+
+  it('switches the provider and keeps the Codex controls for Codex', async () => {
+    const { onPatchSettings, getByLabelText, queryByText, getByText } = await renderSettings();
+    expect(getByText('Show Credit Balance')).toBeTruthy();
+    expect(getByText('Pause Codex when quota runs low')).toBeTruthy();
+    expect(queryByText('Claude Code connection')).toBeNull();
+    fireEvent.change(getByLabelText('Usage source'), { target: { value: 'claude' } });
+    expect(onPatchSettings).toHaveBeenCalledWith({ provider: 'claude' }, false);
+  });
+
+  it('shows the Claude connection card and the hook-based guard for Claude', async () => {
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === 'is_installed_version') return true;
+      if (command === 'get_notification_status') return 'enabled';
+      if (command === 'claude_connection_status') return claudeStatus;
+      if (command === 'claude_connect') return { ...claudeStatus, statusLine: true, hooks: true, snapshotCapturedAt: 1_800_000_000, claudeVersion: '2.1.90' };
+      return null;
+    });
+    const { getByRole, getByText, queryByText } = await renderSettings({ provider: 'claude', autoPauseOnLowQuota: true });
+    await act(async () => {});
+    const card = within(getByRole('group', { name: 'Claude Code connection' }));
+    expect(card.getByText('Not connected')).toBeTruthy();
+    expect(card.getByText(/No limits received yet/)).toBeTruthy();
+    expect(card.getByText(/C:\\Users\\me\\\.claude\\settings\.json/)).toBeTruthy();
+    expect(queryByText('Show Credit Balance')).toBeNull();
+    expect(getByText('Block Claude Code requests when quota runs low')).toBeTruthy();
+    expect(queryByText('Pause protection status')).toBeNull();
+
+    await act(async () => { fireEvent.click(card.getByRole('button', { name: 'Connect Claude Code' })); });
+    expect(tauri.invoke).toHaveBeenCalledWith('claude_connect');
+    expect(card.getByText('Connected')).toBeTruthy();
+    expect(card.getByText(/Claude Code 2\.1\.90/)).toBeTruthy();
+    expect(card.getByRole('button', { name: 'Disconnect' })).toBeTruthy();
+  });
+
+  it('disables connecting when the helper is missing', async () => {
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === 'claude_connection_status') return { ...claudeStatus, bridgeAvailable: false };
+      return null;
+    });
+    const { getByRole } = await renderSettings({ provider: 'claude' });
+    await act(async () => {});
+    const card = within(getByRole('group', { name: 'Claude Code connection' }));
+    expect(card.getByRole('alert').textContent).toContain('claude-usage-bridge.exe');
+    expect((card.getByRole('button', { name: 'Connect Claude Code' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe('update channel', () => {
+  it('opts into preview releases from the update section', async () => {
+    const { onPatchSettings, getByLabelText, getByText } = await renderSettings();
+    const toggle = getByLabelText('Include preview releases') as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    expect(getByText(/does not downgrade an installed one/)).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(onPatchSettings).toHaveBeenCalledWith({ includePrereleaseUpdates: true }, false);
+  });
+});

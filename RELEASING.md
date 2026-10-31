@@ -32,9 +32,12 @@ Expected assets for `v1.1.0-preview`:
 Local packaging check:
 
 ```powershell
-npm run tauri -- build --ci --bundles nsis,msi
+cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin claude-usage-bridge
+npm run tauri -- build --ci --bundles nsis,msi --config src-tauri/tauri.bundle.conf.json
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin codex-usage-updater
 .\scripts\Build-TauriRelease.ps1 -Tag v1.1.0-preview
 ```
 
-The portable ZIP contains `CodexUsageOverlay.exe`, `CodexUsageUpdater.exe`, and the Chinese/English README files. It does not include a PowerShell launcher.
+`tauri.bundle.conf.json` adds `claude-usage-bridge.exe` to the NSIS and MSI installers, so the bridge must be built before `tauri build`. The portable ZIP contains `CodexUsageOverlay.exe`, `CodexUsageUpdater.exe`, `claude-usage-bridge.exe`, and the Chinese/English README files. It does not include a PowerShell launcher.
+
+Preview releases are published as GitHub prereleases with `latest.json`. Installed copies only see them when "Include preview releases" is on, because the stable endpoint (`releases/latest`) never names a prerelease.

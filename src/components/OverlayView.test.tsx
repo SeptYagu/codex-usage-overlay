@@ -86,6 +86,17 @@ describe.each(['grouped', 'stacks'] as const)('%s layout', (overlayLayout) => {
     expect(container.querySelectorAll('.overlay-divider').length).toBe(overlayLayout === 'grouped' ? 1 : 0);
   });
 
+  it('labels the Claude capsule and never shows a credit group for it', () => {
+    const { container } = render(
+      <OverlayView settings={{ ...settings, provider: 'claude' }} usage={{ ...usage, hasCredits: false, creditsDisplay: '—' }} isLoading={false} />,
+    );
+    expect(screen.getByText('Claude').classList.contains('overlay-provider')).toBe(true);
+    expect(screen.queryByRole('group', { name: 'CREDITS' })).toBeNull();
+    expect(within(screen.getByRole('group', { name: '5 HOUR' })).getByText('69%')).toBeTruthy();
+    // Provider label separator + the one between the two quotas.
+    expect(container.querySelectorAll('.overlay-divider').length).toBe(overlayLayout === 'grouped' ? 2 : 0);
+  });
+
   it.each(['∞', '—', '0'])('preserves credit state %s', (creditsDisplay) => {
     render(<OverlayView settings={settings} usage={{ ...usage, creditsDisplay }} isLoading={false} />);
     expect(within(screen.getByRole('group', { name: 'CREDITS' }))

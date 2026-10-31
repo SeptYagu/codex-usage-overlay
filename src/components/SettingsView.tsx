@@ -6,6 +6,7 @@ import { APP_VERSION } from '../version';
 import { useTranslation } from 'react-i18next';
 import { SoundPicker } from './SoundPicker';
 import { ProtectionStatusView } from './ProtectionStatus';
+import { ClaudeConnectionView } from './ClaudeConnection';
 
 interface SettingsViewProps {
   settings: OverlaySettings;
@@ -48,6 +49,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   // The smart-pause thresholds only apply while the master switch is on.
   const autoPauseDisabled = !settings.autoPauseOnLowQuota;
+  // Claude has no credit balance and is protected by Claude Code hooks instead
+  // of a Codex pause request.
+  const claude = settings.provider === 'claude';
 
   return (
     <div className="h-screen overflow-hidden bg-[#F5F6F8] dark:bg-slate-900 text-slate-800 dark:text-slate-100 p-5 flex flex-col font-sans select-none">
@@ -136,15 +140,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             />
           </label>
 
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('showCredits')}</span>
-            <input
-              type="checkbox"
-              checked={settings.showCredits}
-              onChange={(e) => updateField('showCredits', e.target.checked)}
-              className={checkbox}
-            />
-          </label>
+          {!claude && (
+            <label className={toggleRow}>
+              <span className="text-sm font-medium">{t('showCredits')}</span>
+              <input
+                type="checkbox"
+                checked={settings.showCredits}
+                onChange={(e) => updateField('showCredits', e.target.checked)}
+                className={checkbox}
+              />
+            </label>
+          )}
 
           <label className={toggleRow}>
             <span className="text-sm font-medium">{t('showBurnRate')}</span>
@@ -196,6 +202,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         {/* Right column: system integration, updates and reset alerts */}
         <section aria-label={t('notificationSection')} className="min-h-0 space-y-2.5 overflow-y-auto pr-1">
           <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
+            <label htmlFor="usage-provider" className="text-sm font-medium">{t('usageProvider')}</label>
+            <select
+              id="usage-provider"
+              value={settings.provider}
+              onChange={(e) => updateField('provider', e.target.value as OverlaySettings['provider'])}
+              className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+            >
+              <option value="codex">{t('providerCodex')}</option>
+              <option value="claude">{t('providerClaude')}</option>
+            </select>
+          </div>
+
+          {claude && <ClaudeConnectionView settings={settings} />}
+
+          <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
             <span className="text-sm font-medium">{t('refreshInterval')}</span>
             <select
               aria-label={t('refreshInterval')}
@@ -210,13 +231,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </select>
           </div>
 
-          {/* Smart pause: asks the running Codex session to pause when the quota runs low */}
+          {/* Smart pause: asks the running Codex session to pause when the quota runs low,
+              or, for Claude, lets the Claude Code hooks refuse new requests */}
           <div className="space-y-2.5 rounded-lg border border-slate-200 dark:border-slate-700 p-2.5">
             <label className={toggleRow}>
-              <span className="text-sm font-medium">{t('autoPauseOnLowQuota')}</span>
+              <span className="text-sm font-medium">{t(claude ? 'claudeGuardOnLowQuota' : 'autoPauseOnLowQuota')}</span>
               <input
                 type="checkbox"
-                aria-label={t('autoPauseOnLowQuota')}
+                aria-label={t(claude ? 'claudeGuardOnLowQuota' : 'autoPauseOnLowQuota')}
                 checked={settings.autoPauseOnLowQuota}
                 onChange={(e) => onPatchSettings({ autoPauseOnLowQuota: e.target.checked })}
                 className={checkbox}
@@ -266,9 +288,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
 
             <p className="px-1 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-              {t('autoPauseHint')}
+              {t(claude ? 'claudeGuardHint' : 'autoPauseHint')}
             </p>
-            <ProtectionStatusView settings={settings} onPatchSettings={onPatchSettings} />
+            {!claude && <ProtectionStatusView settings={settings} onPatchSettings={onPatchSettings} />}
           </div>
 
           {/* Autostart (only meaningful for installed builds) */}
@@ -311,6 +333,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             />
           </label>
           <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('autoInstallUpdatesHint')}</p>
+
+          <label className={toggleRow}>
+            <span className="text-sm font-medium">{t('includePrereleaseUpdates')}</span>
+            <input
+              type="checkbox"
+              aria-label={t('includePrereleaseUpdates')}
+              checked={settings.includePrereleaseUpdates}
+              onChange={(e) => updateField('includePrereleaseUpdates', e.target.checked)}
+              className={checkbox}
+            />
+          </label>
+          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('includePrereleaseUpdatesHint')}</p>
 
           <section aria-labelledby="reset-notifications-title" className="space-y-2.5">
             <h3 id="reset-notifications-title" className="text-sm font-semibold">{t('notificationSection')}</h3>

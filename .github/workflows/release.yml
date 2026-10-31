@@ -53,7 +53,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed.' }
           cargo test --manifest-path src-tauri/Cargo.toml --locked
           if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
-          npm run tauri -- build --ci --bundles nsis,msi
+          # The installers ship the Claude bridge next to the app, so it is built first.
+          cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin claude-usage-bridge
+          if ($LASTEXITCODE -ne 0) { throw 'Claude bridge helper build failed.' }
+          npm run tauri -- build --ci --bundles nsis,msi --config src-tauri/tauri.bundle.conf.json
           if ($LASTEXITCODE -ne 0) { throw 'Tauri release build failed.' }
           cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin codex-usage-updater
           if ($LASTEXITCODE -ne 0) { throw 'Portable updater helper build failed.' }

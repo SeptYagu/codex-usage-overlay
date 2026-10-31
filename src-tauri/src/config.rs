@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,9 +22,22 @@ pub enum SoundMode {
     Windows,
 }
 
+/// Whose limits the overlay reads. One provider is active at a time.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Claude,
+    #[default]
+    #[serde(other)]
+    Codex,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlaySettings {
+    /// Codex by default, so an upgraded profile keeps reading Codex.
+    #[serde(default)]
+    pub provider: Provider,
     #[serde(default)]
     pub overlay_layout: OverlayLayout,
     #[serde(default = "default_scale")]
@@ -45,6 +60,10 @@ pub struct OverlaySettings {
     pub auto_check_updates: bool,
     #[serde(default)]
     pub auto_install_updates: bool,
+    /// Whether update checks also offer preview releases. Off by default, so
+    /// an upgraded profile stays on the stable channel.
+    #[serde(default)]
+    pub include_prerelease_updates: bool,
     #[serde(default = "default_true")]
     pub five_hour_reset_notification: bool,
     #[serde(default = "default_true")]
@@ -93,6 +112,7 @@ fn default_auto_pause_weekly_threshold() -> u32 { 2 }
 impl Default for OverlaySettings {
     fn default() -> Self {
         Self {
+            provider: Provider::default(),
             overlay_layout: OverlayLayout::default(),
             scale_percent: default_scale(),
             background_transparency_percent: default_transparency(),
@@ -104,6 +124,7 @@ impl Default for OverlaySettings {
             auto_start: default_true(),
             auto_check_updates: default_true(),
             auto_install_updates: false,
+            include_prerelease_updates: false,
             five_hour_reset_notification: default_true(),
             weekly_reset_notification: default_true(),
             five_hour_sound_mode: SoundMode::default(),
@@ -150,6 +171,9 @@ pub struct DockPersistence {
 #[derive(Clone)]
 pub struct ConfigManager {
     runtime_dir: PathBuf,
+    /// Shared by every clone: the learner and reset-cycle files follow the
+    /// active provider, so Claude samples never train the Codex state.
+    claude: Arc<AtomicBool>,
 }
 
 impl ConfigManager {
@@ -158,13 +182,30 @@ impl ConfigManager {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("CodexUsageOverlay");
         let _ = fs::create_dir_all(&runtime_dir);
-        Self { runtime_dir }
+        Self { runtime_dir, claude: Arc::default() }
     }
 
     #[cfg(test)]
     pub fn with_runtime_dir(runtime_dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(&runtime_dir);
-        Self { runtime_dir }
+        Self { runtime_dir, claude: Arc::default() }
+    }
+
+    pub fn runtime_dir(&self) -> &Path {
+        &self.runtime_dir
+    }
+
+    pub fn set_provider(&self, provider: Provider) {
+        self.claude.store(provider == Provider::Claude, Ordering::SeqCst);
+    }
+
+    /// Codex keeps the original file names; Claude uses `claude-` prefixed ones.
+    fn provider_path(&self, name: &str) -> PathBuf {
+        if self.claude.load(Ordering::SeqCst) {
+            self.runtime_dir.join(format!("claude-{name}"))
+        } else {
+            self.runtime_dir.join(name)
+        }
     }
 
     pub fn settings_path(&self) -> PathBuf {
@@ -192,7 +233,7 @@ impl ConfigManager {
     }
 
     pub fn reset_state_path(&self) -> PathBuf {
-        self.runtime_dir.join("reset-state.json")
+        self.provider_path("reset-state.json")
     }
 
     pub fn resume_state_path(&self) -> PathBuf {
@@ -200,7 +241,7 @@ impl ConfigManager {
     }
 
     pub fn burn_rate_state_path(&self) -> PathBuf {
-        self.runtime_dir.join("burn-rate-state.json")
+        self.provider_path("burn-rate-state.json")
     }
 
     /// The local shadow evidence log.
@@ -208,7 +249,7 @@ impl ConfigManager {
     /// It is diagnostic evidence for the local learner, not telemetry: it is
     /// never uploaded or transmitted.
     pub fn shadow_evidence_path(&self) -> PathBuf {
-        self.runtime_dir.join("burn-rate-shadow-evidence.jsonl")
+        self.provider_path("burn-rate-shadow-evidence.jsonl")
     }
 
     pub fn load_settings(&self) -> OverlaySettings {

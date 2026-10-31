@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::codex::{BurnRateTracker, CodexClient, CodexUsage, RawCodexUsage};
 use crate::codex::reader::{self, FailureKind, ReadDiagnostic, ReadEvent, ReadFailure, ReaderState, ReadStage};
-use crate::config::{ConfigManager, OverlaySettings};
+use crate::config::{ConfigManager, OverlaySettings, Provider};
 use crate::notify::{PendingResetFetches, ResetStateFile};
 use crate::tray::{open_settings_window as show_settings_win, TrayPresentationSink, TrayReadStatus};
 
@@ -71,6 +71,7 @@ pub struct AppState {
 impl AppState {
     pub(crate) fn for_test(config_manager: ConfigManager) -> Self {
         let settings = config_manager.load_settings();
+        config_manager.set_provider(settings.provider);
         Self {
             client: Mutex::new(CodexClient::new()),
             refresh_guard: Mutex::new(()),
@@ -165,6 +166,9 @@ pub(crate) trait UsageSource: TrayPresentationSink {
 
 impl UsageSource for AppHandle {
     async fn read_usage(&self, state: &AppState) -> Result<RawCodexUsage, String> {
+        if state.settings.lock().await.provider == Provider::Claude {
+            return read_claude_usage(state);
+        }
         let mut client = state.client.lock().await;
         let started_at = reader::unix_now();
         // Cancellation of an earlier read must not carry recovery evidence into
@@ -209,6 +213,26 @@ impl UsageSource for AppHandle {
                 }
                 Err(error.to_string())
             }
+        }
+    }
+}
+
+/// The Claude read is a local file, so it has no attempts, retries or process
+/// diagnostics; the Codex read history stays Codex-only.
+fn read_claude_usage(state: &AppState) -> Result<RawCodexUsage, String> {
+    let result = crate::claude::source::read_usage(state.config_manager.runtime_dir(), reader::unix_now());
+    let mut status = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+    status.observation = None;
+    match result {
+        Ok(sample) => {
+            status.failure = None;
+            status.phase = if sample.stale { "stale" } else { "success" };
+            Ok(sample.usage)
+        }
+        Err(error) => {
+            status.phase = "error";
+            status.failure = Some(error.clone());
+            Err(error.to_string())
         }
     }
 }
@@ -331,7 +355,12 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
                 estimate
             };
             let usage = raw.to_ui(estimate.five_hour_per_hour, estimate.weekly_per_hour);
-            crate::pause_control::resume::update(state, Some(&raw)).await;
+            // Smart Pause and resume act on Codex sessions only; the Claude
+            // guard runs inside Claude Code's hooks instead.
+            let codex = state.settings.lock().await.provider == Provider::Codex;
+            if codex {
+                crate::pause_control::resume::update(state, Some(&raw)).await;
+            }
             {
                 let settings = state.settings.lock().await;
                 let display_only = state.reader.lock().unwrap_or_else(|p| p.into_inner()).display_only();
@@ -347,12 +376,16 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
             // never triggers a delivery.
             let account_id = raw.account_id.clone();
             let settings = state.settings.lock().await.clone();
-            crate::pause_control::schedule(state, settings, usage.clone(), account_id);
+            if codex {
+                crate::pause_control::schedule(state, settings, usage.clone(), account_id);
+            }
             Ok(usage)
         }
         Err(error) => {
             let error = error.to_string();
-            crate::pause_control::resume::update(state, None).await;
+            if state.settings.lock().await.provider == Provider::Codex {
+                crate::pause_control::resume::update(state, None).await;
+            }
             {
                 let settings = state.settings.lock().await;
                 let failure = state.reader.lock().unwrap_or_else(|p| p.into_inner()).failure.clone();
@@ -528,12 +561,13 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "showCredits" | "autoCheckUpdates" | "autoInstallUpdates" | "fiveHourResetNotification"
             | "weeklyResetNotification" | "autoEdgeHide" | "mousePassthrough" | "showPercentageGrid"
             | "showFiveHourQuota" | "showBurnRate" | "autoPauseOnLowQuota"
-            | "autoResumeAfterQuotaReset" => value.is_boolean(),
+            | "autoResumeAfterQuotaReset" | "includePrereleaseUpdates" => value.is_boolean(),
             "autoStart" => allow_auto_start && value.is_boolean(),
             "autoPauseFiveHourThresholdPercent" => value.as_u64().is_some_and(|n| (1..=15).contains(&n)),
             "autoPauseWeeklyThresholdPercent" => value.as_u64().is_some_and(|n| (1..=10).contains(&n)),
             "refreshIntervalSeconds" => value.as_u64().is_some_and(|n| (15..=3600).contains(&n)),
             "language" => matches!(value.as_str(), Some("auto" | "en-US" | "zh-CN" | "zh-Hant")),
+            "provider" => matches!(value.as_str(), Some("codex" | "claude")),
             "fiveHourSoundMode" | "weeklySoundMode" => matches!(value.as_str(), Some("windows" | "custom")),
             "fiveHourSoundPath" | "weeklySoundPath" => value.is_null() || value.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 4096),
             _ => false,
@@ -677,6 +711,16 @@ mod settings_patch_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn the_update_channel_is_a_boolean_setting_that_defaults_to_stable() {
+        assert!(!OverlaySettings::default().include_prerelease_updates);
+        assert!(validate_settings_patch(&serde_json::json!({"includePrereleaseUpdates": true}), false).is_ok());
+        assert!(validate_settings_patch(&serde_json::json!({"includePrereleaseUpdates": "yes"}), false).is_err());
+        let mut settings = OverlaySettings::default();
+        merge_settings_patch(&mut settings, &serde_json::json!({"includePrereleaseUpdates": true})).unwrap();
+        assert!(settings.include_prerelease_updates);
+    }
+
     /// Negative control: a patch that is not an object, or that carries a key with no
     /// matching field, must not be able to fabricate the setting.
     #[test]
@@ -713,6 +757,8 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         mouse_passthrough_changed,
         previous_mouse_passthrough,
         geometry_changed,
+        provider_changed,
+        update_channel_changed,
     ) = {
         let mut settings = state.settings.lock().await;
         let was_auto_edge_hide = settings.auto_edge_hide;
@@ -741,8 +787,27 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
             was_mouse_passthrough != next.mouse_passthrough,
             was_mouse_passthrough,
             overlay_geometry_changed(&previous_settings, &next),
+            previous_settings.provider != next.provider,
+            previous_settings.include_prerelease_updates != next.include_prerelease_updates,
         )
     };
+
+    // An update found on the other channel must not stay offered or prepared.
+    if update_channel_changed {
+        *state.pending_update.lock().await = None;
+        *state.available_update.lock().await = None;
+        *state.update_error.lock().await = None;
+        if let Ok(mut prepared) = state.prepared_update.lock() {
+            *prepared = None;
+        }
+    }
+
+    if provider_changed {
+        switch_provider(state, envelope.settings.provider).await;
+    }
+    if let Err(error) = crate::claude::install::write_guard_config(state.config_manager.runtime_dir(), &envelope.settings) {
+        eprintln!("Could not write the Claude guard preferences: {error}");
+    }
 
     // The active period bookkeeping follows the switch. A session that comes
     // back while the switch is off must not reuse the period identity of its
@@ -754,13 +819,13 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     // The bridge status stays unknown until the first handshake. A read-only
     // probe answers it right after the switch is turned on, so the status is
     // not a placeholder while the quota is still comfortable.
-    if auto_pause_just_enabled {
+    if auto_pause_just_enabled && envelope.settings.provider == Provider::Codex {
         crate::pause_control::probe_bridge_status(state);
     }
     {
         let mut polling = state.polling.lock().unwrap_or_else(|p| p.into_inner());
         polling.recalculate(&envelope.settings, std::time::Instant::now());
-        if changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota"
+        if provider_changed || changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota"
             | "autoPauseFiveHourThresholdPercent" | "autoPauseWeeklyThresholdPercent")) {
             polling.request_now(std::time::Instant::now());
         }
@@ -849,7 +914,8 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
 
         // Broadcast updated settings to all windows
         let _ = app.emit("settings_updated", &envelope);
-        if auto_check_just_enabled || auto_install_just_enabled {
+        if auto_check_just_enabled || auto_install_just_enabled
+            || (update_channel_changed && new_settings.auto_check_updates) {
             let app_for_check = app.clone();
             let state_for_check = state.clone();
             tauri::async_runtime::spawn(async move {
@@ -858,6 +924,50 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         }
     }
     Ok(envelope)
+}
+
+/// Points the provider-specific learner and reset-cycle state at the new
+/// provider and drops everything observed from the old one, so no sample,
+/// pause request or reset notification crosses providers.
+pub(crate) async fn switch_provider(state: &Arc<AppState>, provider: Provider) {
+    state.config_manager.set_provider(provider);
+    *state.burn_rate.lock().await = BurnRateTracker::load(&state.config_manager);
+    *state.reset_state.lock().await = crate::notify::load_reset_state(&state.config_manager);
+    *state.last_usage.lock().await = None;
+    *state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    {
+        let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+        reader.failure = None;
+        reader.observation = None;
+        reader.phase = "idle";
+    }
+    state.auto_pause.lock().unwrap_or_else(|p| p.into_inner()).invalidate_pending();
+    crate::pause_control::clear_active_periods(state);
+    *state.tray_read_status.lock().await = TrayReadStatus::Pending;
+}
+
+#[tauri::command]
+pub async fn claude_connection_status(state: State<'_, Arc<AppState>>) -> Result<crate::claude::install::ClaudeConnectionStatus, String> {
+    let settings_path = crate::claude::install::claude_settings_path();
+    let bridge = crate::claude::install::bridge_path();
+    Ok(crate::claude::install::status(settings_path.as_deref(), state.config_manager.runtime_dir(), bridge.as_deref()))
+}
+
+#[tauri::command]
+pub async fn claude_connect(state: State<'_, Arc<AppState>>) -> Result<crate::claude::install::ClaudeConnectionStatus, String> {
+    let settings_path = crate::claude::install::claude_settings_path().ok_or("Could not locate the Claude Code settings folder")?;
+    let bridge = crate::claude::install::bridge_path().ok_or("Could not locate the overlay executable")?;
+    crate::claude::install::connect(&settings_path, state.config_manager.runtime_dir(), &bridge)?;
+    state.polling.lock().unwrap_or_else(|p| p.into_inner()).request_now(std::time::Instant::now());
+    state.poll_wake.notify_one();
+    claude_connection_status(state).await
+}
+
+#[tauri::command]
+pub async fn claude_disconnect(state: State<'_, Arc<AppState>>) -> Result<crate::claude::install::ClaudeConnectionStatus, String> {
+    let settings_path = crate::claude::install::claude_settings_path().ok_or("Could not locate the Claude Code settings folder")?;
+    crate::claude::install::disconnect(&settings_path, state.config_manager.runtime_dir())?;
+    claude_connection_status(state).await
 }
 
 pub(crate) fn set_main_mouse_passthrough(app: &AppHandle, enabled: bool) -> Result<(), String> {
@@ -1127,11 +1237,13 @@ pub(crate) async fn check_and_store_update(
     use tauri_plugin_updater::UpdaterExt;
 
     let _check_guard = state.update_check.lock().await;
-    let updater = app
-        .updater_builder()
-        .target(crate::config::updater_target())
-        .build()
-        .map_err(|error| error.to_string())?;
+    let include_prereleases = state.settings.lock().await.include_prerelease_updates;
+    let mut builder = app.updater_builder().target(crate::config::updater_target());
+    if include_prereleases {
+        let endpoint = crate::update_channel::prerelease_endpoint().await?;
+        builder = builder.endpoints(vec![endpoint]).map_err(|error| error.to_string())?;
+    }
+    let updater = builder.build().map_err(|error| error.to_string())?;
     let update = updater.check().await.map_err(|error| error.to_string())?;
     let info = update.as_ref().map(|update| AvailableUpdate {
         version: update.version.clone(),
@@ -1296,6 +1408,21 @@ fn install_verified_bytes(
     let mut helper_file = std::fs::File::create(&staged_helper).map_err(|error| error.to_string())?;
     std::io::copy(&mut helper_archive, &mut helper_file).map_err(|error| error.to_string())?;
     drop(helper_file);
+    drop(helper_archive);
+    // Archives before the Claude provider have no bridge. Claude Code may be
+    // running the current one, so a failed replacement keeps it and the
+    // update continues.
+    if let Ok(mut bridge_archive) = archive.by_name(crate::claude::install::BRIDGE_EXE) {
+        if bridge_archive.size() <= 64 * 1024 * 1024 {
+            let bridge = directory.join(crate::claude::install::BRIDGE_EXE);
+            let staged_bridge = bridge.with_extension("exe.next");
+            let copied = std::fs::File::create(&staged_bridge)
+                .and_then(|mut file| std::io::copy(&mut bridge_archive, &mut file));
+            if copied.is_err() || std::fs::rename(&staged_bridge, &bridge).is_err() {
+                let _ = std::fs::remove_file(&staged_bridge);
+            }
+        }
+    }
 
     let mut command = std::process::Command::new(&staged_helper);
     command
@@ -1693,6 +1820,31 @@ mod auto_pause_tests {
         wait_for_prompts(&transport, 1).await;
         let prompts = transport.sent_prompts();
         assert_eq!(prompts, vec!["\u{66AB}\u{505C}"]);
+    }
+
+    #[tokio::test]
+    async fn a_low_claude_quota_never_reaches_the_codex_bridge_or_the_codex_learner() {
+        let (state, transport, dir) = armed_state("wiring-claude").await;
+        state.settings.lock().await.provider = Provider::Claude;
+        switch_provider(&state, Provider::Claude).await;
+        let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+
+        let usage = refresh_usage(&sink, &state).await.expect("the refresh must succeed");
+        assert_eq!(usage.five_hour_remaining_percent, Some(3));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(transport.calls().is_empty(), "no handshake and no pause request");
+        assert!(dir.join("claude-burn-rate-state.json").is_file());
+        assert!(!dir.join("burn-rate-state.json").exists());
+
+        // Switching back reads the Codex state again and drops the Claude sample.
+        state.settings.lock().await.provider = Provider::Codex;
+        switch_provider(&state, Provider::Codex).await;
+        assert!(state.last_usage.lock().await.is_none());
+        assert_eq!(state.config_manager.burn_rate_state_path(), dir.join("burn-rate-state.json"));
+        refresh_usage(&sink, &state).await.expect("the refresh must succeed");
+        wait_for_prompts(&transport, 1).await;
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

@@ -36,6 +36,9 @@ pub enum FailureKind {
     Permission,
     Spawn,
     Cancelled,
+    /// The Claude provider has no snapshot yet: Claude Code is not connected
+    /// or has not rendered a statusline with rate limits.
+    NotConnected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,7 +117,9 @@ impl fmt::Display for ReadFailure {
             ReadStage::Spawn => "process spawn",
             ReadStage::Refresh => "refresh",
         };
-        if self.kind == FailureKind::Timeout {
+        if self.kind == FailureKind::NotConnected {
+            write!(f, "Claude Code 尚未连接 / Claude Code is not connected")
+        } else if self.kind == FailureKind::Timeout {
             write!(f, "读取 Codex 用量超时 / Codex {method} timed out")
         } else {
             write!(

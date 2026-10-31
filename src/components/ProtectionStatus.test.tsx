@@ -10,7 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: tauri.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: tauri.listen }));
 
 function snapshot(overrides: Partial<ProtectionStatus> = {}): ProtectionStatus {
-  return { revision: 1, enabled: true, autoResumeEnabled: false, connection: 'available',
+  return { revision: 1, enabled: true, provider: 'codex', autoResumeEnabled: false, connection: 'available',
     capabilities: { cooperativeDelivery: true, directInterrupt: false, completionObservation: false,
       userActivityObservation: false, continuationControl: false },
     mode: 'cooperative', summary: 'pauseRequested', reason: 'stoppingUnconfirmed',

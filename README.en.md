@@ -28,7 +28,7 @@ Install a setup package, or extract the portable ZIP and run `CodexUsageOverlay.
 - Settings uses a two-column layout (960×620), with resizing and window geometry persistence. Expanded protection details and smaller windows can scroll.
 - Enable **Mouse click-through** in Settings or the tray menu to interact with windows behind the overlay. Use the tray menu to turn it off at any time; click-through cannot be enabled without a working tray icon.
 - Autostart controls are available only for installed copies. Launching a portable or development copy leaves the installed copy's startup entry untouched.
-- Use the tray menu to change languages and check for updates. When a new version is found, click the status line below Check for Updates to install it; a failed installation can be retried there. Automatic installation is off by default. When enabled, it also enables automatic checks, then downloads and verifies new versions in the background and installs when the app normally exits. The installed build uses the new version on the next launch; the portable helper replaces its executable after exit. Windows installer progress or elevation prompts may still appear. A prepared update can also be installed immediately from the tray status line.
+- Use the tray menu to change languages and check for updates. When a new version is found, click the status line below Check for Updates to install it; a failed installation can be retried there. Automatic installation is off by default. When enabled, it also enables automatic checks, then downloads and verifies new versions in the background and installs when the app normally exits. The installed build uses the new version on the next launch; the portable helper replaces its executable after exit. Windows installer progress or elevation prompts may still appear. A prepared update can also be installed immediately from the tray status line. Turn on **Include preview releases** to also be offered preview builds (off by default).
 - Codex executable discovery follows the existing override/PATH/CLI/Store order. If the executable moves or disappears, later polls can rediscover it. Set `CODEX_CLI_PATH` for a custom location.
 
 Preferences, expanded position, dock state, and usage status are stored under `%LOCALAPPDATA%\CodexUsageOverlay\` in `settings.json`, `window-position.json`, `dock-state.json`, and `usage-status.json`. Custom sound files stay at the location you selected.
@@ -36,6 +36,16 @@ Preferences, expanded position, dock state, and usage status are stored under `%
 Smart Pause requests cooperation from Codex; accepted delivery does not verify stopped inference, queued work or background commands. Disabling protection, a failed read or newer ineligible quota cancels unsent requests. An already submitted request may still complete.
 
 **Automatic resume after reset** is a separate preference, off by default. It is unavailable on the current connection because exact-turn interruption, completion and later user activity cannot be verified. The guarded resume store uses `pause-resume-state.json` in the same runtime directory; cooperative deliveries cannot create executable plans. Restored pending plans require review, and unknown submission outcomes are never retried automatically. This build sends only pause requests and creates no external "Continue" timers. Older Codex-created continuation tasks remain external and may still run; disabling the overlay does not cancel them.
+
+## Claude usage limits
+
+Set **Usage source** to **Claude** in Settings to show your Claude subscription limits (the 5-hour session window and the weekly window) instead of Codex. One source is active at a time; Codex stays the default.
+
+- Click **Connect Claude Code**. The overlay registers the bundled `claude-usage-bridge.exe` as Claude Code's statusline command and adds two hooks (`UserPromptSubmit`, `PreToolUse`) to `~/.claude/settings.json`, honoring `CLAUDE_CONFIG_DIR`. It backs up the original file once as `settings.json.codex-overlay.bak`. Your existing statusline keeps rendering through the helper, and **Disconnect** restores it and removes only the entries the overlay added. Claude Code applies hook changes to new sessions.
+- Limits come from the `rate_limits` data Claude Code passes to its statusline. This needs Claude Code 2.1.80 or later, signed in with a Pro or Max plan; API-key sessions report none. The overlay reads no Claude credentials and makes no network requests. Values update only while Claude Code is in use. A window whose reset time has passed is shown as reset, and the reset notification fires with the next sample from the new cycle.
+- With the protection switch on, the hooks refuse new prompts and tool calls while the 5-hour or weekly quota is at or below its threshold, and Claude Code shows the reason. Codex Smart Pause is not used for Claude. An old sample still counts until its reset time, because used quota only grows within a window. A missing or unreadable sample, a passed reset or a turned-off switch always lets requests through.
+- Credits are not shown for Claude. Burn rate and reset state are kept in separate `claude-` prefixed files, so Claude samples never mix with the Codex history.
+- The helper writes `claude-rate-limits.json` and `claude-guard-state.json`, and the overlay writes `claude-guard.json` and `claude-bridge.json`, all in the runtime directory above. Disconnect before uninstalling; otherwise Claude Code keeps calling the removed helper.
 
 ## Development
 
@@ -52,12 +62,13 @@ npm run tauri dev
 Build and package a release:
 
 ```powershell
-npm run tauri -- build --ci --bundles nsis,msi
+cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin claude-usage-bridge
+npm run tauri -- build --ci --bundles nsis,msi --config src-tauri/tauri.bundle.conf.json
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin codex-usage-updater
 .\scripts\Build-TauriRelease.ps1 -Tag v1.1.0-preview
 ```
 
-Set the Tauri updater signing key in the build environment before packaging a release. The tag workflow publishes NSIS, MSI, portable ZIP, signatures, and `latest.json`; the portable updater helper is included in the ZIP.
+Set the Tauri updater signing key in the build environment before packaging a release. The tag workflow publishes NSIS, MSI, portable ZIP, signatures, and `latest.json`; the portable updater helper is included in the ZIP. `tauri.bundle.conf.json` adds the Claude bridge to the installers, so the bridge must be built first; development builds and tests do not need it.
 See the [preview notes](docs/v1.1.0-preview-notes.md) for automated results and Windows checks still to be completed.
 
 ## License

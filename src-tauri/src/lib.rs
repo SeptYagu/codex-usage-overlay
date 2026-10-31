@@ -1,3 +1,4 @@
+mod claude;
 mod codex;
 mod commands;
 mod config;
@@ -6,6 +7,7 @@ mod notify;
 mod pause_control;
 mod polling;
 mod tray;
+mod update_channel;
 #[cfg(windows)]
 mod audio;
 
@@ -24,6 +26,11 @@ use tray::setup_tray;
 pub fn run() {
     let config_manager = ConfigManager::new();
     let initial_settings = config_manager.load_settings();
+    // Before any provider-specific state is loaded below.
+    config_manager.set_provider(initial_settings.provider);
+    if let Err(error) = claude::install::write_guard_config(config_manager.runtime_dir(), &initial_settings) {
+        eprintln!("Could not write the Claude guard preferences: {error}");
+    }
 
     let app_state = Arc::new(AppState {
         client: Mutex::new(CodexClient::new()),
@@ -171,6 +178,9 @@ pub fn run() {
             commands::get_update_installing,
             commands::get_update_ready,
             commands::install_update,
+            commands::claude_connection_status,
+            commands::claude_connect,
+            commands::claude_disconnect,
         ])
         .setup(move |app| {
             // Setup system tray
@@ -255,7 +265,11 @@ pub fn run() {
             let status_state = app_state_clone.clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    if status_state.settings.lock().await.auto_pause_on_low_quota {
+                    let codex_protection = {
+                        let settings = status_state.settings.lock().await;
+                        settings.auto_pause_on_low_quota && settings.provider == config::Provider::Codex
+                    };
+                    if codex_protection {
                         pause_control::probe_bridge_status(&status_state);
                     }
                     pause_control::status::publish(&status_handle, &status_state).await;

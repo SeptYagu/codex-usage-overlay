@@ -11,7 +11,10 @@ export interface CodexUsage {
   fetchedAt: number;
 }
 
+export type Provider = 'codex' | 'claude';
+
 export interface OverlaySettings {
+  provider: Provider;
   overlayLayout: 'grouped' | 'stacks';
   scalePercent: number;
   backgroundTransparencyPercent: number;
@@ -23,6 +26,7 @@ export interface OverlaySettings {
   autoStart: boolean;
   autoCheckUpdates: boolean;
   autoInstallUpdates: boolean;
+  includePrereleaseUpdates: boolean;
   fiveHourResetNotification: boolean;
   weeklyResetNotification: boolean;
   fiveHourSoundMode: 'windows' | 'custom';
@@ -54,6 +58,7 @@ export interface DockStateInfo {
 }
 
 export const DEFAULT_SETTINGS: OverlaySettings = {
+  provider: 'codex',
   overlayLayout: 'grouped',
   scalePercent: 175,
   backgroundTransparencyPercent: 23,
@@ -65,6 +70,7 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   autoStart: true,
   autoCheckUpdates: true,
   autoInstallUpdates: false,
+  includePrereleaseUpdates: false,
   fiveHourResetNotification: true,
   weeklyResetNotification: true,
   fiveHourSoundMode: 'windows',
@@ -90,6 +96,7 @@ export interface UsageStatus {
 export interface ProtectionStatus {
   revision: number;
   enabled: boolean;
+  provider: Provider;
   autoResumeEnabled: boolean;
   connection: 'unknown' | 'available' | 'unavailable';
   capabilities: {
@@ -146,4 +153,16 @@ export interface QuotaReadDiagnostic {
   cliVersion: string | null;
   stderr: { modelTimeouts: number; pluginFailures: number; otherLines: number; oversizedLines: number };
   cleanupFailed: boolean;
+}
+
+export interface ClaudeConnectionStatus {
+  statusLine: boolean;
+  hooks: boolean;
+  bridgeAvailable: boolean;
+  settingsPath: string | null;
+  snapshotCapturedAt: number | null;
+  claudeVersion: string | null;
+  blockedCount: number;
+  lastBlockedAt: number | null;
+  error: string | null;
 }

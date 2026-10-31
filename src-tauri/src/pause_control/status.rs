@@ -1,5 +1,5 @@
 use super::{triggered_quotas, unix_now, AutoPauseController, BridgeConnection};
-use crate::{commands::AppState, config::OverlaySettings, tray::TrayReadStatus};
+use crate::{commands::AppState, config::{OverlaySettings, Provider}, tray::TrayReadStatus};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use tauri::Emitter;
@@ -107,6 +107,9 @@ impl Telemetry {
 pub struct AutoPauseStatus {
     pub revision: u64,
     pub enabled: bool,
+    /// Claude protection runs in Claude Code's hooks, so its status only
+    /// depends on the quota, never on the Codex bridge.
+    pub provider: Provider,
     pub auto_resume_enabled: bool,
     pub connection: BridgeConnection,
     pub capabilities: ControlCapabilities,
@@ -134,6 +137,7 @@ impl AutoPauseStatus {
         Self {
             revision: 0,
             enabled,
+            provider: Provider::Codex,
             auto_resume_enabled: false,
             connection: controller.connection,
             capabilities: controller.transport.capabilities(),
@@ -171,6 +175,17 @@ impl AutoPauseStatus {
 
     pub fn tooltip(&self, language: &str) -> &'static str {
         let zh = crate::commands::resolve_locale(language);
+        if self.provider == Provider::Claude {
+            match (zh, self.summary.as_str()) {
+                ("zh-CN", "armed") => return "额度保护：就绪",
+                ("zh-Hant", "armed") => return "額度保護：就緒",
+                (_, "armed") => return "Quota guard: armed",
+                ("zh-CN", "quotaLow") => return "额度不足：拦截 Claude Code 新请求",
+                ("zh-Hant", "quotaLow") => return "額度不足：攔截 Claude Code 新請求",
+                (_, "quotaLow") => return "Quota low: blocking new Claude Code requests",
+                _ => {}
+            }
+        }
         match (zh, self.summary.as_str()) {
             (_, "off") => match zh {
                 "zh-CN" => "暂停保护：关闭",
@@ -237,7 +252,11 @@ pub async fn snapshot(state: &AppState) -> AutoPauseStatus {
         };
         status.next_poll_at = polling.next_poll_at(std::time::Instant::now(), now);
     }
-    status.auto_resume_enabled = settings.auto_resume_after_quota_reset;
+    status.provider = settings.provider;
+    status.auto_resume_enabled = settings.auto_resume_after_quota_reset && settings.provider == Provider::Codex;
+    if settings.provider == Provider::Claude {
+        status.targets.clear();
+    }
     status.last_successful_sample_at = usage.as_ref().map(|v| v.fetched_at);
     let (reader_snapshot, reader_failed, display_only) = {
         let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
@@ -257,7 +276,7 @@ pub async fn snapshot(state: &AppState) -> AutoPauseStatus {
         _ => "success",
     }
     .into();
-    {
+    if settings.provider == Provider::Codex {
         let resume = state.resume.lock().await;
         status.resume_plans = resume.plans();
         status.resume_state_error = resume.error.clone();
@@ -293,6 +312,22 @@ fn derive_summary(
 ) {
     if !status.enabled {
         status.summary = "off".into();
+        return;
+    }
+    if status.provider == Provider::Claude {
+        // An old Claude sample is normal while Claude Code is idle, and the
+        // hook judges it by its reset time, so only a failed read needs
+        // attention.
+        status.summary = match usage {
+            _ if status.quota_health == "error" => {
+                status.reason = Some("quotaReadFailed".into());
+                "needsAttention"
+            }
+            None => "checking",
+            Some(usage) if !triggered_quotas(settings, usage).is_empty() => "quotaLow",
+            Some(_) => "armed",
+        }
+        .into();
         return;
     }
     let reason = if status.quota_health == "error" {
@@ -420,6 +455,37 @@ mod tests {
             fetched_at: unix_now(),
         }
     }
+    #[tokio::test]
+    async fn claude_protection_ignores_the_codex_bridge_and_old_samples() {
+        let (state, dir) = state("claude");
+        {
+            let mut settings = state.settings.lock().await;
+            settings.auto_pause_on_low_quota = true;
+            settings.provider = Provider::Claude;
+        }
+        // The bridge was never probed and the account is unknown: neither
+        // matters for the hook-based guard.
+        let mut old = usage(Some(40));
+        old.fetched_at = unix_now() - 6 * 3600;
+        *state.last_usage.lock().await = Some(old.clone());
+        *state.tray_read_status.lock().await = TrayReadStatus::Success;
+        let status = snapshot(&state).await;
+        assert_eq!((status.provider, status.summary.as_str(), status.reason.as_deref()), (Provider::Claude, "armed", None));
+        assert_eq!(status.tooltip("en-US"), "Quota guard: armed");
+
+        old.five_hour_remaining_percent = Some(3);
+        *state.last_usage.lock().await = Some(old);
+        assert_eq!(snapshot(&state).await.summary, "quotaLow");
+
+        state.reader.lock().unwrap().failure = Some(crate::codex::reader::ReadFailure::new(
+            crate::codex::reader::ReadStage::Discovery,
+            crate::codex::reader::FailureKind::NotConnected,
+        ));
+        let failed = snapshot(&state).await;
+        assert_eq!((failed.summary.as_str(), failed.reason.as_deref()), ("needsAttention", Some("quotaReadFailed")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn snapshots_are_versioned_and_getters_do_not_consume_pending_events() {
         let (state, dir) = state("ordering");

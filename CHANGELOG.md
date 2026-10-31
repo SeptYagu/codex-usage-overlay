@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0-preview] - 2026-10-31
+
+### Added
+- Optional preview update channel ("Include preview releases", off by default). When enabled, update checks read the `latest.json` of the highest-versioned published release, preview or stable. The manifest is still signature-verified by the updater.
+- Claude usage limits as a second usage source, selected in Settings. The 5-hour and weekly windows come from the `rate_limits` data Claude Code passes to its statusline (Claude Code 2.1.80+, Pro/Max sign-in). The overlay reads no credentials and makes no network requests.
+- Bundled `claude-usage-bridge.exe` helper with one-click Connect/Disconnect. It is registered as Claude Code's statusline and guard hooks, chains the user's existing statusline, backs up `settings.json` once, and removes only its own entries on disconnect.
+- Claude quota guard: with protection on, `UserPromptSubmit` and `PreToolUse` hooks refuse new prompts and tool calls at or below the thresholds, with a localized reason. It fails open whenever the quota is uncertain.
+- Provider-aware tray tooltip, overlay label and protection status. Burn rate and reset state are kept per provider.
+
+### Changed
+- `serde_json` preserves key order, so editing Claude Code's settings keeps the user's layout.
+- Portable updates also replace the Claude bridge when the archive contains one.
+
 ## [1.4.1] - 2026-10-23
 
 ### Fixed

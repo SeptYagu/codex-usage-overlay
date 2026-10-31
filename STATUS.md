@@ -1,5 +1,18 @@
 # Status
 
+## v1.5.0-preview release preparation — 2026-10-31
+
+- Added an opt-in preview update channel (`includePrereleaseUpdates`). It resolves the highest-versioned published release's signed `latest.json` through the GitHub API (`src-tauri/src/update_channel.rs`), reusing the updater's reqwest/rustls stack with no new crates.
+- All six version locations are aligned at 1.5.0. The target tag is `v1.5.0-preview`, with [release notes](docs/releases/v1.5.0-preview.md). Published packages are built and signed by GitHub Actions from the tag.
+
+## Claude usage limits — 2026-10-31
+
+- Added Claude as a second, switchable usage source. The `claude-usage-bridge` helper (`src-tauri/src/bin/claude_bridge.rs`) is registered as Claude Code's statusline command and stores the statusline `rate_limits` in `claude-rate-limits.json`. The overlay maps that snapshot onto the existing sample type (`src-tauri/src/claude/source.rs`), so burn rate, reset notifications, tray and dock are reused. Learner and reset files are per provider.
+- The low-quota guard for Claude runs as Claude Code `UserPromptSubmit` / `PreToolUse` hooks served by the same helper. Codex Smart Pause, resume and bridge probing are skipped in Claude mode.
+- Connect/Disconnect edits `~/.claude/settings.json` with a one-time backup and chains the existing statusline (`src-tauri/src/claude/install.rs`).
+- Release packaging builds the helper first and adds it to the installers through `src-tauri/tauri.bundle.conf.json`. It is also added to the portable ZIP.
+- Validation: Rust, frontend, production build, packaging fixtures and a local NSIS build that includes the bridge. A live Claude Code session and an installed-package smoke test have not been run yet.
+
 ## v1.4.1 quota read reliability — 2026-10-23
 
 - Implemented the [quota reliability plan](docs/handoff/2026-10-23-quota-read-reliability-plan.md): one 45-second refresh budget, one bounded early transient retry, completion-based recovery polling starting at 15 seconds, shared failures for concurrent callers, conservative action freshness, and bounded retained diagnostics.
