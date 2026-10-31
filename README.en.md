@@ -63,12 +63,12 @@ Build and package a release:
 
 ```powershell
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin claude-usage-bridge
-npm run tauri -- build --ci --bundles nsis,msi --config src-tauri/tauri.bundle.conf.json
+npm run tauri -- build --ci --bundles nsis,msi
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin codex-usage-updater
 .\scripts\Build-TauriRelease.ps1 -Tag v1.1.0-preview
 ```
 
-Set the Tauri updater signing key in the build environment before packaging a release. The tag workflow publishes NSIS, MSI, portable ZIP, signatures, and `latest.json`; the portable updater helper is included in the ZIP. `tauri.bundle.conf.json` adds the Claude bridge to the installers, so the bridge must be built first; development builds and tests do not need it.
+Set the Tauri updater signing key in the build environment before packaging a release. The tag workflow publishes NSIS, MSI, portable ZIP, signatures, and `latest.json`; the portable updater helper is included in the ZIP. The installers include every Cargo binary present at bundle time, so build the Claude bridge before `tauri build`.
 See the [preview notes](docs/v1.1.0-preview-notes.md) for automated results and Windows checks still to be completed.
 
 ## License

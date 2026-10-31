@@ -63,12 +63,12 @@ npm run tauri dev
 
 ```powershell
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin claude-usage-bridge
-npm run tauri -- build --ci --bundles nsis,msi --config src-tauri/tauri.bundle.conf.json
+npm run tauri -- build --ci --bundles nsis,msi
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin codex-usage-updater
 .\scripts\Build-TauriRelease.ps1 -Tag v1.1.0-preview
 ```
 
-发布前需设置 Tauri 更新签名私钥环境变量。标签发布流程会生成 NSIS、MSI、便携 ZIP、签名和 `latest.json`；便携版更新助手也会一并打包。`tauri.bundle.conf.json` 会把 Claude 助手加入安装包，因此需先构建该助手；开发构建和测试不需要它。
+发布前需设置 Tauri 更新签名私钥环境变量。标签发布流程会生成 NSIS、MSI、便携 ZIP、签名和 `latest.json`；便携版更新助手也会一并打包。安装包会包含打包时已存在的所有 Cargo 可执行文件，因此需在 `tauri build` 之前构建 Claude 助手。
 预览版的自动化结果与尚未完成的 Windows 实机检查见[预览说明](docs/v1.1.0-preview-notes.md)。
 
 ## 开源协议

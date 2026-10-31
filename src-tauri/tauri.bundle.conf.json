@@ -1,7 +1,0 @@
-{
-  "bundle": {
-    "resources": {
-      "target/release/claude-usage-bridge.exe": "claude-usage-bridge.exe"
-    }
-  }
-}

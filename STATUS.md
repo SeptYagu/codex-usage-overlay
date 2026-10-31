@@ -10,7 +10,7 @@
 - Added Claude as a second, switchable usage source. The `claude-usage-bridge` helper (`src-tauri/src/bin/claude_bridge.rs`) is registered as Claude Code's statusline command and stores the statusline `rate_limits` in `claude-rate-limits.json`. The overlay maps that snapshot onto the existing sample type (`src-tauri/src/claude/source.rs`), so burn rate, reset notifications, tray and dock are reused. Learner and reset files are per provider.
 - The low-quota guard for Claude runs as Claude Code `UserPromptSubmit` / `PreToolUse` hooks served by the same helper. Codex Smart Pause, resume and bridge probing are skipped in Claude mode.
 - Connect/Disconnect edits `~/.claude/settings.json` with a one-time backup and chains the existing statusline (`src-tauri/src/claude/install.rs`).
-- Release packaging builds the helper first and adds it to the installers through `src-tauri/tauri.bundle.conf.json`. It is also added to the portable ZIP.
+- Release packaging builds the helper before `tauri build`, so NSIS and MSI install it as a Cargo binary. It is also added to the portable ZIP. A first `v1.5.0-preview` release run failed in WiX (ICE30) because the bridge was also declared as a bundle resource; the resource was removed, and the run published nothing.
 - Validation: Rust, frontend, production build, packaging fixtures and a local NSIS build that includes the bridge. A live Claude Code session and an installed-package smoke test have not been run yet.
 
 ## v1.4.1 quota read reliability — 2026-10-23
