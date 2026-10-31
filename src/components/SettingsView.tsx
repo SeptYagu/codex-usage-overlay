@@ -140,6 +140,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             />
           </label>
 
+          <label className={toggleRow}>
+            <span className="text-sm font-medium">{t('showProviderLogo')}</span>
+            <input
+              type="checkbox"
+              checked={settings.showProviderLogo}
+              onChange={(e) => updateField('showProviderLogo', e.target.checked)}
+              className={checkbox}
+            />
+          </label>
+
           {!claude && (
             <label className={toggleRow}>
               <span className="text-sm font-medium">{t('showCredits')}</span>
@@ -214,7 +224,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </select>
           </div>
 
-          {claude && <ClaudeConnectionView settings={settings} />}
+          {claude && <ClaudeConnectionView settings={settings} onPatchSettings={onPatchSettings} />}
 
           <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
             <span className="text-sm font-medium">{t('refreshInterval')}</span>

@@ -20,7 +20,7 @@ pub const SNAPSHOT_FRESH_SECS: i64 = 15 * 60;
 /// Identical values are rewritten at most this often, so a busy statusline
 /// does not rewrite the file after every message.
 const REWRITE_SECS: i64 = 30;
-const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// The overlay's runtime directory, the same one `ConfigManager::new` uses.
 pub fn runtime_dir() -> PathBuf {
@@ -97,7 +97,7 @@ fn parse_window(value: &Value) -> Option<WindowSnapshot> {
 
 /// Reset times arrive as epoch seconds in current releases and as ISO 8601
 /// strings in some older ones, so both are accepted.
-fn parse_timestamp(value: &Value) -> Option<i64> {
+pub fn parse_timestamp(value: &Value) -> Option<i64> {
     let seconds = match value {
         Value::Number(n) => {
             let raw = n.as_f64()?;

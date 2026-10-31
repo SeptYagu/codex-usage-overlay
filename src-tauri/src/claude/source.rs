@@ -24,6 +24,10 @@ pub fn read_usage(dir: &Path, now: i64) -> Result<ClaudeSample, ReadFailure> {
     }
     let snapshot = shared::read_snapshot(dir)
         .ok_or_else(|| ReadFailure::new(ReadStage::Parse, FailureKind::InvalidResponse))?;
+    Ok(sample(&snapshot, now))
+}
+
+pub fn sample(snapshot: &shared::Snapshot, now: i64) -> ClaudeSample {
     let window = |window: Option<shared::WindowSnapshot>, minutes: u32| {
         window.map(|w| w.at(now)).map_or_else(QuotaSnapshot::default, |w| QuotaSnapshot {
             used_percent: Some(w.used_percent),
@@ -31,7 +35,7 @@ pub fn read_usage(dir: &Path, now: i64) -> Result<ClaudeSample, ReadFailure> {
             window_duration_mins: Some(minutes),
         })
     };
-    Ok(ClaudeSample {
+    ClaudeSample {
         usage: RawCodexUsage {
             account_id: None,
             five_hour: window(snapshot.five_hour, FIVE_HOUR_MINS),
@@ -42,7 +46,7 @@ pub fn read_usage(dir: &Path, now: i64) -> Result<ClaudeSample, ReadFailure> {
             fetched_at: snapshot.captured_at,
         },
         stale: snapshot.age(now) > shared::SNAPSHOT_FRESH_SECS,
-    })
+    }
 }
 
 #[cfg(test)]

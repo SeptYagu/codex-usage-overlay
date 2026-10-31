@@ -380,3 +380,47 @@ describe('update channel', () => {
     expect(onPatchSettings).toHaveBeenCalledWith({ includePrereleaseUpdates: true }, false);
   });
 });
+
+describe('provider logo and live Claude reading', () => {
+  it('toggles the provider logo for either provider', async () => {
+    const { onPatchSettings, getByLabelText } = await renderSettings();
+    const toggle = getByLabelText('Show provider logo') as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    fireEvent.click(toggle);
+    expect(onPatchSettings).toHaveBeenCalledWith({ showProviderLogo: false }, false);
+  });
+
+  it('opts into live reading and explains a missing terminal login', async () => {
+    const status = {
+      statusLine: true, hooks: true, bridgeAvailable: true, settingsPath: 'C:\Users\me\.claude\settings.json',
+      snapshotCapturedAt: null, claudeVersion: null, blockedCount: 0, lastBlockedAt: null, error: null,
+      readFailure: 'authentication', readHttpStatus: null,
+    };
+    tauri.invoke.mockImplementation(async (command: string) => command === 'claude_connection_status' ? status : null);
+    const off = await renderSettings({ provider: 'claude' });
+    await act(async () => {});
+    const card = within(off.getByRole('group', { name: 'Claude Code connection' }));
+    expect(card.getByText(/In the desktop app, turn on live reading/)).toBeTruthy();
+    // The sign-in hint belongs to live reading only.
+    expect(card.queryByText(/No terminal login found/)).toBeNull();
+    fireEvent.click(card.getByLabelText('Read limits live with your Claude login'));
+    expect(off.onPatchSettings).toHaveBeenCalledWith({ claudeLivePolling: true });
+    cleanup();
+
+    const on = await renderSettings({ provider: 'claude', claudeLivePolling: true });
+    await act(async () => {});
+    const liveCard = within(on.getByRole('group', { name: 'Claude Code connection' }));
+    expect(liveCard.getByRole('alert').textContent).toMatch(/No terminal login found.*\/login/);
+  });
+
+  it('reports a refused live read with its HTTP status', async () => {
+    tauri.invoke.mockImplementation(async (command: string) => command === 'claude_connection_status' ? {
+      statusLine: false, hooks: false, bridgeAvailable: true, settingsPath: null, snapshotCapturedAt: 1_800_000_000,
+      claudeVersion: null, blockedCount: 0, lastBlockedAt: null, error: null, readFailure: 'rpc', readHttpStatus: 429,
+    } : null);
+    const { getByRole } = await renderSettings({ provider: 'claude', claudeLivePolling: true });
+    await act(async () => {});
+    expect(within(getByRole('group', { name: 'Claude Code connection' })).getByRole('alert').textContent)
+      .toBe('Live reading failed: HTTP 429.');
+  });
+});

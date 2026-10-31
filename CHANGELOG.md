@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0-preview.2] - 2026-10-31
+
+### Added
+- Opt-in live reading of Claude limits for the desktop app and IDE extensions, which never run a statusline. It reads the terminal CLI's login from `.credentials.json` for each request (never stored or refreshed), throttles the usage endpoint to once a minute, and stores readings in the local snapshot so the guard hooks use them.
+- Provider logo (OpenAI / Claude) at the start of the capsule in place of the "Claude" text label, with a **Show provider logo** toggle (on by default). Marks from Simple Icons 16.36.0 (Claude, CC0) and LobeHub Icons 1.101.0 (OpenAI, MIT).
+
+### Changed
+- A missing Claude sample is reported as "No Claude limits yet" instead of "Claude Code is not connected". Settings explains that only the terminal CLI feeds the statusline, and that a missing terminal login blocks live reading.
+
 ## [1.5.0-preview] - 2026-10-31
 
 ### Added

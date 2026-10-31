@@ -1,6 +1,7 @@
 //! Claude subscription limits, read from the snapshot the `claude-usage-bridge`
 //! helper stores while Claude Code renders its statusline.
 pub mod install;
+pub mod live;
 // The statusline parsing and guard decision are used by the helper binary,
 // which includes this file directly; the overlay only reads their results.
 #[allow(dead_code)]

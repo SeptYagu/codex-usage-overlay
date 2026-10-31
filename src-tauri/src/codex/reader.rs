@@ -118,7 +118,7 @@ impl fmt::Display for ReadFailure {
             ReadStage::Refresh => "refresh",
         };
         if self.kind == FailureKind::NotConnected {
-            write!(f, "Claude Code 尚未连接 / Claude Code is not connected")
+            write!(f, "尚未收到 Claude 额度 / No Claude limits received yet")
         } else if self.kind == FailureKind::Timeout {
             write!(f, "读取 Codex 用量超时 / Codex {method} timed out")
         } else {

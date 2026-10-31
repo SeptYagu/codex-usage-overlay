@@ -1,5 +1,12 @@
 # Status
 
+## v1.5.0-preview.2 — 2026-10-31
+
+- `v1.5.0-preview` received no Claude limits on a desktop-app-only machine: the desktop app never runs a statusline. Added opt-in live reading (`src-tauri/src/claude/live.rs`). It uses the terminal CLI's `.credentials.json` login, throttled to one request a minute, and writes readings to the snapshot the guard hooks read.
+- On this machine `.credentials.json` holds empty tokens: the desktop app keeps its login elsewhere. The overlay reports this as a sign-in requirement. A successful live read still needs a terminal `/login`.
+- Replaced the "Claude" capsule label with provider logos fetched from Simple Icons (Claude, CC0) and LobeHub Icons (OpenAI, MIT), with a show/hide setting.
+- App version stays 1.5.0, so the in-app updater does not offer this preview to `v1.5.0-preview` installs.
+
 ## v1.5.0-preview release preparation — 2026-10-31
 
 - Added an opt-in preview update channel (`includePrereleaseUpdates`). It resolves the highest-versioned published release's signed `latest.json` through the GitHub API (`src-tauri/src/update_channel.rs`), reusing the updater's reqwest/rustls stack with no new crates.

@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { CodexUsage, DockStateInfo, OverlaySettings } from '../types';
 import { useTranslation } from 'react-i18next';
+import { ProviderLogo } from './ProviderLogo';
 
 interface OverlayViewProps {
   settings: OverlaySettings;
@@ -56,9 +57,10 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
   const scale = settings.scalePercent / 100;
   const layout = settings.overlayLayout === 'stacks' ? 'stacks' : 'grouped';
   const collapsed = Boolean(dockState?.docked && !dockState.expanded);
-  // Claude has no credit balance; its capsule carries a provider label instead.
+  // Claude has no credit balance.
   const claude = settings.provider === 'claude';
   const showCredits = settings.showCredits && !claude;
+  const showLogo = settings.showProviderLogo;
 
   // WebView2 renders content at devicePixelRatio = monitor DPI scale x system
   // text scaling (Windows "make text bigger"), while Tauri converts window
@@ -140,7 +142,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
       lastSizeRef.current = { width: 0, height: 0 };
     }
     void fitCapsuleSize();
-  }, [scale, layout, showCredits, claude, settings.showFiveHourQuota, settings.showBurnRate, settings.language, usage, fitCapsuleSize, dprComp, dockState, sizeInvalidation]);
+  }, [scale, layout, showCredits, claude, showLogo, settings.showFiveHourQuota, settings.showBurnRate, settings.language, usage, fitCapsuleSize, dprComp, dockState, sizeInvalidation]);
 
   useEffect(() => {
     const el = rootRef.current;
@@ -265,9 +267,11 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
         } as React.CSSProperties}
         className={`overlay-surface overlay-capsule overlay-${layout}`}
       >
-        {claude && (
+        {showLogo && (
           <>
-            <span className="overlay-label overlay-provider">{t('providerClaude')}</span>
+            <span className="overlay-provider" role="img" aria-label={t(claude ? 'providerClaude' : 'providerCodex')}>
+              <ProviderLogo provider={settings.provider} />
+            </span>
             {layout === 'grouped' && <span aria-hidden="true" className="overlay-divider" />}
           </>
         )}

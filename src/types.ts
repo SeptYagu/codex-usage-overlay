@@ -15,6 +15,8 @@ export type Provider = 'codex' | 'claude';
 
 export interface OverlaySettings {
   provider: Provider;
+  claudeLivePolling: boolean;
+  showProviderLogo: boolean;
   overlayLayout: 'grouped' | 'stacks';
   scalePercent: number;
   backgroundTransparencyPercent: number;
@@ -59,6 +61,8 @@ export interface DockStateInfo {
 
 export const DEFAULT_SETTINGS: OverlaySettings = {
   provider: 'codex',
+  claudeLivePolling: false,
+  showProviderLogo: true,
   overlayLayout: 'grouped',
   scalePercent: 175,
   backgroundTransparencyPercent: 23,
@@ -165,4 +169,6 @@ export interface ClaudeConnectionStatus {
   blockedCount: number;
   lastBlockedAt: number | null;
   error: string | null;
+  readFailure: string | null;
+  readHttpStatus: number | null;
 }

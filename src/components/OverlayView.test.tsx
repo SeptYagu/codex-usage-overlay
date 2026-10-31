@@ -60,7 +60,7 @@ afterEach(() => {
 });
 
 describe.each(['grouped', 'stacks'] as const)('%s layout', (overlayLayout) => {
-  const settings = { ...DEFAULT_SETTINGS, overlayLayout };
+  const settings = { ...DEFAULT_SETTINGS, overlayLayout, showProviderLogo: false };
 
   it('keeps each countdown with its quota and renders the credit balance', () => {
     const { container } = render(<OverlayView settings={settings} usage={usage} isLoading={false} />);
@@ -86,15 +86,22 @@ describe.each(['grouped', 'stacks'] as const)('%s layout', (overlayLayout) => {
     expect(container.querySelectorAll('.overlay-divider').length).toBe(overlayLayout === 'grouped' ? 1 : 0);
   });
 
-  it('labels the Claude capsule and never shows a credit group for it', () => {
-    const { container } = render(
-      <OverlayView settings={{ ...settings, provider: 'claude' }} usage={{ ...usage, hasCredits: false, creditsDisplay: '—' }} isLoading={false} />,
+  it.each(['codex', 'claude'] as const)('shows the %s logo before the quotas and never a Claude credit group', (provider) => {
+    const { container, rerender } = render(
+      <OverlayView settings={{ ...settings, provider, showProviderLogo: true }} usage={{ ...usage, hasCredits: provider === 'codex' }} isLoading={false} />,
     );
-    expect(screen.getByText('Claude').classList.contains('overlay-provider')).toBe(true);
-    expect(screen.queryByRole('group', { name: 'CREDITS' })).toBeNull();
-    expect(within(screen.getByRole('group', { name: '5 HOUR' })).getByText('69%')).toBeTruthy();
-    // Provider label separator + the one between the two quotas.
-    expect(container.querySelectorAll('.overlay-divider').length).toBe(overlayLayout === 'grouped' ? 2 : 0);
+    const logo = screen.getByRole('img', { name: provider === 'claude' ? 'Claude' : 'Codex' });
+    expect(logo.classList.contains('overlay-provider')).toBe(true);
+    expect(logo.querySelector('svg')?.getAttribute('data-provider')).toBe(provider);
+    // Same position the provider label had: the first element of the capsule.
+    expect(container.querySelector('.overlay-capsule')?.firstElementChild).toBe(logo);
+    expect(screen.queryByText('Claude')).toBeNull();
+    expect(screen.queryByRole('group', { name: 'CREDITS' }) !== null).toBe(provider === 'codex');
+    expect(container.querySelectorAll('.overlay-divider').length)
+      .toBe(overlayLayout === 'grouped' ? (provider === 'codex' ? 3 : 2) : 0);
+
+    rerender(<OverlayView settings={{ ...settings, provider, showProviderLogo: false }} usage={usage} isLoading={false} />);
+    expect(screen.queryByRole('img', { name: provider === 'claude' ? 'Claude' : 'Codex' })).toBeNull();
   });
 
   it.each(['∞', '—', '0'])('preserves credit state %s', (creditsDisplay) => {
@@ -348,7 +355,8 @@ describe.each(['en-US', 'zh-CN', 'zh-Hant'])('display preferences in %s', (langu
     for (const showFiveHourQuota of [true, false]) {
       for (const showBurnRate of [true, false]) {
         for (const showCredits of [true, false]) {
-          rerender(<OverlayView settings={{ ...DEFAULT_SETTINGS, overlayLayout, showFiveHourQuota, showBurnRate, showCredits }} usage={usage} isLoading={false} />);
+          for (const showProviderLogo of [true, false]) {
+          rerender(<OverlayView settings={{ ...DEFAULT_SETTINGS, overlayLayout, showFiveHourQuota, showBurnRate, showCredits, showProviderLogo }} usage={usage} isLoading={false} />);
           expect(screen.queryByRole('group', { name: i18n.t('fiveHourLabel') }) !== null).toBe(showFiveHourQuota);
           const weekly = within(screen.getByRole('group', { name: i18n.t('weeklyLabel') }));
           expect(weekly.getByText('62%')).toBeTruthy();
@@ -356,7 +364,10 @@ describe.each(['en-US', 'zh-CN', 'zh-Hant'])('display preferences in %s', (langu
           expect(weekly.queryByText('0.6%/h') !== null).toBe(showBurnRate);
           expect(screen.queryByRole('group', { name: i18n.t('creditsLabel') }) !== null).toBe(showCredits);
           expect(container.querySelectorAll('.overlay-burn-rate')).toHaveLength(showBurnRate ? (showFiveHourQuota ? 2 : 1) : 0);
-          expect(container.querySelectorAll('.overlay-divider')).toHaveLength(overlayLayout === 'grouped' ? Number(showFiveHourQuota) + Number(showCredits) : 0);
+          expect(container.querySelectorAll('.overlay-provider')).toHaveLength(Number(showProviderLogo));
+          expect(container.querySelectorAll('.overlay-divider')).toHaveLength(overlayLayout === 'grouped'
+            ? Number(showFiveHourQuota) + Number(showCredits) + Number(showProviderLogo) : 0);
+          }
         }
       }
     }

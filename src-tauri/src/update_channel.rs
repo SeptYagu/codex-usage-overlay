@@ -48,16 +48,20 @@ pub fn newest_manifest_url(releases: &[Release]) -> Option<String> {
         .map(|(_, url)| url)
 }
 
-pub async fn prerelease_endpoint() -> Result<tauri::Url, String> {
-    // The updater installs the same provider before its own requests.
+/// An HTTP client on the updater's TLS stack, which also installs this
+/// provider before its own requests.
+pub fn http_client(timeout: Duration) -> reqwest::Result<reqwest::Client> {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
-    let client = reqwest::Client::builder()
+    reqwest::Client::builder()
         .user_agent(concat!("codex-usage-overlay/", env!("CARGO_PKG_VERSION")))
-        .timeout(TIMEOUT)
+        .timeout(timeout)
         .build()
-        .map_err(|error| error.to_string())?;
+}
+
+pub async fn prerelease_endpoint() -> Result<tauri::Url, String> {
+    let client = http_client(TIMEOUT).map_err(|error| error.to_string())?;
     let releases: Vec<Release> = client
         .get(RELEASES_API)
         .header("Accept", "application/vnd.github+json")

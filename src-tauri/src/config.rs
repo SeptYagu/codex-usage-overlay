@@ -38,6 +38,14 @@ pub struct OverlaySettings {
     /// Codex by default, so an upgraded profile keeps reading Codex.
     #[serde(default)]
     pub provider: Provider,
+    /// Whether the Claude provider reads limits from the usage endpoint with
+    /// Claude Code's login token, instead of only from the statusline bridge.
+    /// Off by default: it reads a credential, so it is never armed silently.
+    #[serde(default)]
+    pub claude_live_polling: bool,
+    /// Whether the capsule shows the active provider's logo.
+    #[serde(default = "default_true")]
+    pub show_provider_logo: bool,
     #[serde(default)]
     pub overlay_layout: OverlayLayout,
     #[serde(default = "default_scale")]
@@ -113,6 +121,8 @@ impl Default for OverlaySettings {
     fn default() -> Self {
         Self {
             provider: Provider::default(),
+            claude_live_polling: false,
+            show_provider_logo: default_true(),
             overlay_layout: OverlayLayout::default(),
             scale_percent: default_scale(),
             background_transparency_percent: default_transparency(),

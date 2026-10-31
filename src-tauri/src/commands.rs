@@ -30,6 +30,9 @@ pub struct AppState {
     pub config_manager: ConfigManager,
     pub dock: crate::dock::DockManager,
     pub last_usage: Mutex<Option<CodexUsage>>,
+    /// The last live Claude reading and when it was fetched, which throttles
+    /// the usage endpoint to one request per `claude::live::MIN_INTERVAL`.
+    pub claude_live: StdMutex<Option<(std::time::Instant, crate::claude::shared::Snapshot)>>,
     pub tray_read_status: Mutex<TrayReadStatus>,
     pub settings: Mutex<OverlaySettings>,
     pub settings_revision: AtomicU64,
@@ -87,6 +90,7 @@ impl AppState {
             config_manager: config_manager.clone(),
             dock: crate::dock::DockManager::new(config_manager.clone()),
             last_usage: Mutex::new(None),
+            claude_live: StdMutex::new(None),
             tray_read_status: Mutex::new(TrayReadStatus::Pending),
             settings: Mutex::new(settings),
             settings_revision: AtomicU64::new(0),
@@ -167,7 +171,7 @@ pub(crate) trait UsageSource: TrayPresentationSink {
 impl UsageSource for AppHandle {
     async fn read_usage(&self, state: &AppState) -> Result<RawCodexUsage, String> {
         if state.settings.lock().await.provider == Provider::Claude {
-            return read_claude_usage(state);
+            return read_claude_usage(state).await;
         }
         let mut client = state.client.lock().await;
         let started_at = reader::unix_now();
@@ -217,10 +221,18 @@ impl UsageSource for AppHandle {
     }
 }
 
-/// The Claude read is a local file, so it has no attempts, retries or process
-/// diagnostics; the Codex read history stays Codex-only.
-fn read_claude_usage(state: &AppState) -> Result<RawCodexUsage, String> {
-    let result = crate::claude::source::read_usage(state.config_manager.runtime_dir(), reader::unix_now());
+/// The Claude read has no attempts, retries or process diagnostics; the Codex
+/// read history stays Codex-only. Without live reading it is the local file
+/// the statusline bridge writes. With live reading the endpoint answers, and
+/// the answer is also stored in that file so the guard hooks see it.
+async fn read_claude_usage(state: &AppState) -> Result<RawCodexUsage, String> {
+    let now = reader::unix_now();
+    let dir = state.config_manager.runtime_dir();
+    let result = if state.settings.lock().await.claude_live_polling {
+        read_claude_live(state, now).await.map(|snapshot| crate::claude::source::sample(&snapshot, now))
+    } else {
+        crate::claude::source::read_usage(dir, now)
+    };
     let mut status = state.reader.lock().unwrap_or_else(|p| p.into_inner());
     status.observation = None;
     match result {
@@ -235,6 +247,27 @@ fn read_claude_usage(state: &AppState) -> Result<RawCodexUsage, String> {
             Err(error.to_string())
         }
     }
+}
+
+async fn read_claude_live(state: &AppState, now: i64) -> Result<crate::claude::shared::Snapshot, ReadFailure> {
+    use crate::claude::{live, shared};
+    let cached = state.claude_live.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        .filter(|(at, _)| at.elapsed() < live::MIN_INTERVAL);
+    if let Some((_, snapshot)) = cached {
+        return Ok(snapshot);
+    }
+    let snapshot = live::fetch(now).await?;
+    *state.claude_live.lock().unwrap_or_else(|p| p.into_inner()) = Some((std::time::Instant::now(), snapshot.clone()));
+    let dir = state.config_manager.runtime_dir();
+    let mut stored = snapshot.clone();
+    // The bridge's capture keeps its Claude Code version.
+    if let Some(previous) = shared::read_snapshot(dir) {
+        stored.claude_version = previous.claude_version;
+    }
+    if let Err(error) = shared::write_json_atomic(&dir.join(shared::SNAPSHOT_FILE), &stored) {
+        eprintln!("Could not store the live Claude limits: {error}");
+    }
+    Ok(snapshot)
 }
 
 pub(crate) async fn observe_read_event<S: TrayPresentationSink>(sink: &S, state: &AppState, event: ReadEvent) {
@@ -419,6 +452,8 @@ pub(crate) async fn process_usage_error<S: TrayPresentationSink>(sink: &S, state
 
 pub(crate) fn overlay_geometry_changed(previous: &OverlaySettings, next: &OverlaySettings) -> bool {
     previous.scale_percent != next.scale_percent
+        || previous.show_provider_logo != next.show_provider_logo
+        || previous.provider != next.provider
         || previous.show_credits != next.show_credits
         || previous.show_five_hour_quota != next.show_five_hour_quota
         || previous.show_burn_rate != next.show_burn_rate
@@ -561,7 +596,8 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "showCredits" | "autoCheckUpdates" | "autoInstallUpdates" | "fiveHourResetNotification"
             | "weeklyResetNotification" | "autoEdgeHide" | "mousePassthrough" | "showPercentageGrid"
             | "showFiveHourQuota" | "showBurnRate" | "autoPauseOnLowQuota"
-            | "autoResumeAfterQuotaReset" | "includePrereleaseUpdates" => value.is_boolean(),
+            | "autoResumeAfterQuotaReset" | "includePrereleaseUpdates" | "claudeLivePolling"
+            | "showProviderLogo" => value.is_boolean(),
             "autoStart" => allow_auto_start && value.is_boolean(),
             "autoPauseFiveHourThresholdPercent" => value.as_u64().is_some_and(|n| (1..=15).contains(&n)),
             "autoPauseWeeklyThresholdPercent" => value.as_u64().is_some_and(|n| (1..=10).contains(&n)),
@@ -721,6 +757,18 @@ mod settings_patch_tests {
         assert!(settings.include_prerelease_updates);
     }
 
+    #[test]
+    fn live_claude_reading_is_opt_in_and_the_logo_is_shown_by_default() {
+        let defaults = OverlaySettings::default();
+        assert!(!defaults.claude_live_polling && defaults.show_provider_logo);
+        // An older settings file has neither key.
+        let upgraded: OverlaySettings = serde_json::from_str("{}").unwrap();
+        assert!(!upgraded.claude_live_polling && upgraded.show_provider_logo);
+        let patch = serde_json::json!({"claudeLivePolling": true, "showProviderLogo": false});
+        assert_eq!(validate_settings_patch(&patch, false).unwrap().len(), 2);
+        assert!(validate_settings_patch(&serde_json::json!({"claudeLivePolling": 1}), false).is_err());
+    }
+
     /// Negative control: a patch that is not an object, or that carries a key with no
     /// matching field, must not be able to fabricate the setting.
     #[test]
@@ -825,7 +873,10 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     {
         let mut polling = state.polling.lock().unwrap_or_else(|p| p.into_inner());
         polling.recalculate(&envelope.settings, std::time::Instant::now());
-        if provider_changed || changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota"
+        if changes.contains_key("claudeLivePolling") {
+            *state.claude_live.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
+        if provider_changed || changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota" | "claudeLivePolling"
             | "autoPauseFiveHourThresholdPercent" | "autoPauseWeeklyThresholdPercent")) {
             polling.request_now(std::time::Instant::now());
         }
@@ -950,7 +1001,13 @@ pub(crate) async fn switch_provider(state: &Arc<AppState>, provider: Provider) {
 pub async fn claude_connection_status(state: State<'_, Arc<AppState>>) -> Result<crate::claude::install::ClaudeConnectionStatus, String> {
     let settings_path = crate::claude::install::claude_settings_path();
     let bridge = crate::claude::install::bridge_path();
-    Ok(crate::claude::install::status(settings_path.as_deref(), state.config_manager.runtime_dir(), bridge.as_deref()))
+    let mut status = crate::claude::install::status(settings_path.as_deref(), state.config_manager.runtime_dir(), bridge.as_deref());
+    if state.settings.lock().await.provider == Provider::Claude {
+        let failure = state.reader.lock().unwrap_or_else(|p| p.into_inner()).failure.clone();
+        status.read_failure = failure.as_ref().map(|f| f.kind);
+        status.read_http_status = failure.and_then(|f| f.http_status);
+    }
+    Ok(status)
 }
 
 #[tauri::command]

@@ -6,16 +6,17 @@ import { useProtectionStatus } from '../hooks/useProtectionStatus';
 
 interface ClaudeConnectionViewProps {
   settings: OverlaySettings;
+  onPatchSettings: (patch: Partial<OverlaySettings>, debounce?: boolean) => void;
 }
 
 const STATUS_POLL_MS = 10_000;
 
 /**
  * Connects the bundled `claude-usage-bridge` helper to Claude Code (statusline +
- * guard hooks) and shows what it last reported. The overlay never reads Claude
- * credentials: limits only arrive while Claude Code renders its statusline.
+ * guard hooks) and shows what it last reported. Limits arrive while the terminal
+ * CLI renders its statusline or, opted in, from live reading with the CLI login.
  */
-export const ClaudeConnectionView: React.FC<ClaudeConnectionViewProps> = ({ settings }) => {
+export const ClaudeConnectionView: React.FC<ClaudeConnectionViewProps> = ({ settings, onPatchSettings }) => {
   const { t } = useTranslation();
   const { status: protection } = useProtectionStatus();
   const [status, setStatus] = useState<ClaudeConnectionStatus | null>(null);
@@ -53,6 +54,14 @@ export const ClaudeConnectionView: React.FC<ClaudeConnectionViewProps> = ({ sett
   const stateLabel = connected ? t('claudeConnected') : partly ? t('claudePartlyConnected') : t('claudeNotConnected');
   const time = (seconds: number) => new Date(seconds * 1000).toLocaleString();
   const guardSummary = !settings.autoPauseOnLowQuota ? 'off' : protection?.summary ?? 'checking';
+  const live = settings.claudeLivePolling;
+  const liveFailure = live && status?.readFailure && status.readFailure !== 'notConnected'
+    ? status.readFailure === 'authentication'
+      ? t('claudeLiveSignIn')
+      : status.readHttpStatus
+        ? t('claudeLiveHttp', { status: status.readHttpStatus })
+        : t('claudeLiveFailed', { reason: t(`quotaReadFailures.${status.readFailure}`, { defaultValue: t('quotaReadFailures.rpc') }) })
+    : null;
 
   return (
     <div className="space-y-1.5 rounded-lg border border-slate-200 dark:border-slate-700 p-2.5" aria-label={t('claudeConnection')} role="group">
@@ -90,6 +99,18 @@ export const ClaudeConnectionView: React.FC<ClaudeConnectionViewProps> = ({ sett
           {t('claudeConnectHint', { path: status.settingsPath })}
         </p>
       )}
+      <label className="flex items-center justify-between gap-3 text-sm">
+        <span className="font-medium">{t('claudeLivePolling')}</span>
+        <input
+          type="checkbox"
+          aria-label={t('claudeLivePolling')}
+          checked={live}
+          onChange={(e) => onPatchSettings({ claudeLivePolling: e.target.checked })}
+          className="w-4 h-4 rounded text-cyan-600 accent-cyan-500 cursor-pointer"
+        />
+      </label>
+      <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">{t('claudeLivePollingHint')}</p>
+      {liveFailure && <p role="alert" className="text-xs text-amber-700 dark:text-amber-300">{liveFailure}</p>}
       <p className="text-xs text-slate-600 dark:text-slate-300">
         {status?.snapshotCapturedAt
           ? status.claudeVersion

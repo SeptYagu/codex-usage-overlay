@@ -42,9 +42,10 @@ Windows 桌面悬浮窗，显示 Codex 配额和 Credit 余额。通过本机 Co
 在设置中将“用量来源”切换为 **Claude**，浮窗即显示 Claude 订阅额度（5 小时会话窗口和每周窗口），代替 Codex。同一时间只使用一个来源，默认仍为 Codex。
 
 - 点击“连接 Claude Code”。浮窗会将附带的 `claude-usage-bridge.exe` 注册为 Claude Code 的状态栏命令，并在 `~/.claude/settings.json`（遵循 `CLAUDE_CONFIG_DIR`）中添加 `UserPromptSubmit` 和 `PreToolUse` 两个钩子。原文件会备份一次为 `settings.json.codex-overlay.bak`。原有状态栏通过助手继续显示；“断开连接”会恢复它，并只移除浮窗添加的条目。钩子改动对新的 Claude Code 会话生效。
-- 额度来自 Claude Code 传给状态栏的 `rate_limits` 数据，需要 Claude Code 2.1.80 或更高版本，并使用 Pro 或 Max 套餐登录；API Key 会话不提供该数据。浮窗不读取 Claude 凭据，也不发起网络请求。额度只在使用 Claude Code 时更新。重置时间已过的窗口显示为已重置；重置通知在收到新周期的第一份样本时发出。
+- 默认情况下，额度来自 Claude Code 传给状态栏的 `rate_limits` 数据，需要 Claude Code 2.1.80 或更高版本，并使用 Pro 或 Max 套餐登录；API Key 会话不提供该数据。此模式下浮窗不读取 Claude 凭据，也不发起网络请求。额度只在使用**终端 `claude` CLI** 时更新：桌面版和 IDE 扩展不会运行状态栏。
+- “使用 Claude 登录实时读取额度”（默认关闭）适用于桌面版。浮窗最多每分钟请求一次 Claude Code `/usage` 背后的用量接口，使用终端 CLI 保存在 `~/.claude/.credentials.json` 中的登录信息。令牌每次请求时读取，不会保存、记录、续期或发送到其他地方。该接口未公开，可能变化。桌面版的登录不会共享，因此请先用 `claude` → `/login` 登录一次；使用 CLI 也会续期已过期的登录。实时读取的结果会写入同一本地文件，额度保护钩子也会使用。重置时间已过的窗口显示为已重置；重置通知在收到新周期的第一份样本时发出。
 - 开启保护开关后，5 小时或每周剩余额度达到或低于阈值时，钩子会拒绝新的提问和工具调用，Claude Code 会显示原因。Claude 不使用 Codex 智能暂停。旧样本在其重置时间之前仍然有效，因为窗口内已用额度只增不减。缺少或无法读取样本、重置时间已过或开关关闭时，请求一律放行。
-- Claude 不显示 Credit 余额。消耗速率与重置状态保存在以 `claude-` 开头的独立文件中，Claude 样本不会混入 Codex 历史。
+- 浮窗开头显示当前来源的图标（Codex 为 OpenAI，Claude 为 Claude），可用“显示来源图标”隐藏。图标取自 Simple Icons（Claude，CC0）和 LobeHub Icons（OpenAI，MIT），商标归各自所有者。Claude 不显示 Credit 余额。消耗速率与重置状态保存在以 `claude-` 开头的独立文件中，Claude 样本不会混入 Codex 历史。
 - 助手写入 `claude-rate-limits.json` 和 `claude-guard-state.json`，浮窗写入 `claude-guard.json` 和 `claude-bridge.json`，均位于上述运行目录。卸载前请先断开连接，否则 Claude Code 会继续调用已删除的助手。
 
 ## 开发与构建

@@ -23,6 +23,9 @@ pub struct ClaudeConnectionStatus {
     pub blocked_count: u64,
     pub last_blocked_at: Option<i64>,
     pub error: Option<String>,
+    /// The last failed Claude read while Claude is the active provider.
+    pub read_failure: Option<crate::codex::reader::FailureKind>,
+    pub read_http_status: Option<u16>,
 }
 
 /// Claude Code's user settings file, honoring `CLAUDE_CONFIG_DIR`.
@@ -79,6 +82,8 @@ pub fn status(settings_path: Option<&Path>, runtime_dir: &Path, bridge: Option<&
         blocked_count: guard.blocked_count,
         last_blocked_at: guard.last_blocked_at,
         error,
+        read_failure: None,
+        read_http_status: None,
     }
 }
 
