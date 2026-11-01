@@ -4,11 +4,13 @@
 //! the desktop app and IDE extensions never run a statusline. Live reading
 //! asks the usage endpoint behind Claude Code's `/usage` command with the
 //! OAuth token Claude Code stores in `.credentials.json`. The token is read
-//! for each request and never stored, logged, refreshed or sent anywhere but
-//! that endpoint. When it has expired, using Claude Code refreshes it.
+//! for each request and never stored, logged or sent anywhere but that
+//! endpoint. CLI logins expire after a few hours; the overlay then asks
+//! Claude Code to renew its own login and never writes the credentials.
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use super::shared::{self, Snapshot, WindowSnapshot};
 use crate::codex::reader::{FailureKind, ReadFailure, ReadStage};
@@ -20,6 +22,98 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// every 15 seconds near a threshold.
 pub const MIN_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_RETRY_AFTER_SECS: u64 = 120;
+/// Claude Code is asked to renew its login at most this often, so a signed
+/// out CLI is not started every minute.
+const RENEW_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const RENEW_TIMEOUT: Duration = Duration::from_secs(30);
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// What live reading remembers between polls.
+#[derive(Debug, Default)]
+pub struct LiveState {
+    /// The last answer and when it arrived.
+    pub answer: Option<(Instant, Snapshot)>,
+    /// The last failed request, kept until a request succeeds.
+    pub failure: Option<ReadFailure>,
+    /// No request is made before this instant: the minimum interval after an
+    /// answer, the server's `Retry-After` after a refusal.
+    next_request: Option<Instant>,
+    last_renewal: Option<Instant>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum LiveStep {
+    Answer(Snapshot),
+    Failure(ReadFailure),
+    Request,
+}
+
+impl LiveState {
+    pub fn step(&self, now: Instant) -> LiveStep {
+        if self.next_request.is_none_or(|at| now >= at) {
+            return LiveStep::Request;
+        }
+        match (&self.failure, &self.answer) {
+            (Some(failure), _) => LiveStep::Failure(failure.clone()),
+            (None, Some((_, snapshot))) => LiveStep::Answer(snapshot.clone()),
+            (None, None) => LiveStep::Request,
+        }
+    }
+
+    pub fn record(&mut self, now: Instant, result: &Result<Snapshot, ReadFailure>) {
+        let wait = match result {
+            Ok(snapshot) => {
+                self.answer = Some((now, snapshot.clone()));
+                self.failure = None;
+                MIN_INTERVAL
+            }
+            Err(failure) => {
+                self.failure = Some(failure.clone());
+                failure.retry_after_seconds.map_or(MIN_INTERVAL, Duration::from_secs).max(MIN_INTERVAL)
+            }
+        };
+        self.next_request = Some(now + wait);
+    }
+
+    /// Takes the renewal slot when an expired or refused login may be renewed.
+    pub fn take_renewal(&mut self, now: Instant, failure: &ReadFailure) -> bool {
+        let due = failure.kind == FailureKind::Authentication
+            && self.last_renewal.is_none_or(|at| now.saturating_duration_since(at) >= RENEW_INTERVAL);
+        if due {
+            self.last_renewal = Some(now);
+        }
+        due
+    }
+}
+
+/// The `claude` CLI: the native installer's `claude.exe` on PATH or in
+/// `~/.local/bin`, else the batch shim an npm install puts on PATH.
+fn claude_cli() -> Option<PathBuf> {
+    let on_path: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    let native = dirs::home_dir().map(|home| home.join(".local").join("bin"));
+    on_path.iter().chain(native.iter())
+        .map(|dir| dir.join("claude.exe"))
+        .chain(on_path.iter().map(|dir| dir.join("claude.cmd")))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Claude Code renews an expired login whenever it starts; `claude auth
+/// status` does so without a session and without using any quota. Returns
+/// whether the command ran to completion.
+pub async fn renew_login() -> bool {
+    let Some(cli) = claude_cli() else { return false };
+    let mut command = tokio::process::Command::new(cli);
+    command
+        .args(["auth", "status"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    matches!(tokio::time::timeout(RENEW_TIMEOUT, command.status()).await, Ok(Ok(_)))
+}
 
 /// Claude Code's credentials file, honoring `CLAUDE_CONFIG_DIR`.
 pub fn credentials_path() -> Option<PathBuf> {
@@ -181,6 +275,48 @@ mod tests {
         assert_eq!(status_failure(429, None).retry_after_seconds, Some(120));
         let server = status_failure(503, None);
         assert!(server.transient() && server.retry_after_seconds.is_none());
+    }
+
+    fn snapshot(used: f64) -> Snapshot {
+        Snapshot {
+            schema_version: shared::SCHEMA_VERSION,
+            five_hour: Some(WindowSnapshot { used_percent: used, resets_at: None }),
+            seven_day: None,
+            captured_at: NOW,
+            claude_version: None,
+        }
+    }
+
+    #[test]
+    fn answers_are_reused_and_refusals_wait_for_their_retry_time() {
+        let start = Instant::now();
+        let mut state = LiveState::default();
+        assert_eq!(state.step(start), LiveStep::Request);
+
+        state.record(start, &Ok(snapshot(10.0)));
+        assert_eq!(state.step(start + Duration::from_secs(59)), LiveStep::Answer(snapshot(10.0)));
+        assert_eq!(state.step(start + MIN_INTERVAL), LiveStep::Request);
+
+        let refused = status_failure(429, Some(300));
+        let later = start + MIN_INTERVAL;
+        state.record(later, &Err(refused.clone()));
+        assert_eq!(state.step(later + Duration::from_secs(299)), LiveStep::Failure(refused));
+        assert_eq!(state.step(later + Duration::from_secs(300)), LiveStep::Request);
+        // The failure stays until a request succeeds.
+        assert!(state.failure.is_some());
+        state.record(later + Duration::from_secs(300), &Ok(snapshot(12.0)));
+        assert!(state.failure.is_none());
+    }
+
+    #[test]
+    fn an_expired_login_is_renewed_at_most_every_ten_minutes() {
+        let start = Instant::now();
+        let mut state = LiveState::default();
+        let expired = sign_in_required(ReadStage::Discovery);
+        assert!(!state.take_renewal(start, &status_failure(503, None)));
+        assert!(state.take_renewal(start, &expired));
+        assert!(!state.take_renewal(start + Duration::from_secs(599), &expired));
+        assert!(state.take_renewal(start + RENEW_INTERVAL, &expired));
     }
 
     /// Reads the real endpoint with this machine's Claude Code login. Prints

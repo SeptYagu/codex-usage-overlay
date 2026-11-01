@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-01
+
+First stable release with Claude usage limits, live Claude reading, provider logos and the preview update channel from the 1.5.0 previews.
+
+### Fixed
+- Live Claude reading no longer stops when the terminal CLI's login expires (after about eight hours). The overlay runs `claude auth status`, at most every ten minutes, so Claude Code renews its own login without using quota; the overlay still never writes the credentials.
+- A failed live Claude read, or a `Retry-After` wait, no longer blanks the overlay: it keeps showing the last stored reading with its age, and Settings shows the live failure. Refused requests now wait for the server's retry time instead of being repeated every poll.
+- Claude read failures no longer report a Codex "executable discovery" stage.
+- The tray icon stays visible on a dark taskbar without a reading: the rim and unread rings are lighter. If the shell has lost the icon, the next update registers it again.
+
+### Changed
+- Future previews carry numbered app versions (`1.6.0-preview.1`), so the updater offers each preview the next one and then the stable release. The MSI gets the preview number as its fourth version field (`1.6.0.1`). The 1.5.0 previews already report 1.5.0, so the updater does not offer them this release; install it manually once.
+
 ## [1.5.0-preview.2] - 2026-10-31
 
 ### Added

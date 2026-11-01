@@ -36,11 +36,33 @@ pub trait TrayPresentationSink {
     fn app_handle(&self) -> Option<&AppHandle>;
 }
 
+/// The last time the tray icon was registered again, see `present`.
+static TRAY_REREGISTERED: StdMutex<Option<Instant>> = StdMutex::new(None);
+const TRAY_REREGISTER_INTERVAL: Duration = Duration::from_secs(30);
+
 impl TrayPresentationSink for AppHandle {
     fn present(&self, presentation: TrayPresentation) {
-        if let Some(tray) = self.tray_by_id(TRAY_ID) {
-            let _ = tray.set_icon(Some(presentation.icon));
+        let Some(tray) = self.tray_by_id(TRAY_ID) else { return };
+        if tray.set_icon(Some(presentation.icon.clone())).is_ok() {
             update_tray_tooltip(self, &presentation.tooltip);
+            return;
+        }
+        // The shell no longer knows the icon: an add that timed out while the
+        // taskbar was starting, or a lost icon without a TaskbarCreated
+        // broadcast. Every later update fails the same way, so register it
+        // again, throttled while the taskbar is missing altogether.
+        let now = Instant::now();
+        {
+            let mut last = TRAY_REREGISTERED.lock().unwrap_or_else(|p| p.into_inner());
+            if last.is_some_and(|at| now.saturating_duration_since(at) < TRAY_REREGISTER_INTERVAL) {
+                return;
+            }
+            *last = Some(now);
+        }
+        drop(tray);
+        let _ = self.remove_tray_by_id(TRAY_ID);
+        if let Err(error) = self.create_tray(presentation) {
+            eprintln!("Could not register the tray icon again: {error}");
         }
     }
 
@@ -1040,6 +1062,16 @@ pub fn generate_quota_icon(
     tauri::image::Image::new_owned(rgba, SIZE as u32, SIZE as u32)
 }
 
+/// A depleted track stays dark. Without a reading (startup, a failed read)
+/// the whole track is mid grey, so the icon does not vanish into a dark taskbar.
+fn inactive_track(percent: Option<f64>) -> [f64; 4] {
+    if percent.is_some() {
+        [48.0, 54.0, 68.0, 220.0]
+    } else {
+        [120.0, 128.0, 142.0, 255.0]
+    }
+}
+
 fn sample_pixel(
     x: f64,
     y: f64,
@@ -1077,9 +1109,9 @@ fn sample_pixel(
     // Base dark backing plate color: #1B1E26
     let mut color = [27.0, 30.0, 38.0, 255.0 * plate_alpha];
 
-    // Subtle plate rim
+    // Plate rim, light enough to outline the icon on a dark taskbar
     if r >= 14.2 && r <= 15.0 {
-        color = [50.0, 58.0, 72.0, 255.0 * plate_alpha];
+        color = [118.0, 128.0, 146.0, 255.0 * plate_alpha];
     }
 
     // Weekly-only promotes Weekly to the large primary track.
@@ -1094,7 +1126,7 @@ fn sample_pixel(
         let c = if is_active {
             get_color_for_percent(primary_pct)
         } else {
-            [48.0, 54.0, 68.0, 220.0] // Inactive / depleted track
+            inactive_track(primary_pct)
         };
         color = blend_over(color, c);
     }
@@ -1109,7 +1141,7 @@ fn sample_pixel(
         let c = if is_active {
             get_color_for_percent(week_pct)
         } else {
-            [48.0, 54.0, 68.0, 220.0] // Inactive / depleted track
+            inactive_track(week_pct)
         };
         color = blend_over(color, c);
     }
@@ -1197,7 +1229,7 @@ mod tests {
             let expected = if percent.is_some_and(|p| p > 0.0) {
                 get_color_for_percent(percent).map(|v| v as u8)
             } else {
-                blend_over([27.0, 30.0, 38.0, 255.0], [48.0, 54.0, 68.0, 220.0]).map(|v| v.round() as u8)
+                blend_over([27.0, 30.0, 38.0, 255.0], inactive_track(percent)).map(|v| v.round() as u8)
             };
             assert_eq!(outer, &expected);
         }

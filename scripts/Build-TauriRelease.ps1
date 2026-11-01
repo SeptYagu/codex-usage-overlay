@@ -11,7 +11,9 @@ $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $outputPath = [IO.Path]::GetFullPath($OutputDirectory)
 $config = Get-Content -LiteralPath (Join-Path $repositoryRoot 'src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json
 $version = $config.version
-if (($Tag -replace '^v', '' -replace '-.*$', '') -ne $version) { throw 'Tag and app versions must match.' }
+# latest.json carries the app version and the updater installs only a higher
+# one, so a preview tag must name the preview's own version.
+if ($Tag -cne "v$version") { throw 'Tag and app versions must match.' }
 
 $binary = Join-Path $repositoryRoot 'src-tauri\target\release\codex-usage-overlay.exe'
 $updaterHelper = Join-Path $repositoryRoot 'src-tauri\target\release\codex-usage-updater.exe'

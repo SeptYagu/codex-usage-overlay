@@ -402,7 +402,7 @@ describe('provider logo and live Claude reading', () => {
     const card = within(off.getByRole('group', { name: 'Claude Code connection' }));
     expect(card.getByText(/In the desktop app, turn on live reading/)).toBeTruthy();
     // The sign-in hint belongs to live reading only.
-    expect(card.queryByText(/No terminal login found/)).toBeNull();
+    expect(card.queryByText(/No usable terminal login/)).toBeNull();
     fireEvent.click(card.getByLabelText('Read limits live with your Claude login'));
     expect(off.onPatchSettings).toHaveBeenCalledWith({ claudeLivePolling: true });
     cleanup();
@@ -410,7 +410,7 @@ describe('provider logo and live Claude reading', () => {
     const on = await renderSettings({ provider: 'claude', claudeLivePolling: true });
     await act(async () => {});
     const liveCard = within(on.getByRole('group', { name: 'Claude Code connection' }));
-    expect(liveCard.getByRole('alert').textContent).toMatch(/No terminal login found.*\/login/);
+    expect(liveCard.getByRole('alert').textContent).toMatch(/No usable terminal login.*\/login/);
   });
 
   it('reports a refused live read with its HTTP status', async () => {
@@ -421,6 +421,6 @@ describe('provider logo and live Claude reading', () => {
     const { getByRole } = await renderSettings({ provider: 'claude', claudeLivePolling: true });
     await act(async () => {});
     expect(within(getByRole('group', { name: 'Claude Code connection' })).getByRole('alert').textContent)
-      .toBe('Live reading failed: HTTP 429.');
+      .toBe('Live reading failed: HTTP 429. The overlay keeps the last stored reading, if any.');
   });
 });

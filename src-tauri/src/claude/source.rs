@@ -27,6 +27,16 @@ pub fn read_usage(dir: &Path, now: i64) -> Result<ClaudeSample, ReadFailure> {
     Ok(sample(&snapshot, now))
 }
 
+/// The status text for a failed Claude read. `ReadFailure`'s own text names
+/// Codex stages such as executable discovery.
+pub fn describe(failure: &ReadFailure) -> String {
+    match failure.kind {
+        FailureKind::NotConnected => failure.to_string(),
+        FailureKind::Authentication => "需要登录 Claude Code / Claude Code login required".into(),
+        kind => format!("读取 Claude 用量失败 / Claude usage read failed ({kind:?}, HTTP {:?})", failure.http_status),
+    }
+}
+
 pub fn sample(snapshot: &shared::Snapshot, now: i64) -> ClaudeSample {
     let window = |window: Option<shared::WindowSnapshot>, minutes: u32| {
         window.map(|w| w.at(now)).map_or_else(QuotaSnapshot::default, |w| QuotaSnapshot {
@@ -63,6 +73,17 @@ mod tests {
         std::fs::write(dir.join(shared::SNAPSHOT_FILE), "[]").unwrap();
         assert_eq!(read_usage(&dir, 0).err().unwrap().kind, FailureKind::InvalidResponse);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failures_are_described_without_codex_stages() {
+        let login = describe(&ReadFailure::new(ReadStage::Discovery, FailureKind::Authentication));
+        assert!(login.contains("Claude Code login required"));
+        let mut limited = ReadFailure::new(ReadStage::Quota, FailureKind::Rpc);
+        limited.http_status = Some(429);
+        let limited = describe(&limited);
+        assert!(limited.contains("Claude usage read failed (Rpc, HTTP Some(429))"));
+        assert!(!login.contains("Codex") && !limited.contains("Codex"));
     }
 
     #[test]

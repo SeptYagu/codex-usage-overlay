@@ -28,7 +28,7 @@ Windows 桌面悬浮窗，显示 Codex 配额和 Credit 余额。通过本机 Co
 - 设置窗口采用双栏并排布局（960×620），支持自由调整大小与几何位置记忆。展开保护详情或缩小窗口时可滚动查看。
 - 可在设置页或托盘菜单开启“鼠标穿透”，使鼠标操作落到浮窗下方的窗口。穿透时可随时从托盘菜单关闭；系统托盘不可用时不会开启穿透。
 - 仅安装版提供开机自启设置。启动便携版或开发版不会修改安装版的自启注册表项。
-- 托盘菜单可切换语言、检查更新；发现新版本时，“检查更新”下方的状态行可点击安装，安装失败后可直接重试。设置中可关闭自动检查，或允许自动安装更新（默认关闭；开启后也会开启自动检查）：新版会在后台下载、验签，并在正常退出时安装，使用中不会因自动检查而突然关闭。安装版在下次打开时使用新版；便携版退出后由助手替换主程序。系统安装进度或提权提示仍可能出现。更新已就绪时，也可从托盘状态行立即安装。开启“更新时包含预览版”后也会收到预览版（默认关闭）。
+- 托盘菜单可切换语言、检查更新；发现新版本时，“检查更新”下方的状态行可点击安装，安装失败后可直接重试。设置中可关闭自动检查，或允许自动安装更新（默认关闭；开启后也会开启自动检查）：新版会在后台下载、验签，并在正常退出时安装，使用中不会因自动检查而突然关闭。安装版在下次打开时使用新版；便携版退出后由助手替换主程序。系统安装进度或提权提示仍可能出现。更新已就绪时，也可从托盘状态行立即安装。开启“更新时包含预览版”后也会收到预览版（默认关闭）。预览版带有编号（`1.5.0-preview.1` < `1.5.0-preview.2` < `1.5.0`），因此每个预览版都能更新到下一个预览版或正式版。
 - Codex 可执行文件遵循原有的自定义路径/PATH/CLI/Store 查找顺序。文件移动或消失后，后续轮询可重新查找。自定义位置可通过 `CODEX_CLI_PATH` 指定。
 
 设置、展开位置、贴边状态和用量状态保存在 `%LOCALAPPDATA%\CodexUsageOverlay\` 下的 `settings.json`、`window-position.json`、`dock-state.json` 和 `usage-status.json` 中。自定义音效文件保留在你选择的位置。
@@ -43,7 +43,7 @@ Windows 桌面悬浮窗，显示 Codex 配额和 Credit 余额。通过本机 Co
 
 - 点击“连接 Claude Code”。浮窗会将附带的 `claude-usage-bridge.exe` 注册为 Claude Code 的状态栏命令，并在 `~/.claude/settings.json`（遵循 `CLAUDE_CONFIG_DIR`）中添加 `UserPromptSubmit` 和 `PreToolUse` 两个钩子。原文件会备份一次为 `settings.json.codex-overlay.bak`。原有状态栏通过助手继续显示；“断开连接”会恢复它，并只移除浮窗添加的条目。钩子改动对新的 Claude Code 会话生效。
 - 默认情况下，额度来自 Claude Code 传给状态栏的 `rate_limits` 数据，需要 Claude Code 2.1.80 或更高版本，并使用 Pro 或 Max 套餐登录；API Key 会话不提供该数据。此模式下浮窗不读取 Claude 凭据，也不发起网络请求。额度只在使用**终端 `claude` CLI** 时更新：桌面版和 IDE 扩展不会运行状态栏。
-- “使用 Claude 登录实时读取额度”（默认关闭）适用于桌面版。浮窗最多每分钟请求一次 Claude Code `/usage` 背后的用量接口，使用终端 CLI 保存在 `~/.claude/.credentials.json` 中的登录信息。令牌每次请求时读取，不会保存、记录、续期或发送到其他地方。该接口未公开，可能变化。桌面版的登录不会共享，因此请先用 `claude` → `/login` 登录一次；使用 CLI 也会续期已过期的登录。实时读取的结果会写入同一本地文件，额度保护钩子也会使用。重置时间已过的窗口显示为已重置；重置通知在收到新周期的第一份样本时发出。
+- “使用 Claude 登录实时读取额度”（默认关闭）适用于桌面版。浮窗最多每分钟请求一次 Claude Code `/usage` 背后的用量接口，使用终端 CLI 保存在 `~/.claude/.credentials.json` 中的登录信息。令牌每次请求时读取，不会保存、记录或发送到其他地方。该接口未公开，可能变化。桌面版的登录不会共享，因此请先用 `claude` → `/login` 登录一次。CLI 登录几小时后会过期；此时浮窗会运行 `claude auth status`（最多每十分钟一次），由 Claude Code 自行续期，不消耗额度。浮窗从不写入登录凭据。实时读取的结果会写入同一本地文件，额度保护钩子也会使用。实时读取失败或接口要求稍后再试时，浮窗继续显示该文件中的上次读数及其时间，设置中显示失败原因。重置时间已过的窗口显示为已重置；重置通知在收到新周期的第一份样本时发出。
 - 开启保护开关后，5 小时或每周剩余额度达到或低于阈值时，钩子会拒绝新的提问和工具调用，Claude Code 会显示原因。Claude 不使用 Codex 智能暂停。旧样本在其重置时间之前仍然有效，因为窗口内已用额度只增不减。缺少或无法读取样本、重置时间已过或开关关闭时，请求一律放行。
 - 浮窗开头显示当前来源的图标（Codex 为 OpenAI，Claude 为 Claude），可用“显示来源图标”隐藏。图标取自 Simple Icons（Claude，CC0）和 LobeHub Icons（OpenAI，MIT），商标归各自所有者。Claude 不显示 Credit 余额。消耗速率与重置状态保存在以 `claude-` 开头的独立文件中，Claude 样本不会混入 Codex 历史。
 - 助手写入 `claude-rate-limits.json` 和 `claude-guard-state.json`，浮窗写入 `claude-guard.json` 和 `claude-bridge.json`，均位于上述运行目录。卸载前请先断开连接，否则 Claude Code 会继续调用已删除的助手。
@@ -66,7 +66,7 @@ npm run tauri dev
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin claude-usage-bridge
 npm run tauri -- build --ci --bundles nsis,msi
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin codex-usage-updater
-.\scripts\Build-TauriRelease.ps1 -Tag v1.1.0-preview
+.\scripts\Build-TauriRelease.ps1 -Tag v1.5.0
 ```
 
 发布前需设置 Tauri 更新签名私钥环境变量。标签发布流程会生成 NSIS、MSI、便携 ZIP、签名和 `latest.json`；便携版更新助手也会一并打包。安装包会包含打包时已存在的所有 Cargo 可执行文件，因此需在 `tauri build` 之前构建 Claude 助手。

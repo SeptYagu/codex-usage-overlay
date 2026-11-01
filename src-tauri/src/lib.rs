@@ -47,7 +47,7 @@ pub fn run() {
         config_manager: config_manager.clone(),
         dock: dock::DockManager::new(config_manager.clone()),
         last_usage: Mutex::new(None),
-        claude_live: std::sync::Mutex::new(None),
+        claude_live: std::sync::Mutex::new(Default::default()),
         tray_read_status: Mutex::new(tray::TrayReadStatus::Pending),
         settings: Mutex::new(initial_settings.clone()),
         settings_revision: AtomicU64::new(0),

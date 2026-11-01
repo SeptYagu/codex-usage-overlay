@@ -73,6 +73,13 @@ exit 0
         }
         Write-Output "PASS: packaging $mode"
     }
+    # A preview's manifest must carry the preview's own version.
+    $env:CODEX_PACKAGING_TEST_MODE = 'valid'
+    $failure = $null
+    try { & $buildScript -Tag v1.2.1-preview.1 -OutputDirectory (Join-Path $fixtureRoot 'output-tag') | Out-Null }
+    catch { $failure = $_.Exception.Message }
+    if (-not $failure -or -not $failure.Contains('Tag and app versions must match')) { throw 'Packaging accepted a preview tag for a stable version' }
+    Write-Output 'PASS: packaging tag mismatch'
 } finally {
     $env:CODEX_PACKAGING_TEST_MODE = $originalMode
     # Delete only this newly-created fixture under the system temp root.

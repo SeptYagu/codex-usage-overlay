@@ -56,7 +56,24 @@ describe('the app version', () => {
     }
   });
 
-  it('uses a semantic version without a pre-release suffix', () => {
-    expect(APP_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  // The updater installs only a higher version, so each preview carries its
+  // number: 1.5.0-preview.1 < 1.5.0-preview.2 < 1.5.0.
+  it('is a stable version or a numbered preview', () => {
+    expect(APP_VERSION).toMatch(/^\d+\.\d+\.\d+(?:-preview\.[1-9]\d*)?$/);
+  });
+
+  // Windows Installer versions are numeric, so a preview's MSI carries its
+  // number as the fourth field. A stable release derives it from the version.
+  it('gives the MSI a matching numeric version', () => {
+    const config = readJson('src-tauri/tauri.conf.json') as {
+      bundle?: { windows?: { wix?: { version?: string } } };
+    };
+    const [, core, preview] = APP_VERSION.match(/^(\d+\.\d+\.\d+)(?:-preview\.(\d+))?$/) ?? [];
+    const msiVersion = config.bundle?.windows?.wix?.version;
+    if (preview) {
+      expect(msiVersion).toBe(`${core}.${preview}`);
+    } else {
+      expect(msiVersion === undefined || msiVersion === core).toBe(true);
+    }
   });
 });

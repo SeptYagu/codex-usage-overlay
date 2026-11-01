@@ -32,7 +32,7 @@ pub struct AppState {
     pub last_usage: Mutex<Option<CodexUsage>>,
     /// The last live Claude reading and when it was fetched, which throttles
     /// the usage endpoint to one request per `claude::live::MIN_INTERVAL`.
-    pub claude_live: StdMutex<Option<(std::time::Instant, crate::claude::shared::Snapshot)>>,
+    pub claude_live: StdMutex<crate::claude::live::LiveState>,
     pub tray_read_status: Mutex<TrayReadStatus>,
     pub settings: Mutex<OverlaySettings>,
     pub settings_revision: AtomicU64,
@@ -90,7 +90,7 @@ impl AppState {
             config_manager: config_manager.clone(),
             dock: crate::dock::DockManager::new(config_manager.clone()),
             last_usage: Mutex::new(None),
-            claude_live: StdMutex::new(None),
+            claude_live: StdMutex::new(Default::default()),
             tray_read_status: Mutex::new(TrayReadStatus::Pending),
             settings: Mutex::new(settings),
             settings_revision: AtomicU64::new(0),
@@ -224,12 +224,17 @@ impl UsageSource for AppHandle {
 /// The Claude read has no attempts, retries or process diagnostics; the Codex
 /// read history stays Codex-only. Without live reading it is the local file
 /// the statusline bridge writes. With live reading the endpoint answers, and
-/// the answer is also stored in that file so the guard hooks see it.
+/// the answer is also stored in that file so the guard hooks see it. While the
+/// endpoint fails or asks to wait, that file still holds the last reading; it
+/// is shown with its age and Settings reports the live failure.
 async fn read_claude_usage(state: &AppState) -> Result<RawCodexUsage, String> {
     let now = reader::unix_now();
     let dir = state.config_manager.runtime_dir();
     let result = if state.settings.lock().await.claude_live_polling {
-        read_claude_live(state, now).await.map(|snapshot| crate::claude::source::sample(&snapshot, now))
+        match read_claude_live(state, now).await {
+            Ok(snapshot) => Ok(crate::claude::source::sample(&snapshot, now)),
+            Err(failure) => crate::claude::source::read_usage(dir, now).map_err(|_| failure),
+        }
     } else {
         crate::claude::source::read_usage(dir, now)
     };
@@ -244,20 +249,30 @@ async fn read_claude_usage(state: &AppState) -> Result<RawCodexUsage, String> {
         Err(error) => {
             status.phase = "error";
             status.failure = Some(error.clone());
-            Err(error.to_string())
+            Err(crate::claude::source::describe(&error))
         }
     }
 }
 
 async fn read_claude_live(state: &AppState, now: i64) -> Result<crate::claude::shared::Snapshot, ReadFailure> {
-    use crate::claude::{live, shared};
-    let cached = state.claude_live.lock().unwrap_or_else(|p| p.into_inner()).clone()
-        .filter(|(at, _)| at.elapsed() < live::MIN_INTERVAL);
-    if let Some((_, snapshot)) = cached {
-        return Ok(snapshot);
+    use crate::claude::live::{self, LiveStep};
+    use crate::claude::shared;
+    let step = state.claude_live.lock().unwrap_or_else(|p| p.into_inner()).step(std::time::Instant::now());
+    match step {
+        LiveStep::Answer(snapshot) => return Ok(snapshot),
+        LiveStep::Failure(failure) => return Err(failure),
+        LiveStep::Request => {}
     }
-    let snapshot = live::fetch(now).await?;
-    *state.claude_live.lock().unwrap_or_else(|p| p.into_inner()) = Some((std::time::Instant::now(), snapshot.clone()));
+    let mut result = live::fetch(now).await;
+    if let Err(failure) = &result {
+        let renew = state.claude_live.lock().unwrap_or_else(|p| p.into_inner())
+            .take_renewal(std::time::Instant::now(), failure);
+        if renew && live::renew_login().await {
+            result = live::fetch(reader::unix_now()).await;
+        }
+    }
+    state.claude_live.lock().unwrap_or_else(|p| p.into_inner()).record(std::time::Instant::now(), &result);
+    let snapshot = result?;
     let dir = state.config_manager.runtime_dir();
     let mut stored = snapshot.clone();
     // The bridge's capture keeps its Claude Code version.
@@ -874,7 +889,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         let mut polling = state.polling.lock().unwrap_or_else(|p| p.into_inner());
         polling.recalculate(&envelope.settings, std::time::Instant::now());
         if changes.contains_key("claudeLivePolling") {
-            *state.claude_live.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            *state.claude_live.lock().unwrap_or_else(|p| p.into_inner()) = Default::default();
         }
         if provider_changed || changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota" | "claudeLivePolling"
             | "autoPauseFiveHourThresholdPercent" | "autoPauseWeeklyThresholdPercent")) {
@@ -1002,8 +1017,14 @@ pub async fn claude_connection_status(state: State<'_, Arc<AppState>>) -> Result
     let settings_path = crate::claude::install::claude_settings_path();
     let bridge = crate::claude::install::bridge_path();
     let mut status = crate::claude::install::status(settings_path.as_deref(), state.config_manager.runtime_dir(), bridge.as_deref());
-    if state.settings.lock().await.provider == Provider::Claude {
-        let failure = state.reader.lock().unwrap_or_else(|p| p.into_inner()).failure.clone();
+    let settings = state.settings.lock().await.clone();
+    if settings.provider == Provider::Claude {
+        // A failed live read falls back to the stored reading, which clears
+        // the read failure; the live failure is what needs attention then.
+        let live_failure = settings.claude_live_polling
+            .then(|| state.claude_live.lock().unwrap_or_else(|p| p.into_inner()).failure.clone())
+            .flatten();
+        let failure = live_failure.or_else(|| state.reader.lock().unwrap_or_else(|p| p.into_inner()).failure.clone());
         status.read_failure = failure.as_ref().map(|f| f.kind);
         status.read_http_status = failure.and_then(|f| f.http_status);
     }

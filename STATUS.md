@@ -1,5 +1,12 @@
 # Status
 
+## v1.5.0 release preparation — 2026-11-01
+
+- Live Claude reading stopped when the terminal CLI's login expired (about eight hours after sign-in). `claude auth status` renews it without a session; the overlay now runs it at most every ten minutes on an authentication failure (`src-tauri/src/claude/live.rs`). Failed or rate-limited live reads keep the stored reading and honor `Retry-After`.
+- The tray icon without a reading was a near-black disc, close to invisible on a dark taskbar; the rim and unread rings are now lighter. A failed icon update re-registers the tray icon (throttled to every 30 seconds). Neither was observed on the taskbar: the screen was locked during the investigation.
+- Previews now carry numbered versions (`X.Y.Z-preview.N`) so the updater can order them; the MSI takes `X.Y.Z.N` through `bundle.windows.wix.version`. Packaging requires the tag to equal `v` + app version.
+- Target tag: `v1.5.0` (stable), with [release notes](docs/releases/v1.5.0.md).
+
 ## v1.5.0-preview.2 — 2026-10-31
 
 - `v1.5.0-preview` received no Claude limits on a desktop-app-only machine: the desktop app never runs a statusline. Added opt-in live reading (`src-tauri/src/claude/live.rs`). It uses the terminal CLI's `.credentials.json` login, throttled to one request a minute, and writes readings to the snapshot the guard hooks read.
