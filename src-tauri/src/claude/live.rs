@@ -5,8 +5,8 @@
 //! asks the usage endpoint behind Claude Code's `/usage` command with the
 //! OAuth token Claude Code stores in `.credentials.json`. The token is read
 //! for each request and never stored, logged or sent anywhere but that
-//! endpoint. CLI logins expire after a few hours; the overlay then asks
-//! Claude Code to renew its own login and never writes the credentials.
+//! endpoint. CLI logins expire after a few hours; the overlay then runs a
+//! Claude Code command that renews the login and never writes the credentials.
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -99,20 +99,51 @@ fn claude_cli() -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// Claude Code renews an expired login whenever it starts; `claude auth
-/// status` does so without a session and without using any quota. Returns
-/// whether the command ran to completion.
+/// Claude Code renews an expired login when a command needs the account, not
+/// on every start: `claude auth status` only reports the stored login. Listing
+/// plugins syncs the claude.ai marketplaces and the doctor checks the account;
+/// neither starts a session or uses quota. They are tried in turn until the
+/// stored login is valid again, so one CLI change does not stop renewal.
+const RENEW_COMMANDS: [&[&str]; 2] = [&["plugin", "list"], &["doctor"]];
+
+/// Asks Claude Code to renew its login. Returns whether the stored login is
+/// valid afterwards.
 pub async fn renew_login() -> bool {
     let Some(cli) = claude_cli() else { return false };
-    let mut command = tokio::process::Command::new(cli);
-    command
-        .args(["auth", "status"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .kill_on_drop(true)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    matches!(tokio::time::timeout(RENEW_TIMEOUT, command.status()).await, Ok(Ok(_)))
+    let Some(credentials) = credentials_path() else { return false };
+    let home = dirs::home_dir();
+    renew_with(&credentials, |args| {
+        let mut command = tokio::process::Command::new(&cli);
+        command
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .kill_on_drop(true)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // The doctor reads project settings in its working directory.
+        if let Some(home) = &home {
+            command.current_dir(home);
+        }
+        async move {
+            let _ = tokio::time::timeout(RENEW_TIMEOUT, command.status()).await;
+        }
+    })
+    .await
+}
+
+async fn renew_with<F, Fut>(credentials: &Path, mut run: F) -> bool
+where
+    F: FnMut(&'static [&'static str]) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    for args in RENEW_COMMANDS {
+        run(args).await;
+        if access_token(credentials, crate::codex::reader::unix_now()).is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Claude Code's credentials file, honoring `CLAUDE_CONFIG_DIR`.
@@ -317,6 +348,43 @@ mod tests {
         assert!(state.take_renewal(start, &expired));
         assert!(!state.take_renewal(start + Duration::from_secs(599), &expired));
         assert!(state.take_renewal(start + RENEW_INTERVAL, &expired));
+    }
+
+    #[tokio::test]
+    async fn renewal_tries_each_command_until_the_login_is_valid() {
+        let now = crate::codex::reader::unix_now();
+        let expired = format!(r#"{{"claudeAiOauth":{{"accessToken":"old","expiresAt":{}}}}}"#, (now - 60) * 1000);
+        let renewed = format!(r#"{{"claudeAiOauth":{{"accessToken":"new","expiresAt":{}}}}}"#, (now + 3600) * 1000);
+
+        // The first command leaves the login expired; the doctor renews it.
+        let path = credentials("renew", &expired);
+        let mut ran = Vec::new();
+        let valid = renew_with(&path, |args| {
+            ran.push(args.join(" "));
+            if args == ["doctor"] {
+                std::fs::write(&path, &renewed).unwrap();
+            }
+            async {}
+        })
+        .await;
+        assert!(valid);
+        assert_eq!(ran, ["plugin list", "doctor"]);
+
+        // A login renewed by the first command needs no second one.
+        std::fs::write(&path, &expired).unwrap();
+        ran.clear();
+        assert!(renew_with(&path, |args| {
+            ran.push(args.join(" "));
+            std::fs::write(&path, &renewed).unwrap();
+            async {}
+        })
+        .await);
+        assert_eq!(ran, ["plugin list"]);
+
+        // A login nothing renews is reported as still expired.
+        std::fs::write(&path, &expired).unwrap();
+        assert!(!renew_with(&path, |_| async {}).await);
+        let _ = std::fs::remove_file(path);
     }
 
     /// Reads the real endpoint with this machine's Claude Code login. Prints

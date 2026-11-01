@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-11-01
+
+### Fixed
+- Expired Claude CLI logins are renewed again. `claude auth status`, which 1.5.0 ran for this, only reports the stored login and does not renew it, so live reading stopped about eight hours after sign-in. The overlay now runs `claude plugin list`, then `claude doctor` if the login is still expired, at most every ten minutes. Both make Claude Code renew its own login without starting a session or using quota; the overlay still never writes the credentials.
+
 ## [1.5.0] - 2026-11-01
 
 First stable release with Claude usage limits, live Claude reading, provider logos and the preview update channel from the 1.5.0 previews.

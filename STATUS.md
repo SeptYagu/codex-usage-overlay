@@ -1,5 +1,11 @@
 # Status
 
+## v1.5.1 release — 2026-11-01
+
+- v1.5.0's renewal did not work: live Claude reading stopped when the CLI login expired at 06:56 and stayed on that reading for six hours. `claude auth status` renews an expired login only when `CLAUDE_CODE_ENTRYPOINT` is set (as inside a Claude Code session, where the 1.5.0 check was made); started by the overlay it just reports the stored login.
+- Checked with a throwaway `CLAUDE_CONFIG_DIR` holding an expired fake login and a copy of `~/.claude.json`, without the session's variables: `auth status` and `auth status --text` leave it alone; `plugin list`, `plugin marketplace list` and `doctor` attempt the refresh and write no other files. `renew_login` now runs `plugin list`, then `doctor`, and stops once `.credentials.json` holds a valid login (`src-tauri/src/claude/live.rs`).
+- Not yet observed end to end with the real login: the current one expires at 20:58.
+
 ## v1.5.0 release preparation — 2026-11-01
 
 - Live Claude reading stopped when the terminal CLI's login expired (about eight hours after sign-in). `claude auth status` renews it without a session; the overlay now runs it at most every ten minutes on an authentication failure (`src-tauri/src/claude/live.rs`). Failed or rate-limited live reads keep the stored reading and honor `Retry-After`.
