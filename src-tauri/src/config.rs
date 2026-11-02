@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,9 +26,39 @@ pub enum SoundMode {
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Claude,
+    Dsh,
     #[default]
-    #[serde(other)]
     Codex,
+}
+
+/// A non-secret identity used by persistence and UI delivery. Never include a
+/// launch URL/cookie in this key. The explicit provider prevents a DSH account
+/// from aliasing a local Codex account with the same display name or id.
+pub fn source_key(settings: &OverlaySettings) -> String {
+    match settings.provider {
+        Provider::Codex => "codex".into(),
+        Provider::Claude => "claude".into(),
+        Provider::Dsh => {
+            let identity = serde_json::to_string(&(
+                settings.dsh_base_url.trim().trim_end_matches('/'),
+                settings.dsh_instance_id.as_str(),
+                settings.dsh_account_id.as_str(),
+            )).unwrap_or_default();
+            // Stable FNV-1a, for namespace separation only, not authentication.
+            let hash = identity.bytes().fold(0xcbf29ce484222325u64,
+                |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3));
+            format!("dsh-{hash:016x}")
+        }
+    }
+}
+
+pub fn same_source(left: &OverlaySettings, right: &OverlaySettings) -> bool {
+    left.provider == right.provider && (left.provider != Provider::Dsh || (
+        left.dsh_base_url == right.dsh_base_url
+            && left.dsh_instance_id == right.dsh_instance_id
+            && left.dsh_account_id == right.dsh_account_id
+            && left.dsh_session_ids == right.dsh_session_ids
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +67,21 @@ pub struct OverlaySettings {
     /// Codex by default, so an upgraded profile keeps reading Codex.
     #[serde(default)]
     pub provider: Provider,
+    /// Public origin only. Launch tokens and API cookies are memory-only in the
+    /// DSH manager, and never travel in settings or usage events.
+    #[serde(default)]
+    pub dsh_base_url: String,
+    #[serde(default)]
+    pub dsh_instance_id: String,
+    #[serde(default)]
+    pub dsh_account_id: String,
+    #[serde(default)]
+    pub dsh_session_ids: Vec<String>,
+    /// DSH protection defaults to exhausted (0%), independently of local Codex.
+    #[serde(default)]
+    pub dsh_five_hour_threshold_percent: u32,
+    #[serde(default)]
+    pub dsh_weekly_threshold_percent: u32,
     /// Whether the Claude provider reads limits from the usage endpoint with
     /// Claude Code's login token, instead of only from the statusline bridge.
     /// Off by default: it reads a credential, so it is never armed silently.
@@ -121,6 +165,12 @@ impl Default for OverlaySettings {
     fn default() -> Self {
         Self {
             provider: Provider::default(),
+            dsh_base_url: String::new(),
+            dsh_instance_id: String::new(),
+            dsh_account_id: String::new(),
+            dsh_session_ids: Vec::new(),
+            dsh_five_hour_threshold_percent: 0,
+            dsh_weekly_threshold_percent: 0,
             claude_live_polling: false,
             show_provider_logo: default_true(),
             overlay_layout: OverlayLayout::default(),
@@ -181,9 +231,9 @@ pub struct DockPersistence {
 #[derive(Clone)]
 pub struct ConfigManager {
     runtime_dir: PathBuf,
-    /// Shared by every clone: the learner and reset-cycle files follow the
-    /// active provider, so Claude samples never train the Codex state.
-    claude: Arc<AtomicBool>,
+    /// Shared by every clone. DSH uses a source/connection/account namespace,
+    /// never the original Codex files, even before it has been configured.
+    namespace: Arc<Mutex<String>>,
 }
 
 impl ConfigManager {
@@ -192,13 +242,13 @@ impl ConfigManager {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("CodexUsageOverlay");
         let _ = fs::create_dir_all(&runtime_dir);
-        Self { runtime_dir, claude: Arc::default() }
+        Self { runtime_dir, namespace: Arc::default() }
     }
 
     #[cfg(test)]
     pub fn with_runtime_dir(runtime_dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(&runtime_dir);
-        Self { runtime_dir, claude: Arc::default() }
+        Self { runtime_dir, namespace: Arc::default() }
     }
 
     pub fn runtime_dir(&self) -> &Path {
@@ -206,16 +256,20 @@ impl ConfigManager {
     }
 
     pub fn set_provider(&self, provider: Provider) {
-        self.claude.store(provider == Provider::Claude, Ordering::SeqCst);
+        self.set_source(&OverlaySettings { provider, ..Default::default() });
     }
 
-    /// Codex keeps the original file names; Claude uses `claude-` prefixed ones.
+    pub fn set_source(&self, settings: &OverlaySettings) {
+        let key = source_key(settings);
+        *self.namespace.lock().unwrap_or_else(|p| p.into_inner()) =
+            if settings.provider == Provider::Codex { String::new() } else { key };
+    }
+
+    /// Local Codex retains its original names for backwards compatibility.
     fn provider_path(&self, name: &str) -> PathBuf {
-        if self.claude.load(Ordering::SeqCst) {
-            self.runtime_dir.join(format!("claude-{name}"))
-        } else {
-            self.runtime_dir.join(name)
-        }
+        let namespace = self.namespace.lock().unwrap_or_else(|p| p.into_inner());
+        if namespace.is_empty() { self.runtime_dir.join(name) }
+        else { self.runtime_dir.join(format!("{namespace}-{name}")) }
     }
 
     pub fn settings_path(&self) -> PathBuf {
@@ -235,11 +289,11 @@ impl ConfigManager {
     }
 
     pub fn status_path(&self) -> PathBuf {
-        self.runtime_dir.join("usage-status.json")
+        self.provider_path("usage-status.json")
     }
 
     pub fn quota_history_path(&self) -> PathBuf {
-        self.runtime_dir.join("quota-read-history.json")
+        self.provider_path("quota-read-history.json")
     }
 
     pub fn reset_state_path(&self) -> PathBuf {
@@ -247,7 +301,7 @@ impl ConfigManager {
     }
 
     pub fn resume_state_path(&self) -> PathBuf {
-        self.runtime_dir.join("pause-resume-state.json")
+        self.provider_path("pause-resume-state.json")
     }
 
     pub fn burn_rate_state_path(&self) -> PathBuf {

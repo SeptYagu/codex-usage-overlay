@@ -10,7 +10,10 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
   onPatchSettings?: (patch: Partial<OverlaySettings>) => void;
 }) {
   const { t } = useTranslation();
-  const { status, unavailable } = useProtectionStatus();
+  const { status: observedStatus, unavailable } = useProtectionStatus();
+  // Never render a previous provider's local resume actions after switching.
+  const status = observedStatus?.provider === settings.provider ? observedStatus : null;
+  const dsh = settings.provider === 'dsh';
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   const [actionError, setActionError] = useState(false);
   const [resumingThreadId, setResumingThreadId] = useState<string | null>(null);
@@ -24,7 +27,7 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
   if (compact) {
     return <div role="status" aria-label={t('protectionStatus')} className="tray-menu-item text-xs opacity-80">{label}</div>;
   }
-  const capable = !!status?.capabilities.directInterrupt && status.capabilities.completionObservation
+  const capable = !dsh && !!status?.capabilities.directInterrupt && status.capabilities.completionObservation
     && status.capabilities.userActivityObservation && status.capabilities.continuationControl;
   const reason = unavailable ? 'statusUnavailable' : status?.reason;
   const reader = status?.reader;
@@ -72,12 +75,12 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
         })}</p>}
         {reader?.lastSuccess && <p>{t('quotaReadTiming', { milliseconds: reader.lastSuccess.elapsedMs, attempt: reader.lastSuccess.attempt })}</p>}
         <p>{t('protectionCooperative')}</p>
-        {!capable && <p>{t('protectionResumeUnavailable')}</p>}
+        {!capable && <p>{t(dsh ? 'dshResumeUnavailable' : 'protectionResumeUnavailable')}</p>}
         {onPatchSettings && <label className="flex items-center justify-between gap-3 py-1">
           <span>{t('autoResumeAfterQuotaReset')}</span>
           <input type="checkbox" aria-label={t('autoResumeAfterQuotaReset')}
-            checked={settings.autoResumeAfterQuotaReset}
-            disabled={!settings.autoResumeAfterQuotaReset && (!capable || !settings.autoPauseOnLowQuota)}
+            checked={!dsh && settings.autoResumeAfterQuotaReset}
+            disabled={dsh || (!settings.autoResumeAfterQuotaReset && (!capable || !settings.autoPauseOnLowQuota))}
             onChange={event => {
               if (!event.target.checked || (capable && settings.autoPauseOnLowQuota)) {
                 onPatchSettings({ autoResumeAfterQuotaReset: event.target.checked });
@@ -85,12 +88,12 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
             }}
             className="w-4 h-4 accent-cyan-500 disabled:cursor-not-allowed" />
         </label>}
-        {status && <p>{t('protectionCounts', { accepted: status.acceptedRequestCount, stopped: status.confirmedInterruptionCount })}</p>}
+        {status && <p>{t('protectionCounts', { accepted: status.acceptedRequestCount, stopped: dsh ? 0 : status.confirmedInterruptionCount })}</p>}
         {status?.targets.map(target => <p key={target.periodId} title={target.threadId}>
-          {t('protectionChat', { id: target.threadId.slice(0, 12) })}: {t(`protectionPhases.${target.phase}`, { defaultValue: target.phase })}
+          {t('protectionChat', { id: target.threadId.slice(0, 12) })}: {t(`protectionPhases.${dsh && target.phase === 'interrupted' ? 'accepted' : target.phase}`, { defaultValue: target.phase })}
           {!target.active && <> · {t('protectionHistorical')}</>}
         </p>)}
-        {status?.resumePlans.map(plan => <div key={plan.id} className="flex items-center justify-between gap-2 py-0.5">
+        {!dsh && status?.resumePlans.map(plan => <div key={plan.id} className="flex items-center justify-between gap-2 py-0.5">
           <span>{t('protectionChat', { id: plan.threadId })}: {t(`resumePhases.${plan.phase}`, { defaultValue: plan.phase })}</span>
           {['ready', 'waitingForQuota', 'needsReview'].includes(plan.phase) && (
             <button
@@ -103,10 +106,10 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
             </button>
           )}
         </div>)}
-        {status?.resumePlans.some(plan => ['needsReview', 'submissionUnknown'].includes(plan.phase))
+        {!dsh && status?.resumePlans.some(plan => ['needsReview', 'submissionUnknown'].includes(plan.phase))
           && <p>{t('protectionManualReview')}</p>}
         {status?.resumeStateError && <p role="alert">{t(`protectionReasons.${status.resumeStateError}`)}</p>}
-        {status?.resumePlans.some(plan => ['waitingForQuota', 'ready', 'needsReview'].includes(plan.phase))
+        {!dsh && status?.resumePlans.some(plan => ['waitingForQuota', 'ready', 'needsReview'].includes(plan.phase))
           && <button type="button" onClick={cancel} className="underline">{t('cancelResumePlans')}</button>}
         {resumeError && <p role="alert" className="text-amber-700 dark:text-amber-300">
           {resumeError === 'quotaStillLow' ? t('quotaStillLow') : resumeError === 'quotaStale' ? t('protectionReasons.quotaStale') : t('resumeFailed')}

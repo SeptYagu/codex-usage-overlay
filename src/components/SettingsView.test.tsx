@@ -332,6 +332,30 @@ describe('usage provider', () => {
     expect(onPatchSettings).toHaveBeenCalledWith({ provider: 'claude' }, false);
   });
 
+  it('switches to DSH without auto-resume and exposes all three independent source labels', async () => {
+    const { onPatchSettings, getByLabelText, getByRole } = await renderSettings();
+    for (const name of ['Local Codex', 'DSH Codex subscription', 'Claude']) expect(getByRole('option', { name })).toBeTruthy();
+    fireEvent.change(getByLabelText('Usage source'), { target: { value: 'dsh' } });
+    expect(onPatchSettings).toHaveBeenCalledWith({ provider: 'dsh', autoResumeAfterQuotaReset: false }, false);
+  });
+
+  it('uses independent zero-capable DSH thresholds and preserves local threshold ranges and values', async () => {
+    const { right, onPatchSettings, rerender } = await renderSettings({ provider: 'dsh', autoPauseOnLowQuota: true });
+    const five = within(right).getByRole('slider', { name: '5-hour quota threshold' }) as HTMLInputElement;
+    const weekly = within(right).getByRole('slider', { name: 'Weekly quota threshold' }) as HTMLInputElement;
+    expect([five.value, five.min, five.max]).toEqual(['0', '0', '15']);
+    expect([weekly.value, weekly.min, weekly.max]).toEqual(['0', '0', '10']);
+    expect(within(right).getByText(i18n.t('quotaThresholdZeroHint'))).toBeTruthy();
+    fireEvent.change(five, { target: { value: '3' } });
+    expect(onPatchSettings).toHaveBeenLastCalledWith({ dshFiveHourThresholdPercent: 3 }, true);
+    fireEvent.change(weekly, { target: { value: '4' } });
+    expect(onPatchSettings).toHaveBeenLastCalledWith({ dshWeeklyThresholdPercent: 4 }, true);
+    rerender(<SettingsView settings={{ ...DEFAULT_SETTINGS, autoPauseOnLowQuota: true }} onPatchSettings={onPatchSettings} />);
+    expect([five.value, five.min, five.max]).toEqual(['5', '1', '15']);
+    expect([weekly.value, weekly.min, weekly.max]).toEqual(['2', '1', '10']);
+    expect(within(right).queryByText(i18n.t('quotaThresholdZeroHint'))).toBeNull();
+  });
+
   it('shows the Claude connection card and the hook-based guard for Claude', async () => {
     tauri.invoke.mockImplementation(async (command: string) => {
       if (command === 'is_installed_version') return true;

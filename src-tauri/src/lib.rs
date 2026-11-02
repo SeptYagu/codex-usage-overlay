@@ -3,6 +3,8 @@ mod codex;
 mod commands;
 mod config;
 mod dock;
+mod dsh;
+mod dsh_control;
 mod notify;
 mod pause_control;
 mod polling;
@@ -27,7 +29,7 @@ pub fn run() {
     let config_manager = ConfigManager::new();
     let initial_settings = config_manager.load_settings();
     // Before any provider-specific state is loaded below.
-    config_manager.set_provider(initial_settings.provider);
+    config_manager.set_source(&initial_settings);
     if let Err(error) = claude::install::write_guard_config(config_manager.runtime_dir(), &initial_settings) {
         eprintln!("Could not write the Claude guard preferences: {error}");
     }
@@ -35,6 +37,9 @@ pub fn run() {
     let app_state = Arc::new(AppState {
         client: Mutex::new(CodexClient::new()),
         refresh_guard: Mutex::new(()),
+        source_generation: AtomicU64::new(0),
+        dsh: Default::default(),
+        dsh_control: std::sync::Mutex::new(Default::default()),
         last_refresh_result: std::sync::Mutex::new(None),
         reader: std::sync::Mutex::new(codex::reader::ReaderState::load(&config_manager)),
         polling: std::sync::Mutex::new(polling::PollState::default()),
@@ -152,6 +157,10 @@ pub fn run() {
             commands::fetch_usage,
             commands::get_last_usage,
             commands::get_settings,
+            commands::dsh_discover,
+            commands::dsh_connection_status,
+            commands::dsh_connect,
+            commands::dsh_disconnect,
             commands::get_auto_pause_status,
             commands::cancel_resume_plans,
             commands::resume_chat,

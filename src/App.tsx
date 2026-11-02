@@ -9,6 +9,7 @@ import { CodexUsage, DockStateInfo, OverlaySettings, SettingsEnvelope, DEFAULT_S
 import { OverlayView } from './components/OverlayView';
 import { SettingsView } from './components/SettingsView';
 import { TrayMenuView } from './components/TrayMenuView';
+import { sourceBinding, UsageSourceScope, usageMatchesSource, usageSourceScope } from './usageSource';
 
 export const App: React.FC = () => {
   const { t } = useTranslation();
@@ -26,6 +27,34 @@ export const App: React.FC = () => {
   const [dockState, setDockState] = useState<DockStateInfo | null>(null);
   const dockStateRevision = useRef(0);
   const usageEventRevision = useRef(0);
+  const sourceScope = useRef<UsageSourceScope | null>(null);
+  const currentSettings = useRef(DEFAULT_SETTINGS);
+  const pendingUsage = useRef<CodexUsage | null>(null);
+
+  const applySavedSettings = useCallback((envelope: SettingsEnvelope) => {
+    if (envelope.revision < settingsRevision.current) return;
+    settingsRevision.current = envelope.revision;
+    const serverSettings = { ...DEFAULT_SETTINGS, ...envelope.settings };
+    const merged = Object.assign({}, serverSettings, ...pendingPatches.current, sliderPatch.current);
+    // An optimistic source change has no authoritative identity until its save
+    // arrives. Do not associate the old envelope's identity with that binding.
+    const confirmed = sourceBinding(merged) === sourceBinding(serverSettings);
+    const scope = usageSourceScope(confirmed ? envelope : { revision: envelope.revision, settings: merged }, merged, sourceScope.current);
+    sourceScope.current = scope;
+    currentSettings.current = merged;
+    setUsage(current => {
+      const retained = current && usageMatchesSource(current, scope) ? current : null;
+      const pending = pendingUsage.current;
+      if (pending && usageMatchesSource(pending, scope)) {
+        pendingUsage.current = null;
+        return retained && retained.fetchedAt > pending.fetchedAt ? retained : pending;
+      }
+      return retained;
+    });
+    setSettings(merged);
+    updateLanguage(merged.language);
+    setSettingsLoadState('ready');
+  }, []);
 
   const loadSettings = useCallback(async () => {
     const token = ++settingsLoadToken.current;
@@ -33,18 +62,14 @@ export const App: React.FC = () => {
     try {
       const envelope = await invoke<SettingsEnvelope>('get_settings');
       if (token !== settingsLoadToken.current || envelope.revision < settingsRevision.current) return;
-      settingsRevision.current = envelope.revision;
-      const merged = Object.assign({}, envelope.settings, ...pendingPatches.current, sliderPatch.current);
-      setSettings(merged);
-      updateLanguage(merged.language);
-      setSettingsLoadState('ready');
+      applySavedSettings(envelope);
     } catch (err) {
       if (token !== settingsLoadToken.current) return;
       if (settingsRevision.current >= 0) return;
       console.error('Failed to get settings:', err);
       setSettingsLoadState('error');
     }
-  }, []);
+  }, [applySavedSettings]);
 
   useEffect(() => {
     let active = true;
@@ -52,20 +77,28 @@ export const App: React.FC = () => {
 
     // Listen to settings update from other windows or tray
     const unlistenSettings = listen<SettingsEnvelope>('settings_updated', (event) => {
-      if (event.payload.revision < settingsRevision.current) return;
-      settingsRevision.current = event.payload.revision;
-      const merged = Object.assign({}, event.payload.settings, ...pendingPatches.current, sliderPatch.current);
-      setSettings(merged);
-      updateLanguage(merged.language);
-      setSettingsLoadState('ready');
+      if (active) applySavedSettings(event.payload);
     });
 
     // Register first, then hydrate only if no live event arrived during the
     // cache request. fetchedAt alone cannot order samples within the same second.
     const applyUsageIfNewer = (next: CodexUsage) => {
-      setUsage((current) => (
-        current && current.fetchedAt > next.fetchedAt ? current : next
-      ));
+      if (!usageMatchesSource(next, sourceScope.current)) {
+        // A sample may arrive before its settings broadcast. Hold it without
+        // displaying it; only a matching authoritative source can release it.
+        const pending = pendingUsage.current;
+        // A late old-source event must not evict an already buffered newer
+        // generation while its authoritative settings broadcast is in flight.
+        if (!pending || (next.sourceGeneration ?? -1) >= (pending.sourceGeneration ?? -1)) {
+          pendingUsage.current = next;
+        }
+        return;
+      }
+      setUsage((current) => {
+        if (!usageMatchesSource(next, sourceScope.current)) return current;
+        return current && usageMatchesSource(current, sourceScope.current)
+          && current.fetchedAt > next.fetchedAt ? current : next;
+      });
       setIsLoading(false);
     };
     const unlistenUsage = listen<CodexUsage>('usage_updated', (event) => {
@@ -126,20 +159,19 @@ export const App: React.FC = () => {
       unlistenUpdate.then((f) => f());
       unlistenDockState.then((f) => f());
     };
-  }, [loadSettings, windowLabel]);
-
-  const applySavedSettings = (envelope: SettingsEnvelope) => {
-    if (envelope.revision < settingsRevision.current) return;
-    settingsRevision.current = envelope.revision;
-    const merged = Object.assign({}, envelope.settings, ...pendingPatches.current, sliderPatch.current);
-    setSettings(merged);
-    updateLanguage(merged.language);
-  };
+  }, [applySavedSettings, loadSettings, windowLabel]);
 
   const enqueuePatch = (patch: Partial<OverlaySettings>, optimistic = true) => {
     pendingPatches.current.push(patch);
     if (optimistic) {
-      setSettings((current) => ({ ...current, ...patch }));
+      const merged = { ...currentSettings.current, ...patch };
+      if (sourceBinding(merged) !== sourceBinding(currentSettings.current)) {
+        sourceScope.current = { binding: sourceBinding(merged), allowLegacy: false };
+        pendingUsage.current = null;
+        setUsage(null);
+      }
+      currentSettings.current = merged;
+      setSettings(merged);
       if (patch.language) updateLanguage(patch.language);
     }
     patchQueue.current = patchQueue.current.then(async () => {

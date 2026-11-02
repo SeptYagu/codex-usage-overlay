@@ -9,12 +9,22 @@ export interface CodexUsage {
   fiveHourResetsAt: number | null;
   weekResetsAt: number | null;
   fetchedAt: number;
+  // Optional only for legacy fixtures; production samples identify their source.
+  sourceKey?: string;
+  sourceGeneration?: number;
 }
 
-export type Provider = 'codex' | 'claude';
+export type Provider = 'codex' | 'dsh' | 'claude';
 
 export interface OverlaySettings {
   provider: Provider;
+  // Public instance origin only; pairing tokens never enter settings.
+  dshBaseUrl: string;
+  dshInstanceId: string;
+  dshAccountId: string;
+  dshSessionIds: string[];
+  dshFiveHourThresholdPercent: number;
+  dshWeeklyThresholdPercent: number;
   claudeLivePolling: boolean;
   showProviderLogo: boolean;
   overlayLayout: 'grouped' | 'stacks';
@@ -47,6 +57,8 @@ export interface OverlaySettings {
 export interface SettingsEnvelope {
   revision: number;
   settings: OverlaySettings;
+  sourceKey?: string;
+  sourceGeneration?: number;
 }
 
 export type QuotaKind = 'fiveHour' | 'week';
@@ -61,6 +73,12 @@ export interface DockStateInfo {
 
 export const DEFAULT_SETTINGS: OverlaySettings = {
   provider: 'codex',
+  dshBaseUrl: '',
+  dshInstanceId: '',
+  dshAccountId: '',
+  dshSessionIds: [],
+  dshFiveHourThresholdPercent: 0,
+  dshWeeklyThresholdPercent: 0,
   claudeLivePolling: false,
   showProviderLogo: true,
   overlayLayout: 'grouped',
@@ -157,6 +175,20 @@ export interface QuotaReadDiagnostic {
   cliVersion: string | null;
   stderr: { modelTimeouts: number; pluginFailures: number; otherLines: number; oversizedLines: number };
   cleanupFailed: boolean;
+}
+
+export interface DshBridgeInstance {
+  id: string;
+  label: string;
+  origin: string;
+}
+
+export interface DshConnectionStatus {
+  connected: boolean;
+  instanceId: string | null;
+  accounts: Array<{ id: string; label: string; active: boolean }>;
+  sessions: Array<{ id: string; title: string; provider: string; busy: boolean }>;
+  error: string | null;
 }
 
 export interface ClaudeConnectionStatus {

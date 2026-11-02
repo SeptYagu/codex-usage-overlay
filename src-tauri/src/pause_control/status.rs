@@ -281,13 +281,31 @@ pub async fn snapshot(state: &AppState) -> AutoPauseStatus {
         status.resume_plans = resume.plans();
         status.resume_state_error = resume.error.clone();
     }
-    derive_summary(
-        &mut status,
-        &settings,
-        usage.as_ref(),
-        running,
-        account_known,
-    );
+    if settings.provider == Provider::Dsh {
+        let control = state.dsh_control.lock().unwrap_or_else(|p| p.into_inner());
+        status.targets.clear(); status.resume_plans.clear(); status.resume_state_error = None;
+        status.reader = None; status.capabilities = ControlCapabilities::default();
+        status.mode = "cooperative".into();
+        status.confirmed_count = control.accepted;
+        status.accepted_request_count = control.accepted;
+        status.confirmed_interruption_count = 0;
+        status.last_confirmed_at = control.last_accepted_at;
+        status.last_probe_at = None;
+        status.reason = None;
+        let bound = !settings.dsh_instance_id.is_empty() && !settings.dsh_base_url.is_empty()
+            && !settings.dsh_account_id.is_empty() && !settings.dsh_session_ids.is_empty();
+        status.connection = if bound && status.quota_health == "success" { BridgeConnection::Available }
+            else if bound { BridgeConnection::Unknown } else { BridgeConnection::Unavailable };
+        status.summary = if !status.enabled { "off" }
+            else if !bound { status.reason = Some("dshBindingRequired".into()); "needsAttention" }
+            else if status.quota_health == "error" { status.reason = Some("quotaReadFailed".into()); "needsAttention" }
+            else if status.quota_health == "stale" { status.reason = Some("quotaStale".into()); "needsAttention" }
+            else if control.failed { status.reason = Some("deliveryFailed".into()); "needsAttention" }
+            else if control.running || control.accepted > 0 { "pauseRequested" }
+            else if usage.is_none() { "checking" } else { "armed" }.into();
+    } else {
+        derive_summary(&mut status, &settings, usage.as_ref(), running, account_known);
+    }
     let mut cache = state
         .protection_status
         .lock()

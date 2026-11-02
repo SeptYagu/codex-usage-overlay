@@ -70,6 +70,11 @@ pub struct PendingResetFetches {
 }
 
 impl PendingResetFetches {
+    pub fn cancel_all(&mut self) {
+        for pending in [&mut self.five_hour, &mut self.weekly] {
+            if let Some(fetch) = pending.take() { fetch.task.abort(); }
+        }
+    }
     fn slot_mut(&mut self, kind: QuotaKind) -> &mut Option<PendingFetch> {
         match kind {
             QuotaKind::FiveHour => &mut self.five_hour,
@@ -152,7 +157,7 @@ pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Ar
         settings.clone()
     };
     if let Some(app) = sink.app_handle() {
-        let _ = app.emit("usage_updated", usage);
+        let _ = app.emit("usage_updated", crate::commands::usage_envelope(state, &settings, usage.clone()));
         crate::dock::keep_docked_in_work_area(app, state).await;
 
         if let Err(error) = maybe_notify_cycle(

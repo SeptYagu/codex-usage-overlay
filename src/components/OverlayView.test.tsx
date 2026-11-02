@@ -86,22 +86,22 @@ describe.each(['grouped', 'stacks'] as const)('%s layout', (overlayLayout) => {
     expect(container.querySelectorAll('.overlay-divider').length).toBe(overlayLayout === 'grouped' ? 1 : 0);
   });
 
-  it.each(['codex', 'claude'] as const)('shows the %s logo before the quotas and never a Claude credit group', (provider) => {
+  it.each(['codex', 'dsh', 'claude'] as const)('shows the %s logo before the quotas and never a Claude credit group', (provider) => {
     const { container, rerender } = render(
-      <OverlayView settings={{ ...settings, provider, showProviderLogo: true }} usage={{ ...usage, hasCredits: provider === 'codex' }} isLoading={false} />,
+      <OverlayView settings={{ ...settings, provider, showProviderLogo: true }} usage={{ ...usage, hasCredits: provider !== 'claude' }} isLoading={false} />,
     );
-    const logo = screen.getByRole('img', { name: provider === 'claude' ? 'Claude' : 'Codex' });
+    const logo = screen.getByRole('img', { name: provider === 'claude' ? 'Claude' : provider === 'dsh' ? 'DSH Codex subscription' : 'Local Codex' });
     expect(logo.classList.contains('overlay-provider')).toBe(true);
     expect(logo.querySelector('svg')?.getAttribute('data-provider')).toBe(provider);
     // Same position the provider label had: the first element of the capsule.
     expect(container.querySelector('.overlay-capsule')?.firstElementChild).toBe(logo);
     expect(screen.queryByText('Claude')).toBeNull();
-    expect(screen.queryByRole('group', { name: 'CREDITS' }) !== null).toBe(provider === 'codex');
+    expect(screen.queryByRole('group', { name: 'CREDITS' }) !== null).toBe(provider !== 'claude');
     expect(container.querySelectorAll('.overlay-divider').length)
-      .toBe(overlayLayout === 'grouped' ? (provider === 'codex' ? 3 : 2) : 0);
+      .toBe(overlayLayout === 'grouped' ? (provider !== 'claude' ? 3 : 2) : 0);
 
     rerender(<OverlayView settings={{ ...settings, provider, showProviderLogo: false }} usage={usage} isLoading={false} />);
-    expect(screen.queryByRole('img', { name: provider === 'claude' ? 'Claude' : 'Codex' })).toBeNull();
+    expect(screen.queryByRole('img', { name: provider === 'claude' ? 'Claude' : provider === 'dsh' ? 'DSH Codex subscription' : 'Local Codex' })).toBeNull();
   });
 
   it.each(['∞', '—', '0'])('preserves credit state %s', (creditsDisplay) => {

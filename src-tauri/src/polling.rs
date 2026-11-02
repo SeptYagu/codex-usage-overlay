@@ -47,22 +47,21 @@ impl PollState {
                 self.fast = false;
                 self.recovery_samples = 0;
             } else {
+                let (five_threshold, week_threshold) = if settings.provider == crate::config::Provider::Dsh {
+                    (settings.dsh_five_hour_threshold_percent, settings.dsh_weekly_threshold_percent)
+                } else { (settings.auto_pause_five_hour_threshold_percent, settings.auto_pause_weekly_threshold_percent) };
                 let near = usage.five_hour_remaining_percent.is_some_and(|v| {
-                    v <= settings
-                        .auto_pause_five_hour_threshold_percent
+                    v <= five_threshold
                         .saturating_add(5)
                 }) || usage.week_remaining_percent.is_some_and(|v| {
-                    v <= settings
-                        .auto_pause_weekly_threshold_percent
+                    v <= week_threshold
                         .saturating_add(5)
                 });
                 let recovered = usage.five_hour_remaining_percent.is_some_and(|v| {
-                    v > settings
-                        .auto_pause_five_hour_threshold_percent
+                    v > five_threshold
                         .saturating_add(7)
                 }) && usage.week_remaining_percent.is_some_and(|v| {
-                    v > settings
-                        .auto_pause_weekly_threshold_percent
+                    v > week_threshold
                         .saturating_add(7)
                 });
                 if near {

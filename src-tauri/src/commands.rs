@@ -18,6 +18,9 @@ use crate::tray::{open_settings_window as show_settings_win, TrayPresentationSin
 pub struct AppState {
     pub client: Mutex<CodexClient>,
     pub refresh_guard: Mutex<()>,
+    pub source_generation: AtomicU64,
+    pub dsh: crate::dsh::Manager,
+    pub dsh_control: StdMutex<crate::dsh_control::ControlState>,
     pub last_refresh_result: StdMutex<Option<Result<CodexUsage, String>>>,
     pub reader: StdMutex<ReaderState>,
     pub polling: StdMutex<crate::polling::PollState>,
@@ -74,10 +77,13 @@ pub struct AppState {
 impl AppState {
     pub(crate) fn for_test(config_manager: ConfigManager) -> Self {
         let settings = config_manager.load_settings();
-        config_manager.set_provider(settings.provider);
+        config_manager.set_source(&settings);
         Self {
             client: Mutex::new(CodexClient::new()),
             refresh_guard: Mutex::new(()),
+            source_generation: AtomicU64::new(0),
+            dsh: Default::default(),
+            dsh_control: StdMutex::new(Default::default()),
             last_refresh_result: StdMutex::new(None),
             reader: StdMutex::new(ReaderState::load(&config_manager)),
             polling: StdMutex::new(crate::polling::PollState::default()),
@@ -119,6 +125,30 @@ impl AppState {
 pub struct SettingsEnvelope {
     pub revision: u64,
     pub settings: OverlaySettings,
+    pub source_key: String,
+    pub source_generation: u64,
+}
+
+impl SettingsEnvelope {
+    fn new(state: &AppState, revision: u64, settings: OverlaySettings) -> Self {
+        Self { source_key: crate::config::source_key(&settings),
+            source_generation: state.source_generation.load(Ordering::Acquire),
+            revision, settings }
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageEnvelope {
+    #[serde(flatten)]
+    pub usage: CodexUsage,
+    pub source_key: String,
+    pub source_generation: u64,
+}
+
+pub(crate) fn usage_envelope(state: &AppState, settings: &OverlaySettings, usage: CodexUsage) -> UsageEnvelope {
+    UsageEnvelope { usage, source_key: crate::config::source_key(settings),
+        source_generation: state.source_generation.load(Ordering::Acquire) }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,8 +200,12 @@ pub(crate) trait UsageSource: TrayPresentationSink {
 
 impl UsageSource for AppHandle {
     async fn read_usage(&self, state: &AppState) -> Result<RawCodexUsage, String> {
-        if state.settings.lock().await.provider == Provider::Claude {
-            return read_claude_usage(state).await;
+        let generation = state.source_generation.load(Ordering::Acquire);
+        let settings = state.settings.lock().await.clone();
+        match settings.provider {
+            Provider::Claude => return read_claude_usage(state, generation).await,
+            Provider::Dsh => return read_dsh_usage(state, &settings, generation).await,
+            Provider::Codex => {}
         }
         let mut client = state.client.lock().await;
         let started_at = reader::unix_now();
@@ -191,10 +225,14 @@ impl UsageSource for AppHandle {
         }
         let mut observer = |event| async move {
             let finished = matches!(&event, ReadEvent::Finished(_));
+            let _source_commit = state.settings_patch.lock().await;
+            if state.source_generation.load(Ordering::Acquire) != generation { return; }
             observe_read_event(self, state, event).await;
             if finished { queue_reader_history(self); }
         };
         let result = client.fetch_usage(&mut observer).await;
+        let _source_commit = state.settings_patch.lock().await;
+        if state.source_generation.load(Ordering::Acquire) != generation { return Err("Usage source changed during the read".into()); }
         let mut status = state.reader.lock().unwrap_or_else(|p| p.into_inner());
         match result {
             Ok(value) => {
@@ -227,7 +265,7 @@ impl UsageSource for AppHandle {
 /// the answer is also stored in that file so the guard hooks see it. While the
 /// endpoint fails or asks to wait, that file still holds the last reading; it
 /// is shown with its age and Settings reports the live failure.
-async fn read_claude_usage(state: &AppState) -> Result<RawCodexUsage, String> {
+async fn read_claude_usage(state: &AppState, generation: u64) -> Result<RawCodexUsage, String> {
     let now = reader::unix_now();
     let dir = state.config_manager.runtime_dir();
     let result = if state.settings.lock().await.claude_live_polling {
@@ -238,6 +276,8 @@ async fn read_claude_usage(state: &AppState) -> Result<RawCodexUsage, String> {
     } else {
         crate::claude::source::read_usage(dir, now)
     };
+    let _source_commit = state.settings_patch.lock().await;
+    if state.source_generation.load(Ordering::Acquire) != generation { return Err("Usage source changed during the read".into()); }
     let mut status = state.reader.lock().unwrap_or_else(|p| p.into_inner());
     status.observation = None;
     match result {
@@ -252,6 +292,24 @@ async fn read_claude_usage(state: &AppState) -> Result<RawCodexUsage, String> {
             Err(crate::claude::source::describe(&error))
         }
     }
+}
+
+async fn read_dsh_usage(state: &AppState, settings: &OverlaySettings, generation: u64) -> Result<RawCodexUsage, String> {
+    let result = async {
+        let connection = state.dsh.status().await;
+        if !connection.connected || connection.instance_id.as_deref() != Some(settings.dsh_instance_id.as_str())
+            || state.dsh.origin().await.as_deref() != Some(settings.dsh_base_url.as_str()) {
+            return Err("DSH is disconnected or its instance binding changed; reconnect the selected bridge".into());
+        }
+        state.dsh.read_usage(&settings.dsh_account_id).await
+    }.await;
+    let _source_commit = state.settings_patch.lock().await;
+    if state.source_generation.load(Ordering::Acquire) != generation { return Err("Usage source changed during the read".into()); }
+    let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+    reader.observation = None;
+    reader.failure = None;
+    reader.phase = if result.is_ok() { "success" } else { "error" };
+    result
 }
 
 async fn read_claude_live(state: &AppState, now: i64) -> Result<crate::claude::shared::Snapshot, ReadFailure> {
@@ -315,6 +373,7 @@ pub(crate) async fn observe_read_event<S: TrayPresentationSink>(sink: &S, state:
 // ownership, and at most one latest revision waiting behind a slow disk write.
 fn queue_reader_history(app: &AppHandle) {
     let state = app.state::<Arc<AppState>>().inner().clone();
+    let generation = state.source_generation.load(Ordering::Acquire);
     {
         let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
         if reader.writer_running { return; }
@@ -322,12 +381,17 @@ fn queue_reader_history(app: &AppHandle) {
     }
     tauri::async_runtime::spawn(async move {
         loop {
-            let (history, revision) = {
+            // Keep the commit gate through the bounded disk write. Otherwise
+            // A -> B -> A may reload A and start a second writer while A's old
+            // spawn_blocking still writes the same path and temporary file.
+            let _source_commit = state.settings_patch.lock().await;
+            if state.source_generation.load(Ordering::Acquire) != generation { return; }
+            let (history, revision, path) = {
                 let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
-                (reader.history.clone(), reader.revision)
+                (reader.history.clone(), reader.revision, state.config_manager.quota_history_path())
             };
-            let path = state.config_manager.quota_history_path();
             let saved = tokio::task::spawn_blocking(move || history.save(&path)).await;
+            if state.source_generation.load(Ordering::Acquire) != generation { return; }
             let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
             if !matches!(saved, Ok(Ok(()))) || reader.revision == revision {
                 reader.writer_running = false;
@@ -337,16 +401,17 @@ fn queue_reader_history(app: &AppHandle) {
     });
 }
 
-struct RefreshCompletion<'a> { state: &'a AppState, completed: bool }
+struct RefreshCompletion<'a> { state: &'a AppState, generation: u64, completed: bool }
 impl Drop for RefreshCompletion<'_> {
     fn drop(&mut self) {
-        if !self.completed {
+        if !self.completed && self.state.source_generation.load(Ordering::Acquire) == self.generation {
             let failure = ReadFailure::new(ReadStage::Refresh, FailureKind::Cancelled);
             *self.state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()) = Some(Err(failure.to_string()));
             let mut reader = self.state.reader.lock().unwrap_or_else(|p| p.into_inner());
             reader.phase = "error"; reader.failure = Some(failure);
             drop(reader);
             self.state.auto_pause.lock().unwrap_or_else(|p| p.into_inner()).invalidate_pending();
+            self.state.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).invalidate();
         }
     }
 }
@@ -363,13 +428,25 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
         }
     };
 
+    let generation = {
+        let _source_commit = state.settings_patch.lock().await;
+        state.source_generation.load(Ordering::Acquire)
+    };
     *state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()) = None;
-    let mut completion = RefreshCompletion { state, completed: false };
+    let mut completion = RefreshCompletion { state, generation, completed: false };
 
     state.polling.lock().unwrap_or_else(|p| p.into_inner()).started(std::time::Instant::now());
     state.config_manager.write_status("reading", None);
     let raw_result = sink.read_usage(state).await;
 
+    // Source changes may proceed while network I/O is in flight, but no old
+    // result may commit to a new namespace, train its learner or send control.
+    let _source_commit = state.settings_patch.lock().await;
+    if state.source_generation.load(Ordering::Acquire) != generation {
+        completion.completed = true;
+        return Err("Usage source changed during the read; discarded the previous source result".into());
+    }
+    let source_settings = state.settings.lock().await.clone();
     let result = match raw_result {
         Ok(raw) => {
             let estimate = {
@@ -426,6 +503,8 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
             let settings = state.settings.lock().await.clone();
             if codex {
                 crate::pause_control::schedule(state, settings, usage.clone(), account_id);
+            } else if source_settings.provider == Provider::Dsh {
+                crate::dsh_control::schedule(state, source_settings.clone(), raw.clone(), generation);
             }
             Ok(usage)
         }
@@ -459,6 +538,7 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
 pub(crate) async fn process_usage_error<S: TrayPresentationSink>(sink: &S, state: &AppState) {
     state.auto_pause.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
         .invalidate_pending();
+    state.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).invalidate();
     let settings = state.settings.lock().await;
     let mut status = state.tray_read_status.lock().await;
     *status = TrayReadStatus::Error;
@@ -477,24 +557,120 @@ pub(crate) fn overlay_geometry_changed(previous: &OverlaySettings, next: &Overla
 }
 
 #[tauri::command]
-pub async fn fetch_usage(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<CodexUsage, String> {
-    refresh_usage(&app, state.inner()).await
+pub async fn fetch_usage(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<UsageEnvelope, String> {
+    let generation = state.source_generation.load(Ordering::Acquire);
+    let usage = refresh_usage(&app, state.inner()).await?;
+    let _source_commit = state.settings_patch.lock().await;
+    if state.source_generation.load(Ordering::Acquire) != generation { return Err("Usage source changed".into()); }
+    let settings = state.settings.lock().await;
+    Ok(usage_envelope(&state, &settings, usage))
 }
 
 #[tauri::command]
-pub async fn get_last_usage(state: State<'_, Arc<AppState>>) -> Result<Option<CodexUsage>, String> {
-    Ok(state.last_usage.lock().await.clone())
+pub async fn get_last_usage(state: State<'_, Arc<AppState>>) -> Result<Option<UsageEnvelope>, String> {
+    let _source_commit = state.settings_patch.lock().await;
+    let settings = state.settings.lock().await;
+    Ok(state.last_usage.lock().await.clone().map(|usage| usage_envelope(&state, &settings, usage)))
 }
 
 #[tauri::command]
 pub async fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsEnvelope, String> {
+    let _source_commit = state.settings_patch.lock().await;
     let guard = state.settings.lock().await;
     let settings = guard.clone();
     let revision = state.settings_revision.load(Ordering::SeqCst);
-    Ok(SettingsEnvelope {
-        revision,
-        settings,
-    })
+    Ok(SettingsEnvelope::new(&state, revision, settings))
+}
+
+#[derive(Serialize)]
+pub struct DshBridgeInstance { pub id: String, pub label: String, pub origin: String }
+
+#[tauri::command]
+pub async fn dsh_discover(state: State<'_, Arc<AppState>>) -> Result<Vec<DshBridgeInstance>, String> {
+    let root = state.config_manager.runtime_dir().join("dsh-bridges");
+    if !root.exists() { return Ok(Vec::new()); }
+    let canonical = std::fs::canonicalize(&root).map_err(|_| "Could not read DSH bridge discovery")?;
+    let entries = std::fs::read_dir(&root).map_err(|_| "Could not read DSH bridge discovery")?;
+    let mut instances = Vec::new();
+    for entry in entries.take(64).flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue; };
+        if !crate::pause_control::looks_like_thread_id(id) { continue; }
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink())
+            || !std::fs::canonicalize(&path).is_ok_and(|p| p.parent() == Some(canonical.as_path())) { continue; }
+        let Ok(metadata) = std::fs::metadata(&path) else { continue; };
+        if !metadata.is_file() || metadata.len() > 16384 { continue; }
+        let Ok(bytes) = std::fs::read(&path) else { continue; };
+        let Ok(record) = serde_json::from_slice::<Value>(&bytes) else { continue; };
+        if record["schemaVersion"] != 1 || record["instanceId"].as_str() != Some(id) { continue; }
+        let Some(origin) = record["origin"].as_str() else { continue; };
+        let Ok(url) = reqwest::Url::parse(origin) else { continue; };
+        if url.scheme() != "http" || url.host_str() != Some("127.0.0.1") || url.port().is_none()
+            || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() || url.path() != "/" { continue; }
+        let label = record["profileLabel"].as_str().filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)).unwrap_or("DSH companion");
+        instances.push(DshBridgeInstance { id: id.into(), label: label.into(), origin: url.origin().ascii_serialization() });
+    }
+    instances.sort_by(|a,b| a.label.cmp(&b.label).then(a.id.cmp(&b.id)));
+    Ok(instances)
+}
+
+#[tauri::command]
+pub async fn dsh_connection_status(state: State<'_, Arc<AppState>>) -> Result<crate::dsh::ConnectionStatus, String> {
+    Ok(state.dsh.status().await)
+}
+
+#[tauri::command]
+pub async fn dsh_connect(bridge_id: Option<String>, connection_url: Option<String>, state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<crate::dsh::ConnectionStatus, String> {
+    if bridge_id.is_some() == connection_url.is_some() { return Err("Select exactly one DSH connection method".into()); }
+    let _commit = state.settings_patch.lock().await;
+    let result = if let Some(id) = bridge_id {
+        if !crate::pause_control::looks_like_thread_id(&id) { return Err("Invalid DSH bridge identity".into()); }
+        state.dsh.connect_bridge(&state.config_manager.runtime_dir().join("dsh-bridges").join(format!("{id}.json"))).await
+    } else {
+        state.dsh.connect(connection_url.as_deref().unwrap_or_default()).await
+    };
+    let status = match result { Ok(status) => status, Err(error) => {
+        state.dsh.disconnect().await;
+        publish_dsh_binding(&app, &state, None, None).await?;
+        return Err(error);
+    }};
+    let origin = state.dsh.origin().await;
+    publish_dsh_binding(&app, &state, origin, status.instance_id.clone()).await?;
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn dsh_disconnect(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<crate::dsh::ConnectionStatus, String> {
+    let _commit = state.settings_patch.lock().await;
+    state.dsh.disconnect().await;
+    publish_dsh_binding(&app, &state, None, None).await?;
+    Ok(state.dsh.status().await)
+}
+
+// Caller holds settings_patch. Pairing never guesses an account or target.
+async fn publish_dsh_binding(app: &AppHandle, state: &Arc<AppState>, origin: Option<String>, instance: Option<String>) -> Result<(), String> {
+    let next = {
+        let mut settings = state.settings.lock().await;
+        let mut next = settings.clone();
+        next.dsh_base_url = origin.unwrap_or_default(); next.dsh_instance_id = instance.unwrap_or_default();
+        next.dsh_account_id.clear(); next.dsh_session_ids.clear();
+        if let Err(error) = state.config_manager.save_settings_checked(&next) {
+            state.dsh.disconnect().await;
+            return Err(error);
+        }
+        *settings = next.clone(); next
+    };
+    // An explicit re-pair is the only user action that clears the at-most-once
+    // ledger. Source/account/target switches only cancel queued work.
+    state.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).reset();
+    switch_provider(state, next.provider).await;
+    let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = app.emit("settings_updated", SettingsEnvelope::new(state, revision, next));
+    state.polling.lock().unwrap_or_else(|p| p.into_inner()).request_now(std::time::Instant::now());
+    state.poll_wake.notify_one();
+    crate::tray::repaint_tray(app, state).await;
+    Ok(())
 }
 
 /// The auto-pause status the settings window reads.
@@ -515,6 +691,7 @@ pub async fn resume_chat(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<String, String> {
+    if state.settings.lock().await.provider != Provider::Codex { return Err("Resume is only supported for the local Codex source".into()); }
     refresh_usage(&app, state.inner()).await?;
     // A newer refresh may finish while this caller is being resumed. Capture
     // matching cached values/timing under the refresh guard, then release it
@@ -571,6 +748,7 @@ pub async fn resume_chat(
 }
 
 fn resume_quota_gate(settings: &OverlaySettings, usage: &CodexUsage, fresh: bool) -> Result<(), String> {
+    if settings.provider != Provider::Codex { return Err("Resume is only supported for the local Codex source".into()); }
     let (Some(five), Some(week)) = (usage.five_hour_remaining_percent, usage.week_remaining_percent) else { return Err("quotaStale".into()); };
     if !fresh { return Err("quotaStale".into()); }
     if five <= settings.auto_pause_five_hour_threshold_percent || week <= settings.auto_pause_weekly_threshold_percent { return Err("quotaStillLow".into()); }
@@ -579,6 +757,7 @@ fn resume_quota_gate(settings: &OverlaySettings, usage: &CodexUsage, fresh: bool
 
 #[tauri::command]
 pub async fn cancel_resume_plans(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+    if state.settings.lock().await.provider != Provider::Codex { return Err("Resume is only supported for the local Codex source".into()); }
     state.resume.lock().await.cancel_all("cancelledByUser");
     crate::pause_control::resume::update(state.inner(), None).await;
     crate::pause_control::status::publish(&app, state.inner()).await;
@@ -618,7 +797,11 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "autoPauseWeeklyThresholdPercent" => value.as_u64().is_some_and(|n| (1..=10).contains(&n)),
             "refreshIntervalSeconds" => value.as_u64().is_some_and(|n| (15..=3600).contains(&n)),
             "language" => matches!(value.as_str(), Some("auto" | "en-US" | "zh-CN" | "zh-Hant")),
-            "provider" => matches!(value.as_str(), Some("codex" | "claude")),
+            "provider" => matches!(value.as_str(), Some("codex" | "claude" | "dsh")),
+            "dshAccountId" => value.as_str().is_some_and(|s| s.is_empty() || crate::pause_control::looks_like_thread_id(s)),
+            "dshSessionIds" => value.as_array().is_some_and(|items| items.len() <= 32 && items.iter().all(|v| v.as_str().is_some_and(|id| crate::pause_control::looks_like_thread_id(id.strip_prefix("session-").unwrap_or(id))))),
+            "dshFiveHourThresholdPercent" => value.as_u64().is_some_and(|n| n <= 15),
+            "dshWeeklyThresholdPercent" => value.as_u64().is_some_and(|n| n <= 10),
             "fiveHourSoundMode" | "weeklySoundMode" => matches!(value.as_str(), Some("windows" | "custom")),
             "fiveHourSoundPath" | "weeklySoundPath" => value.is_null() || value.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 4096),
             _ => false,
@@ -809,8 +992,24 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     // when Settings and the tray submit changes at the same time.
     let _patch_guard = state.settings_patch.lock().await;
     let changes = validate_settings_patch(&patch, allow_auto_start)?;
+    if changes.contains_key("dshAccountId") || changes.contains_key("dshSessionIds") {
+        let mut selected = state.settings.lock().await.clone();
+        merge_settings_patch(&mut selected, &patch)?;
+        let unique: std::collections::HashSet<_> = selected.dsh_session_ids.iter().collect();
+        if unique.len() != selected.dsh_session_ids.len() { return Err("Duplicate DSH target binding".into()); }
+        if !selected.dsh_account_id.is_empty() || !selected.dsh_session_ids.is_empty() {
+            let connection = state.dsh.status().await;
+            if !connection.connected || connection.instance_id.as_deref() != Some(selected.dsh_instance_id.as_str())
+                || !connection.accounts.iter().any(|a| a.active && a.id == selected.dsh_account_id) {
+                return Err("Connect DSH and explicitly select its current active subscription account".into());
+            }
+            if selected.dsh_session_ids.iter().any(|id| !connection.sessions.iter().any(|s| &s.id == id && s.provider == "codex")) {
+                return Err("Select only existing ordinary DSH Codex sessions".into());
+            }
+        }
+    }
     let (
-        envelope,
+        mut envelope,
         auto_check_just_enabled,
         auto_install_just_enabled,
         auto_pause_just_enabled,
@@ -840,7 +1039,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         *settings = next.clone();
         let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
         (
-            SettingsEnvelope { revision, settings: next.clone() },
+            SettingsEnvelope::new(state, revision, next.clone()),
             auto_check_just_enabled,
             auto_install_just_enabled,
             auto_pause_just_enabled,
@@ -850,7 +1049,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
             was_mouse_passthrough != next.mouse_passthrough,
             was_mouse_passthrough,
             overlay_geometry_changed(&previous_settings, &next),
-            previous_settings.provider != next.provider,
+            !crate::config::same_source(&previous_settings, &next),
             previous_settings.include_prerelease_updates != next.include_prerelease_updates,
         )
     };
@@ -867,7 +1066,10 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
 
     if provider_changed {
         switch_provider(state, envelope.settings.provider).await;
+        envelope.source_generation = state.source_generation.load(Ordering::Acquire);
     }
+    // Settings changes revoke queued DSH control even if the data namespace is unchanged.
+    state.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).invalidate();
     if let Err(error) = crate::claude::install::write_guard_config(state.config_manager.runtime_dir(), &envelope.settings) {
         eprintln!("Could not write the Claude guard preferences: {error}");
     }
@@ -892,7 +1094,8 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
             *state.claude_live.lock().unwrap_or_else(|p| p.into_inner()) = Default::default();
         }
         if provider_changed || changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota" | "claudeLivePolling"
-            | "autoPauseFiveHourThresholdPercent" | "autoPauseWeeklyThresholdPercent")) {
+            | "autoPauseFiveHourThresholdPercent" | "autoPauseWeeklyThresholdPercent"
+            | "dshFiveHourThresholdPercent" | "dshWeeklyThresholdPercent")) {
             polling.request_now(std::time::Instant::now());
         }
     }
@@ -917,7 +1120,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
                         .err();
                     *settings = reverted.clone();
                     let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
-                    (SettingsEnvelope { revision, settings: reverted }, persistence_error)
+                    (SettingsEnvelope::new(state, revision, reverted), persistence_error)
                 };
                 let _ = app.emit("settings_updated", &rollback.0);
                 return Err(match rollback.1 {
@@ -937,7 +1140,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
                     let persistence_error = state.config_manager.save_settings_checked(&reverted).err();
                     *settings = reverted.clone();
                     let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
-                    (SettingsEnvelope { revision, settings: reverted }, persistence_error)
+                    (SettingsEnvelope::new(state, revision, reverted), persistence_error)
                 };
                 let _ = app.emit("settings_updated", &rollback.0);
                 return Err(match rollback.1 {
@@ -996,17 +1199,21 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
 /// provider and drops everything observed from the old one, so no sample,
 /// pause request or reset notification crosses providers.
 pub(crate) async fn switch_provider(state: &Arc<AppState>, provider: Provider) {
-    state.config_manager.set_provider(provider);
+    state.source_generation.fetch_add(1, Ordering::AcqRel);
+    let settings = {
+        let mut settings = state.settings.lock().await;
+        settings.provider = provider;
+        settings.clone()
+    };
+    state.config_manager.set_source(&settings);
+    state.pending_reset_fetches.lock().await.cancel_all();
+    state.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).invalidate();
     *state.burn_rate.lock().await = BurnRateTracker::load(&state.config_manager);
     *state.reset_state.lock().await = crate::notify::load_reset_state(&state.config_manager);
+    *state.resume.lock().await = crate::pause_control::resume::ResumeManager::load(&state.config_manager);
     *state.last_usage.lock().await = None;
     *state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()) = None;
-    {
-        let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
-        reader.failure = None;
-        reader.observation = None;
-        reader.phase = "idle";
-    }
+    *state.reader.lock().unwrap_or_else(|p| p.into_inner()) = ReaderState::load(&state.config_manager);
     state.auto_pause.lock().unwrap_or_else(|p| p.into_inner()).invalidate_pending();
     crate::pause_control::clear_active_periods(state);
     *state.tray_read_status.lock().await = TrayReadStatus::Pending;

@@ -76,6 +76,55 @@ describe('protection status', () => {
     expect(patch).not.toHaveBeenCalled();
     expect(tauri.invoke.mock.calls.every(([name]) => name === 'get_auto_pause_status')).toBe(true);
   });
+  it.each(['en-US', 'zh-CN', 'zh-Hant'])('keeps DSH cooperative-only and cannot offer local resume in %s even with stale capabilities/plans', async locale => {
+    await i18n.changeLanguage(locale);
+    tauri.invoke.mockResolvedValue(snapshot({ provider: 'dsh', autoResumeEnabled: true,
+      confirmedInterruptionCount: 9,
+      capabilities: { cooperativeDelivery: true, directInterrupt: true, completionObservation: true, userActivityObservation: true, continuationControl: true },
+      targets: [{ periodId: 'period', active: true, threadId: 'dsh-session', hostId: null, turnId: null, phase: 'interrupted', reason: null, requestedAt: 100, acceptedAt: 101, interruptedAt: 102 }],
+      resumePlans: [{ id: 'legacy-plan', threadId: 'local-chat', phase: 'ready', eligibleAfter: 100, reason: null }] }));
+    const patch = vi.fn();
+    render(<ProtectionStatusView settings={{ ...settings, provider: 'dsh', autoResumeAfterQuotaReset: true }} onPatchSettings={patch} />);
+    await screen.findByText(i18n.t('protectionSummaries.pauseRequested'));
+    fireEvent.click(screen.getByText(i18n.t('protectionDetails')));
+    expect(screen.getByText(i18n.t('protectionCounts', { accepted: 1, stopped: 0 }))).toBeTruthy();
+    expect(screen.getByText(new RegExp(i18n.t('protectionPhases.accepted')))).toBeTruthy();
+    expect(screen.getByText(i18n.t('dshResumeUnavailable'))).toBeTruthy();
+    const resume = screen.getByRole('checkbox', { name: i18n.t('autoResumeAfterQuotaReset') }) as HTMLInputElement;
+    expect(resume.disabled).toBe(true);
+    expect(resume.checked).toBe(false);
+    fireEvent.click(resume);
+    expect(patch).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: i18n.t('resumeChat') })).toBeNull();
+    expect(screen.queryByRole('button', { name: i18n.t('cancelResumePlans') })).toBeNull();
+    expect(tauri.invoke.mock.calls.every(([command]) => command === 'get_auto_pause_status')).toBe(true);
+  });
+
+  it.each([
+    ['en-US', 'Connect the DSH bridge and explicitly select the active subscription account and target sessions.'],
+    ['zh-CN', '请连接 DSH 桥，并显式选择活动订阅账户及目标会话。'],
+    ['zh-Hant', '請連線 DSH 橋接，並明確選擇啟用中的訂閱帳戶及目標工作階段。'],
+  ])('renders the DSH binding requirement without a fallback in %s', async (locale, message) => {
+    await i18n.changeLanguage(locale);
+    tauri.invoke.mockResolvedValue(snapshot({ provider: 'dsh', summary: 'needsAttention', reason: 'dshBindingRequired',
+      confirmedCount: 0, acceptedRequestCount: 0, confirmedInterruptionCount: 0, targets: [], resumePlans: [] }));
+    render(<ProtectionStatusView settings={{ ...settings, provider: 'dsh' }} />);
+    await screen.findByText(message);
+    expect(screen.queryByText(i18n.t('protectionReasons.statusUnavailable'))).toBeNull();
+    expect(i18n.getResource(locale, 'translation', 'protectionReasons.dshBindingRequired')).toBe(message);
+  });
+
+  it('drops old-provider status and resume actions immediately when selecting DSH', async () => {
+    tauri.invoke.mockResolvedValue(snapshot({ resumePlans: [{ id: 'plan', threadId: 'local-chat', phase: 'ready', eligibleAfter: 100, reason: null }] }));
+    const view = render(<ProtectionStatusView settings={settings} />);
+    fireEvent.click(await screen.findByText('Protection details'));
+    expect(screen.getByRole('button', { name: 'Resume chat' })).toBeTruthy();
+    view.rerender(<ProtectionStatusView settings={{ ...settings, provider: 'dsh' }} />);
+    expect(screen.queryByRole('button', { name: 'Resume chat' })).toBeNull();
+    expect(screen.queryByText('Pause requested — stopping unconfirmed')).toBeNull();
+    expect(screen.getByText(i18n.t('protectionSummaries.checking'))).toBeTruthy();
+  });
+
   it('keeps a live event when an older hydration response arrives late', async () => {
     let resolve!: (value: ProtectionStatus) => void;
     tauri.invoke.mockImplementation(() => new Promise<ProtectionStatus>(done => { resolve = done; }));

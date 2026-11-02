@@ -31,7 +31,10 @@ export const ProviderLogo: React.FC<ProviderLogoProps> = ({ provider, size = 18 
     focusable="false"
     data-provider={provider}
   >
-    {provider === 'claude'
+    {provider === 'dsh'
+      ? <><rect x="0.5" y="3" width="23" height="18" rx="4" fill="currentColor" fillOpacity="0.12" />
+        <text x="12" y="15.5" textAnchor="middle" fill="currentColor" fontSize="8" fontFamily="system-ui, sans-serif" fontWeight="800">DSH</text></>
+      : provider === 'claude'
       ? <path d={CLAUDE_PATH} fill={CLAUDE_COLOR} />
       // In the text colour, so it follows the light and dark themes.
       : <path d={OPENAI_PATH} fill="currentColor" fillRule="evenodd" />}

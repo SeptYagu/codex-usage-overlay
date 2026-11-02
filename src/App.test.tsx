@@ -312,6 +312,50 @@ describe('main usage startup', () => {
     expect(screen.queryByText('69%')).toBeNull();
   });
 
+  it.each(['provider', 'account', 'sessions', 'instance', 'generation'] as const)('clears %s changes and rejects late source/generation samples even with newer timestamps', async change => {
+    const dshSettings: OverlaySettings = { ...DEFAULT_SETTINGS, provider: 'dsh', dshBaseUrl: 'http://dsh.test', dshInstanceId: 'one', dshAccountId: 'a', dshSessionIds: ['s1'] };
+    const initialSettings = change === 'provider' ? DEFAULT_SETTINGS : dshSettings;
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === 'get_settings') return { revision: 0, settings: initialSettings, sourceKey: 'old-source', sourceGeneration: 1 };
+      if (command === 'get_dock_state') return { docked: false, edge: null, expanded: true, hidden: false };
+      if (command === 'get_last_usage') return { ...cached, sourceKey: 'old-source', sourceGeneration: 1 };
+      return null;
+    });
+    render(<App />);
+    await screen.findByText('69%');
+    const nextSettings = { ...dshSettings,
+      ...(change === 'account' ? { dshAccountId: 'b' } : {}),
+      ...(change === 'sessions' ? { dshSessionIds: ['s2'] } : {}),
+      ...(change === 'instance' ? { dshInstanceId: 'two' } : {}),
+    };
+    const key = change === 'generation' ? 'old-source' : 'new-source';
+    act(() => tauri.listeners.get('settings_updated')!({ payload: { revision: 1, settings: nextSettings, sourceKey: key, sourceGeneration: 2 } }));
+    expect(screen.queryByText('69%')).toBeNull();
+    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fetchedAt: cached.fetchedAt + 99999, sourceKey: 'old-source', sourceGeneration: 1 } }));
+    expect(screen.queryByText('69%')).toBeNull();
+    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fiveHourRemainingPercent: 68, fetchedAt: cached.fetchedAt - 100, sourceKey: key, sourceGeneration: 2 } }));
+    expect(screen.getByText('68%')).toBeTruthy();
+    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fetchedAt: cached.fetchedAt + 99999 } }));
+    expect(screen.queryByText('69%')).toBeNull();
+    expect(screen.getByText('68%')).toBeTruthy();
+  });
+
+  it('holds early identified usage until matching settings and never releases old cache', async () => {
+    const initial = deferred<SettingsEnvelope>();
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === 'get_settings') return initial.promise;
+      if (command === 'get_dock_state') return { docked: false, edge: null, expanded: true, hidden: false };
+      return null;
+    });
+    render(<App />);
+    await waitFor(() => expect(tauri.listeners.has('usage_updated')).toBe(true));
+    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, sourceKey: 'dsh-now', sourceGeneration: 4 } }));
+    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fiveHourRemainingPercent: 55, fetchedAt: cached.fetchedAt + 99999, sourceKey: 'dsh-old', sourceGeneration: 3 } }));
+    expect(screen.queryByText('69%')).toBeNull();
+    await act(async () => initial.resolve({ revision: 3, settings: { ...DEFAULT_SETTINGS, provider: 'dsh' }, sourceKey: 'dsh-now', sourceGeneration: 4 }));
+    expect(screen.getByText('69%')).toBeTruthy();
+  });
+
   it('does not start cache hydration after cleanup while registration is pending', async () => {
     const registration = deferred<void>();
     tauri.usageRegistration = registration.promise;

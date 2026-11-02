@@ -1,0 +1,17 @@
+{
+  "name": "dsh-codex-usage-overlay-bridge",
+  "version": "0.1.0",
+  "description": "Restricted loopback companion for Codex Usage Overlay and DSH",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": ["index.js", "file-security.js", "cordis.patch.yml", "README.md"],
+  "engines": { "node": ">=20.11" },
+  "scripts": { "test": "node --test test/*.test.js" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "license": "MIT"
+}

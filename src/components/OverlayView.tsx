@@ -269,7 +269,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
       >
         {showLogo && (
           <>
-            <span className="overlay-provider" role="img" aria-label={t(claude ? 'providerClaude' : 'providerCodex')}>
+            <span className="overlay-provider" role="img" aria-label={t(claude ? 'providerClaude' : settings.provider === 'dsh' ? 'providerDsh' : 'providerCodex')}>
               <ProviderLogo provider={settings.provider} />
             </span>
             {layout === 'grouped' && <span aria-hidden="true" className="overlay-divider" />}

@@ -37,6 +37,12 @@ Smart Pause requests cooperation from Codex; accepted delivery does not verify s
 
 **Automatic resume after reset** is a separate preference, off by default. It is unavailable on the current connection because exact-turn interruption, completion and later user activity cannot be verified. The guarded resume store uses `pause-resume-state.json` in the same runtime directory; cooperative deliveries cannot create executable plans. Restored pending plans require review, and unknown submission outcomes are never retried automatically. This build sends only pause requests and creates no external "Continue" timers. Older Codex-created continuation tasks remain external and may still run; disabling the overlay does not cancel them.
 
+## DSH subscription usage
+
+The independent **DSH** source reads the subscription plugin of an explicitly paired DSH instance, never local Codex limits. Install the companion tarball from the same release, then select the instance, account and ordinary sessions in Settings. History is isolated by instance/account. DSH thresholds are independent and default to 0% remaining.
+
+Protection sends a cooperative pause message only to selected running sessions; acceptance does not prove interruption, and auto-resume is unavailable. Updating the overlay does not install or restart DSH. See the [setup and limitations guide](docs/dsh-subscription.md) and [companion protocol](integrations/dsh-bridge/README.md).
+
 ## Claude usage limits
 
 Set **Usage source** to **Claude** in Settings to show your Claude subscription limits (the 5-hour session window and the weekly window) instead of Codex. One source is active at a time; Codex stays the default.

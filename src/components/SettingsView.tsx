@@ -7,6 +7,7 @@ import { useTranslation } from 'react-i18next';
 import { SoundPicker } from './SoundPicker';
 import { ProtectionStatusView } from './ProtectionStatus';
 import { ClaudeConnectionView } from './ClaudeConnection';
+import { DshConnectionView } from './DshConnection';
 
 interface SettingsViewProps {
   settings: OverlaySettings;
@@ -52,6 +53,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // Claude has no credit balance and is protected by Claude Code hooks instead
   // of a Codex pause request.
   const claude = settings.provider === 'claude';
+  const dsh = settings.provider === 'dsh';
+  const fiveHourThreshold = dsh ? settings.dshFiveHourThresholdPercent : settings.autoPauseFiveHourThresholdPercent;
+  const weeklyThreshold = dsh ? settings.dshWeeklyThresholdPercent : settings.autoPauseWeeklyThresholdPercent;
 
   return (
     <div className="h-screen overflow-hidden bg-[#F5F6F8] dark:bg-slate-900 text-slate-800 dark:text-slate-100 p-5 flex flex-col font-sans select-none">
@@ -216,15 +220,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <select
               id="usage-provider"
               value={settings.provider}
-              onChange={(e) => updateField('provider', e.target.value as OverlaySettings['provider'])}
+              onChange={(e) => {
+                const provider = e.target.value as OverlaySettings['provider'];
+                onPatchSettings(provider === 'dsh' ? { provider, autoResumeAfterQuotaReset: false } : { provider }, false);
+              }}
               className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500"
             >
               <option value="codex">{t('providerCodex')}</option>
+              <option value="dsh">{t('providerDsh')}</option>
               <option value="claude">{t('providerClaude')}</option>
             </select>
           </div>
 
           {claude && <ClaudeConnectionView settings={settings} onPatchSettings={onPatchSettings} />}
+          {dsh && <DshConnectionView settings={settings} onPatchSettings={onPatchSettings} />}
 
           <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
             <span className="text-sm font-medium">{t('refreshInterval')}</span>
@@ -260,18 +269,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <div className="flex justify-between items-center text-sm font-semibold">
                   <span>{t('autoPauseFiveHourThreshold')}</span>
                   <span className="font-mono text-cyan-600 dark:text-cyan-400 text-sm">
-                    {settings.autoPauseFiveHourThresholdPercent}%
+                    {fiveHourThreshold}%
                   </span>
                 </div>
                 <input
                   aria-label={t('autoPauseFiveHourThreshold')}
                   type="range"
-                  min="1"
+                  min={dsh ? 0 : 1}
                   max="15"
                   step="1"
                   disabled={autoPauseDisabled}
-                  value={settings.autoPauseFiveHourThresholdPercent}
-                  onChange={(e) => onPatchSettings({ autoPauseFiveHourThresholdPercent: parseInt(e.target.value, 10) }, true)}
+                  value={fiveHourThreshold}
+                  onChange={(e) => onPatchSettings(dsh
+                    ? { dshFiveHourThresholdPercent: parseInt(e.target.value, 10) }
+                    : { autoPauseFiveHourThresholdPercent: parseInt(e.target.value, 10) }, true)}
                   className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:cursor-not-allowed"
                 />
               </div>
@@ -280,26 +291,29 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <div className="flex justify-between items-center text-sm font-semibold">
                   <span>{t('autoPauseWeeklyThreshold')}</span>
                   <span className="font-mono text-cyan-600 dark:text-cyan-400 text-sm">
-                    {settings.autoPauseWeeklyThresholdPercent}%
+                    {weeklyThreshold}%
                   </span>
                 </div>
                 <input
                   aria-label={t('autoPauseWeeklyThreshold')}
                   type="range"
-                  min="1"
+                  min={dsh ? 0 : 1}
                   max="10"
                   step="1"
                   disabled={autoPauseDisabled}
-                  value={settings.autoPauseWeeklyThresholdPercent}
-                  onChange={(e) => onPatchSettings({ autoPauseWeeklyThresholdPercent: parseInt(e.target.value, 10) }, true)}
+                  value={weeklyThreshold}
+                  onChange={(e) => onPatchSettings(dsh
+                    ? { dshWeeklyThresholdPercent: parseInt(e.target.value, 10) }
+                    : { autoPauseWeeklyThresholdPercent: parseInt(e.target.value, 10) }, true)}
                   className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:cursor-not-allowed"
                 />
               </div>
             </div>
 
             <p className="px-1 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-              {t(claude ? 'claudeGuardHint' : 'autoPauseHint')}
+              {t(claude ? 'claudeGuardHint' : dsh ? 'dshPauseHint' : 'autoPauseHint')}
             </p>
+            {dsh && <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('quotaThresholdZeroHint')}</p>}
             {!claude && <ProtectionStatusView settings={settings} onPatchSettings={onPatchSettings} />}
           </div>
 

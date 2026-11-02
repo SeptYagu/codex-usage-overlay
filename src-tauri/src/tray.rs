@@ -81,7 +81,7 @@ pub fn tray_presentation(
     };
     let visible_usage = if status == TrayReadStatus::Success { usage } else { None };
     let claude = settings.provider == crate::config::Provider::Claude;
-    let tooltip = match status {
+    let mut tooltip = match status {
         TrayReadStatus::Pending => "Codex Usage Overlay".to_string(),
         TrayReadStatus::Error => match (crate::commands::resolve_locale(&settings.language), claude) {
             ("zh-CN", false) => "Codex 用量读取失败",
@@ -107,6 +107,9 @@ pub fn tray_presentation(
             parts.join(" | ")
         }
     };
+    if settings.provider == crate::config::Provider::Dsh {
+        tooltip = format!("DSH | {tooltip}");
+    }
     TrayPresentation {
         icon: generate_quota_icon(mode,
             visible_usage.and_then(|u| u.five_hour_remaining_percent).map(|p| p as f64),
