@@ -1,5 +1,7 @@
 # Handoff index
 
+2026-11-02 DSH test gate: [implementation and offline regression evidence](2026-11-02-dsh-implementation-tests.md). Main library 415 passed / 7 ignored, Claude helper 10 passed, frontend 153 passed, companion 15 passed on Node 22 and 24; production build and 7 packaging cases passed. Real DSH installation/delivery and visual WebView acceptance remain unverified; first release is a preview.
+
 2026-11-02 DSH implementation: independent provider, instance/account namespaced history, generation-guarded readings and opt-in selected-session cooperative pause. A restricted zero-dependency companion supplies Desktop pairing without reading Host/OAuth secrets. [User setup and limits](../dsh-subscription.md), [companion protocol](../../integrations/dsh-bridge/README.md). The read-only investigation below is historical; real DSH installation/pause remains a separate user acceptance step.
 
 2026-11-02 DSH Codex subscription adaptation: [feasibility and isolation boundaries](2026-11-02-dsh-subscription-adaptation-report.md), baseline `b318d12` (v1.5.1), installed subscription plugin 3.2.3. Read-only investigation: use plugin-owned quota snapshots, never route DSH quota into the local Codex desktop pause bridge; require source/instance/account identity and generation checks. Distinguishes cooperative pause messages, DSH-side request gating and the plugin's existing short-window quota retry. No feature implementation or real pause verification.

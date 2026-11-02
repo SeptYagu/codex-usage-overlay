@@ -15,6 +15,9 @@ use crate::config::{ConfigManager, OverlaySettings, Provider};
 use crate::notify::{PendingResetFetches, ResetStateFile};
 use crate::tray::{open_settings_window as show_settings_win, TrayPresentationSink, TrayReadStatus};
 
+#[cfg(test)]
+mod dsh_tests;
+
 pub struct AppState {
     pub client: Mutex<CodexClient>,
     pub refresh_guard: Mutex<()>,

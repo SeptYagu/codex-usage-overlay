@@ -255,10 +255,6 @@ impl ConfigManager {
         &self.runtime_dir
     }
 
-    pub fn set_provider(&self, provider: Provider) {
-        self.set_source(&OverlaySettings { provider, ..Default::default() });
-    }
-
     pub fn set_source(&self, settings: &OverlaySettings) {
         let key = source_key(settings);
         *self.namespace.lock().unwrap_or_else(|p| p.into_inner()) =

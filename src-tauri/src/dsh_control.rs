@@ -113,6 +113,20 @@ mod tests {
             credits_display: "—".into(), credits_balance: None, has_credits: false, fetched_at: 1000 };
         (settings, raw)
     }
+    #[test] fn queued_cancellation_does_not_consume_attempt_and_switch_preserves_dispatches() {
+        let mut control = ControlState::default();
+        control.running = true;
+        let queued_epoch = control.epoch;
+        control.invalidate();
+        assert!(!control.begin_attempt(queued_epoch, &["cycle/session".into()]));
+        assert!(control.attempted.is_empty());
+        control.running = true;
+        assert!(control.begin_attempt(control.epoch, &["cycle/session".into()]));
+        control.invalidate();
+        assert!(control.attempted.contains("cycle/session"));
+        control.reset();
+        assert!(control.attempted.is_empty(), "only explicit re-pair clears the ledger");
+    }
     #[test] fn exhausted_means_raw_100_not_rounded_ui_zero() {
         let (settings, mut raw) = setup();
         assert_eq!(trigger_cycles(&settings, &raw, 1000), vec!["five:2000"]);

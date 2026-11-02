@@ -45,6 +45,10 @@ jobs:
           npm run build
           npm test
 
+      - name: DSH Companion Offline Security Tests
+        shell: pwsh
+        run: node --test integrations/dsh-bridge/test/*.test.js
+
       - name: Rust Unit & Integration Tests
         shell: pwsh
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked

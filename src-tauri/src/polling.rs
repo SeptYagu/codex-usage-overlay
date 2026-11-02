@@ -199,6 +199,20 @@ mod tests {
         assert_eq!(poll.effective_interval_seconds, 15);
     }
     #[test]
+    fn dsh_cadence_uses_its_own_thresholds_not_local_codex_defaults() {
+        let now = Instant::now();
+        let mut settings = settings();
+        settings.provider = crate::config::Provider::Dsh;
+        let mut poll = PollState::default();
+        poll.completed(&settings, Some(&usage(Some(9), Some(9))), now);
+        assert_eq!(poll.effective_interval_seconds, 60, "DSH 0% thresholds ignore local 5%/2%");
+        poll.completed(&settings, Some(&usage(Some(5), Some(9))), now);
+        assert_eq!(poll.effective_interval_seconds, 15);
+        settings.dsh_five_hour_threshold_percent = 10;
+        poll.completed(&settings, Some(&usage(Some(15), Some(50))), now);
+        assert_eq!(poll.effective_interval_seconds, 15);
+    }
+    #[test]
     fn errors_back_off_and_long_reads_do_not_catch_up() {
         let now = Instant::now();
         let mut poll = PollState::default();
