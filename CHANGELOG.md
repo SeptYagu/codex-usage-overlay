@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0-preview.1] - 2026-11-02
+
+### Added
+- Independent DSH Codex subscription source with explicit instance/account/session selection, isolated histories and source-generation guards. Failed DSH reads never fall back to the local Codex account.
+- Restricted zero-dependency Desktop companion (`dsh-codex-usage-overlay-bridge-0.1.0.tgz`) with private loopback pairing, exact RPC schemas, bounded requests and Windows ACL enforcement. Host/OAuth credentials are not read or copied.
+- Opt-in cooperative pause for explicitly bound, running ordinary DSH sessions. DSH thresholds default to 0% and are separate from local Codex; dispatch requires fresh matching quota and active-account observations.
+
+### Safety and validation
+- DSH requests only send fixed localized pause text through `steer`, not a hard interruption or automatic resume. Accepted requests are not proof that the model stopped; a fully exhausted account may be unable to process the message.
+- Source changes and cancellation revoke unsent actions. Once transport begins, uncertain outcomes are not retried automatically; instance/account/session/quota-cycle attempts survive source switches in the current process.
+- Local validation: 415 main-library and 10 helper Rust tests passed (7 ignored), 153 frontend tests passed, 15 companion tests passed on both Node 22 and 24, production build and packaging checks passed. Actual DSH installation, live delivery and visual WebView acceptance remain unverified, so the first DSH release is a preview.
+
 ## [1.5.1] - 2026-11-01
 
 ### Fixed

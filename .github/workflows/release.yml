@@ -51,6 +51,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
           npm test
           if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed.' }
+          node --test integrations/dsh-bridge/test/*.test.js
+          if ($LASTEXITCODE -ne 0) { throw 'DSH companion tests failed.' }
           cargo test --manifest-path src-tauri/Cargo.toml --locked
           if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
           # NSIS and MSI ship every Cargo binary that exists at bundle time, so the
@@ -71,6 +73,7 @@ jobs:
           $releaseTag = "${{ github.event.inputs.tag }}"
           if (-not $releaseTag) { $releaseTag = $env:GITHUB_REF_NAME }
           .\scripts\Build-TauriRelease.ps1 -Tag $releaseTag -OutputDirectory "$env:RUNNER_TEMP\codex-usage-release"
+          .\scripts\Package-DshCompanion.ps1 -OutputDirectory "$env:RUNNER_TEMP\codex-usage-release"
 
       - name: Publish GitHub Release
         shell: pwsh

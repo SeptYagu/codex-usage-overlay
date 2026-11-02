@@ -47,7 +47,10 @@ jobs:
 
       - name: DSH Companion Offline Security Tests
         shell: pwsh
-        run: node --test integrations/dsh-bridge/test/*.test.js
+        run: |
+          node --test integrations/dsh-bridge/test/*.test.js
+          if ($LASTEXITCODE -ne 0) { throw 'DSH companion tests failed.' }
+          ./scripts/Package-DshCompanion.ps1 -OutputDirectory "$env:RUNNER_TEMP/dsh-companion-check"
 
       - name: Rust Unit & Integration Tests
         shell: pwsh

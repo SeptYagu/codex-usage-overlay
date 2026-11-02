@@ -37,7 +37,7 @@
 | companion 15 项在 Node 22/24 运行 | Host/Origin/Bearer、重复头、固定 allowlist/schema、body/response 限制、超时、卸载取消、ACL、替换记录与目录链接防护通过 | [桥回归](../../integrations/dsh-bridge/test/bridge.test.js) |
 | 前端 provider/generation 与 DSH 设置回归 | 不自动选择实例/账户/目标；旧发现/配对/刷新结果不能覆盖新选择；DSH 不显示本机恢复动作 | [连接回归](../../src/components/DshConnection.test.tsx)、[来源回归](../../src/usageSource.test.ts)、[App 回归](../../src/App.test.tsx) |
 
-CI 已加入 Node 22 的 companion 测试，见 [CI 配置](../../.github/workflows/ci.yml)。制作提交 `f9c4974` 的远端 CI 通过；测试提交 `e132dbb` 首次加入 companion gate 后，远端 10 项在安全发现初始化阶段失败，本机 Node 22/24 仍全部通过。已补充对提权 Windows 创建者默认 `BUILTIN\\Administrators` 所有权的兼容：仅提权进程可将此组所有权转为自身用户，正常用户不请求多余 WRITE_OWNER，其他用户所有权仍拒绝；DACL 仍限定当前用户和 SYSTEM 并回读验证。修正后本机 Node 22 的 15 项再次通过。修正的远端 CI 与发布以对应 GitHub run 为准，不将本机通过当成远端通过。
+CI 已加入 Node 22 的 companion 测试，见 [CI 配置](../../.github/workflows/ci.yml)。制作提交 `f9c4974` 的远端 CI 通过；测试提交 `e132dbb` 首次加入 companion gate 后，远端 10 项在安全发现初始化阶段失败，本机 Node 22/24 仍全部通过。已补充对提权 Windows 创建者默认 `BUILTIN\\Administrators` 所有权的兼容：仅提权进程可将此组所有权转为自身用户，正常用户不请求多余 WRITE_OWNER，其他用户所有权仍拒绝；DACL 仍限定当前用户和 SYSTEM 并回读验证。修正后本机 Node 22 的 15 项再次通过。修正提交 `d0c5ed0` 的 [远端 CI 41406807679](https://github.com/SeptYagu/codex-usage-overlay/actions/runs/41406807679) 已全部通过，包括 companion 的 Windows 实测和 Rust 门禁；发布版仍由 tag 管线再次验证。
 
 ## 尚未验证与发布策略
 

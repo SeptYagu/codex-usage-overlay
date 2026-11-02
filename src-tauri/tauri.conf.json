@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "codex-usage-overlay",
-  "version": "1.5.1",
+  "version": "1.6.0-preview.1",
   "identifier": "com.codex.usage.overlay",
   "build": {
     "frontendDist": "../dist",
@@ -60,6 +60,9 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "wix": {
+        "version": "1.6.0.1"
+      },
       "nsis": {
         "installerIcon": "icons/icon.ico"
       }
