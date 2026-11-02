@@ -24,9 +24,18 @@ try {
     $inherit = [Security.AccessControl.InheritanceFlags]::None
   }
   $acl.SetAccessRuleProtection($true, $false)
-  # Do not mark the owner section modified: Windows can require WRITE_OWNER
-  # even when setting the existing owner. Verify ownership below, fail closed
-  # if it is not already this user, and write only the protected DACL.
+  # An unelevated creator already owns the path; do not request WRITE_OWNER
+  # just to rewrite it. Elevated Windows creators (including Actions) instead
+  # default to BUILTIN\Administrators ownership. Only that elevated case may
+  # set its own user as owner; never adopt a path owned by another user.
+  if ($dir) { $before = [IO.Directory]::GetAccessControl($p) }
+  else { $before = [IO.File]::GetAccessControl($p) }
+  $owner = $before.GetOwner([Security.Principal.SecurityIdentifier]).Value
+  if ($owner -ne $me.Value) {
+    $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+    if ($owner -ne 'S-1-5-32-544' -or -not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 1 }
+    $acl.SetOwner($me)
+  }
   foreach ($sid in @($me, $system)) {
     $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid,
       [Security.AccessControl.FileSystemRights]::FullControl, $inherit,
