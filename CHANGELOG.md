@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-03
+
+### Added
+- Automatic DSH Desktop discovery and connection through its official CLI and bundled companion 0.1.1. Enabled DSH monitoring continues while another provider is displayed; subscription accounts are selected for reading, while pause targets always require explicit authorization.
+- Stable multi-provider monitoring, independent protection, cached logo switching, remembered visibility and selected-provider tray rendering from the 1.6.0 previews.
+
+### Fixed
+- Integrate DSH connection changes with per-provider commit gates and cancellation. Background disconnect clears saved bindings; stale generic settings patches cannot bypass connection-revision checks for pause targets.
+- Clarify localized settings and fix collapsed percentage-grid rendering and scaling; the grid setting is visible only when edge auto-hide is enabled.
+
 ## [1.6.0-preview.4] - 2026-11-03
 
 ### Fixed

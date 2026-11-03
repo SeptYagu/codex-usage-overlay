@@ -1,5 +1,11 @@
 # Status
 
+## v1.6.0 stable release — 2026-11-03
+
+- Reviewed and merged `feat/dsh-auto-connect` as `47db6e7`, adapting its singleton and binding commands to independent background providers. Removed the merged local and remote `tauri-rewrite` branch.
+- Integration fixes cover background attach/bind/disconnect, display-switch stability, disabled-monitor handshake cancellation, and guarded target revisions. All 18 DSH transport regressions pass. Final release validation and remaining native limits are recorded in the [release notes](docs/releases/v1.6.0.md).
+- Version was explicitly confirmed as `v1.6.0` stable; existing v1.5.0/v1.5.1 releases remain unchanged. Preview.4's earlier publication workflow was canceled and no preview.4 release exists.
+
 ## v1.6.0-preview.4 preparation — 2026-11-03
 
 - Preview.3 was pushed and published successfully. A final-review DSH reconnect cancellation race is fixed in this follow-up; the published tag is unchanged.
