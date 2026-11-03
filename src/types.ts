@@ -16,7 +16,32 @@ export interface CodexUsage {
 
 export type Provider = 'codex' | 'dsh' | 'claude';
 
+export interface ProviderPreference {
+  monitorEnabled: boolean;
+  protectionEnabled: boolean;
+  fiveHourThresholdPercent: number;
+  weeklyThresholdPercent: number;
+}
+
+export type SettingsPatch = Partial<Omit<OverlaySettings, 'providerPreferences'>> & {
+  providerPreferences?: Partial<Record<Provider, Partial<ProviderPreference>>>;
+};
+
+export interface MonitorSnapshot {
+  provider: Provider;
+  sourceKey: string;
+  sourceGeneration: number;
+  revision: number;
+  monitorEnabled: boolean;
+  available: boolean;
+  health: 'disabled' | 'checking' | 'current' | 'stale' | 'failed' | 'needsSetup';
+  error: string | null;
+  usage: CodexUsage | null;
+}
+
 export interface OverlaySettings {
+  schemaVersion?: number;
+  providerPreferences?: Partial<Record<Provider, ProviderPreference>>;
   provider: Provider;
   // Public instance origin only; pairing tokens never enter settings.
   dshBaseUrl: string;

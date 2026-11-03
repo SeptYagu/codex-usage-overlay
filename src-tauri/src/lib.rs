@@ -8,18 +8,16 @@ mod dsh_control;
 mod notify;
 mod pause_control;
 mod polling;
+mod monitor;
 mod tray;
 mod update_channel;
 #[cfg(windows)]
 mod audio;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use tauri::{AppHandle, Listener, Manager};
-use tokio::sync::Mutex;
 
-use codex::{BurnRateTracker, CodexClient};
 use commands::AppState;
 use config::ConfigManager;
 use tray::setup_tray;
@@ -30,49 +28,13 @@ pub fn run() {
     let initial_settings = config_manager.load_settings();
     // Before any provider-specific state is loaded below.
     config_manager.set_source(&initial_settings);
-    if let Err(error) = claude::install::write_guard_config(config_manager.runtime_dir(), &initial_settings) {
+    if let Err(error) = config_manager.save_settings_checked(&initial_settings) { eprintln!("Could not save migrated settings: {error}"); }
+    if let Err(error) = claude::install::write_guard_config(config_manager.runtime_dir(), &initial_settings.for_provider(config::Provider::Claude)) {
         eprintln!("Could not write the Claude guard preferences: {error}");
     }
 
-    let app_state = Arc::new(AppState {
-        client: Mutex::new(CodexClient::new()),
-        refresh_guard: Mutex::new(()),
-        source_generation: AtomicU64::new(0),
-        dsh: Default::default(),
-        dsh_control: std::sync::Mutex::new(Default::default()),
-        last_refresh_result: std::sync::Mutex::new(None),
-        reader: std::sync::Mutex::new(codex::reader::ReaderState::load(&config_manager)),
-        polling: std::sync::Mutex::new(polling::PollState::default()),
-        poll_wake: tokio::sync::Notify::new(),
-        protection_status: std::sync::Mutex::new(Default::default()),
-        resume: Mutex::new(pause_control::resume::ResumeManager::load(&config_manager)),
-        resume_update: Mutex::new(()),
-        burn_rate: Mutex::new(BurnRateTracker::load(&config_manager)),
-        settings_patch: Mutex::new(()),
-        config_manager: config_manager.clone(),
-        dock: dock::DockManager::new(config_manager.clone()),
-        last_usage: Mutex::new(None),
-        claude_live: std::sync::Mutex::new(Default::default()),
-        tray_read_status: Mutex::new(tray::TrayReadStatus::Pending),
-        settings: Mutex::new(initial_settings.clone()),
-        settings_revision: AtomicU64::new(0),
-        last_valid_settings_geometry: std::sync::Mutex::new(None),
-        tray_menu_focus: std::sync::Mutex::new(tray::TrayMenuFocusState::default()),
-        autostart_update: Mutex::new(()),
-        update_check: Mutex::new(()),
-        update_install: Mutex::new(()),
-        update_installing: std::sync::atomic::AtomicBool::new(false),
-        pending_update: Mutex::new(None),
-        prepared_update: std::sync::Mutex::new(None),
-        available_update: Mutex::new(None),
-        update_error: Mutex::new(None),
-        last_auto_notified_version: Mutex::new(None),
-        reset_state: Mutex::new(notify::load_reset_state(&config_manager)),
-        pending_reset_fetches: Mutex::new(notify::PendingResetFetches::default()),
-        auto_pause: std::sync::Mutex::new(pause_control::AutoPauseController::new()),
-        #[cfg(windows)]
-        audio: std::sync::OnceLock::new(),
-    });
+    let app_state = Arc::new(AppState::new(config_manager.clone(), initial_settings.clone()));
+    monitor::initialize(&app_state, &initial_settings);
 
     let app_state_clone = app_state.clone();
     let window_state = app_state.clone();
@@ -140,10 +102,14 @@ pub fn run() {
             tray::handle_menu_action(app, event.id().as_ref());
         })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<Arc<AppState>>().inner().clone();
+                if let Some(window) = app.get_webview_window("main") {
+                    if !window.is_visible().unwrap_or(false) { dock::toggle_overlay_window(&app, &state).await; }
+                    let _ = window.set_focus();
+                }
+            });
         }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -157,6 +123,8 @@ pub fn run() {
             commands::fetch_usage,
             commands::get_last_usage,
             commands::get_settings,
+            monitor::get_monitor_snapshots,
+            monitor::cycle_display_provider,
             commands::dsh_discover,
             commands::dsh_connection_status,
             commands::dsh_connect,
@@ -221,6 +189,10 @@ pub fn run() {
             // Setup main overlay window position and initial size
             if let Some(main_win) = app.get_webview_window("main") {
                 dock::restore_startup(&main_win, &app_state_clone.dock, &initial_settings);
+                if !tray_ready && app_state_clone.dock.info().hidden {
+                    app_state_clone.dock.set_manual_hidden(false);
+                    let _ = main_win.show();
+                }
                 if let Err(error) = dock::install_native_window_hook(&main_win, app.handle()) {
                     eprintln!("Could not install the main window event hook: {error}");
                 }
@@ -259,30 +231,21 @@ pub fn run() {
                 dock::menu_changed(&menu_app, &menu_state, false);
             });
 
-            // Background polling loop
-            let handle = app.handle().clone();
-            let state_for_ticker = app_state_clone.clone();
-
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    polling::wait_until_due(&state_for_ticker).await;
-                    let _ = fetch_usage_background(&handle, &state_for_ticker).await;
-                }
-            });
-
-            // Publish protection changes and retry read-only connection health.
+            monitor::start(app.handle(), &app_state_clone);
             let status_handle = app.handle().clone();
             let status_state = app_state_clone.clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    let codex_protection = {
-                        let settings = status_state.settings.lock().await;
-                        settings.auto_pause_on_low_quota && settings.provider == config::Provider::Codex
-                    };
-                    if codex_protection {
-                        pause_control::probe_bridge_status(&status_state);
+                    if let Some(registry) = status_state.monitors.get() {
+                        for runtime in registry.all() {
+                            let settings = runtime.settings.lock().await.clone();
+                            if settings.auto_pause_on_low_quota && settings.provider == config::Provider::Codex {
+                                pause_control::probe_bridge_status(&runtime);
+                            }
+                            pause_control::status::publish(&status_handle, &runtime).await;
+                        }
+                        registry.publish(&status_handle).await;
                     }
-                    pause_control::status::publish(&status_handle, &status_state).await;
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             });
@@ -346,6 +309,7 @@ pub fn run() {
                         );
                     }
                 }
+                if let Some(registry) = app.state::<Arc<AppState>>().monitors.get() { registry.shutdown(); }
                 commands::shutdown_audio(app);
                 commands::install_prepared_update_on_exit(app, app.state::<Arc<AppState>>().inner());
             }
@@ -494,7 +458,14 @@ pub fn apply_tray_menu_focus_event<W: TrayMenuFocusWindowOps>(
 }
 
 pub(crate) async fn fetch_usage_background(handle: &AppHandle, state: &Arc<AppState>) {
-    let _ = commands::refresh_usage(handle, state).await;
+    let provider = state.settings.lock().await.provider;
+    let runtime = monitor::selected(state, provider);
+    refresh_provider_background(handle, &runtime).await;
+}
+pub(crate) async fn refresh_provider_background(handle: &AppHandle, state: &Arc<AppState>) {
+    if state.monitor_enabled.load(std::sync::atomic::Ordering::Acquire) {
+        let _ = commands::refresh_usage(handle, state).await;
+    }
 }
 
 #[cfg(test)]

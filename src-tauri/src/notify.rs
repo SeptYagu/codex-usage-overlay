@@ -152,13 +152,22 @@ pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Ar
         let mut status = state.tray_read_status.lock().await;
         let mut cached = state.last_usage.lock().await;
         *cached = Some(usage.clone());
+        if usage.five_hour_remaining_percent.is_some() || usage.week_remaining_percent.is_some() || usage.has_credits {
+            state.has_reading.store(true, std::sync::atomic::Ordering::Release);
+        }
         *status = TrayReadStatus::Success;
-        sink.present(crate::tray::tray_presentation(&settings, cached.as_ref(), *status));
+        {
+            let _tray = state.tray_gate.lock().unwrap_or_else(|p| p.into_inner());
+            if state.is_displayed() { sink.present(crate::tray::tray_presentation(&settings, cached.as_ref(), *status)); }
+        }
         settings.clone()
     };
     if let Some(app) = sink.app_handle() {
         let _ = app.emit("usage_updated", crate::commands::usage_envelope(state, &settings, usage.clone()));
-        crate::dock::keep_docked_in_work_area(app, state).await;
+        if state.is_displayed() {
+            let owner = state.owner.get().and_then(|w| w.upgrade()).unwrap_or_else(|| state.clone());
+            crate::dock::keep_docked_in_work_area(app, &owner).await;
+        }
 
         if let Err(error) = maybe_notify_cycle(
             app,
@@ -262,7 +271,11 @@ fn show_quota_reset(
     sound_path: Option<String>,
     language: &str,
 ) -> Result<(), String> {
-    let (title, body) = notification_copy(kind, language);
+    let (base_title, body) = notification_copy(kind, language);
+    let provider = state.runtime_provider.map(|p| p.key()).unwrap_or("codex");
+    let provider = match provider { "claude" => "Claude", "dsh" => "DSH", _ => "Codex" };
+    let title = format!("{provider} — {base_title}");
+    let title = title.as_str();
     match sound_mode {
         SoundMode::Windows => show_default_notification(app, title, body),
         SoundMode::Custom => {
@@ -409,7 +422,7 @@ fn post_reset_fetch_target(existing: Option<i64>, accepted: Option<i64>, now: i6
 }
 
 async fn schedule_post_reset_fetch(
-    app: &AppHandle,
+    _app: &AppHandle,
     state: &Arc<AppState>,
     kind: QuotaKind,
     accepted_boundary: Option<i64>,
@@ -425,7 +438,6 @@ async fn schedule_post_reset_fetch(
         previous.task.abort();
     }
 
-    let app = app.clone();
     let state = state.clone();
     let deadline = boundary.saturating_add(POST_RESET_GRACE_SECS);
     let wait = Duration::from_secs((deadline - now) as u64);
@@ -442,7 +454,11 @@ async fn schedule_post_reset_fetch(
             }
             *slot = None;
         }
-        let _ = app.emit("trigger_refresh", ());
+        if state.monitor_enabled.load(std::sync::atomic::Ordering::Acquire) {
+            // This boundary belongs to this provider, even when another is shown.
+            state.polling.lock().unwrap_or_else(|p| p.into_inner()).request_now(std::time::Instant::now());
+            state.poll_wake.notify_one();
+        }
     });
     *slot = Some(PendingFetch { boundary, task });
 }

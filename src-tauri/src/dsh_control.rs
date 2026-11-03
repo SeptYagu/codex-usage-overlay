@@ -3,7 +3,7 @@
 use crate::{codex::RawCodexUsage, commands::AppState, config::{OverlaySettings, Provider}};
 use std::{collections::HashSet, sync::{Arc, atomic::Ordering}};
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ControlState {
     epoch: u64,
     attempted: HashSet<String>,

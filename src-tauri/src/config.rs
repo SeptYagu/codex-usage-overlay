@@ -31,6 +31,25 @@ pub enum Provider {
     Codex,
 }
 
+impl Provider {
+    pub const ALL: [Self; 3] = [Self::Codex, Self::Claude, Self::Dsh];
+    pub fn index(self) -> u8 { match self { Self::Codex => 0, Self::Claude => 1, Self::Dsh => 2 } }
+    pub fn key(self) -> &'static str { match self { Self::Codex => "codex", Self::Claude => "claude", Self::Dsh => "dsh" } }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProviderPreference {
+    pub monitor_enabled: bool,
+    pub protection_enabled: bool,
+    pub five_hour_threshold_percent: u32,
+    pub weekly_threshold_percent: u32,
+}
+impl Default for ProviderPreference {
+    fn default() -> Self { Self { monitor_enabled: true, protection_enabled: false,
+        five_hour_threshold_percent: 5, weekly_threshold_percent: 2 } }
+}
+
 /// A non-secret identity used by persistence and UI delivery. Never include a
 /// launch URL/cookie in this key. The explicit provider prevents a DSH account
 /// from aliasing a local Codex account with the same display name or id.
@@ -64,6 +83,10 @@ pub fn same_source(left: &OverlaySettings, right: &OverlaySettings) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlaySettings {
+    #[serde(default)]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub provider_preferences: std::collections::BTreeMap<String, ProviderPreference>,
     /// Codex by default, so an upgraded profile keeps reading Codex.
     #[serde(default)]
     pub provider: Provider,
@@ -164,6 +187,7 @@ fn default_auto_pause_weekly_threshold() -> u32 { 2 }
 impl Default for OverlaySettings {
     fn default() -> Self {
         Self {
+            schema_version: 2, provider_preferences: Default::default(),
             provider: Provider::default(),
             dsh_base_url: String::new(),
             dsh_instance_id: String::new(),
@@ -202,6 +226,71 @@ impl Default for OverlaySettings {
     }
 }
 
+impl OverlaySettings {
+    pub fn migrate(&mut self) {
+        if self.schema_version < 2 || self.provider_preferences.is_empty() {
+            for provider in Provider::ALL {
+                let mut preference = ProviderPreference::default();
+                preference.protection_enabled = provider == self.provider && self.auto_pause_on_low_quota;
+                if provider == Provider::Dsh {
+                    preference.five_hour_threshold_percent = self.dsh_five_hour_threshold_percent;
+                    preference.weekly_threshold_percent = self.dsh_weekly_threshold_percent;
+                } else {
+                    preference.five_hour_threshold_percent = self.auto_pause_five_hour_threshold_percent;
+                    preference.weekly_threshold_percent = self.auto_pause_weekly_threshold_percent;
+                }
+                self.provider_preferences.insert(provider.key().into(), preference);
+            }
+        }
+        self.schema_version = 2;
+        for provider in Provider::ALL {
+            let preference = self.provider_preferences.entry(provider.key().into()).or_insert_with(|| {
+                let mut p = ProviderPreference::default();
+                if provider == Provider::Dsh { p.five_hour_threshold_percent = 0; p.weekly_threshold_percent = 0; }
+                p
+            });
+            if !preference.monitor_enabled { preference.protection_enabled = false; }
+            preference.five_hour_threshold_percent = preference.five_hour_threshold_percent.clamp(if provider == Provider::Dsh {0} else {1}, 15);
+            preference.weekly_threshold_percent = preference.weekly_threshold_percent.clamp(if provider == Provider::Dsh {0} else {1}, 10);
+        }
+    }
+    pub fn preference(&self, provider: Provider) -> ProviderPreference {
+        self.provider_preferences.get(provider.key()).cloned().unwrap_or_else(|| {
+            let mut legacy = self.clone(); legacy.migrate(); legacy.provider_preferences[provider.key()].clone()
+        })
+    }
+    pub fn mirror_display_preferences(&mut self) {
+        let displayed = self.preference(self.provider);
+        self.auto_pause_on_low_quota = displayed.monitor_enabled && displayed.protection_enabled;
+        if self.provider != Provider::Dsh {
+            self.auto_pause_five_hour_threshold_percent = displayed.five_hour_threshold_percent;
+            self.auto_pause_weekly_threshold_percent = displayed.weekly_threshold_percent;
+        }
+        let dsh = self.preference(Provider::Dsh);
+        self.dsh_five_hour_threshold_percent = dsh.five_hour_threshold_percent;
+        self.dsh_weekly_threshold_percent = dsh.weekly_threshold_percent;
+    }
+    pub fn for_provider(&self, provider: Provider) -> Self {
+        let mut scoped = self.clone();
+        let preference = self.preference(provider);
+        scoped.provider = provider;
+        scoped.auto_pause_on_low_quota = preference.monitor_enabled && preference.protection_enabled;
+        scoped.auto_pause_five_hour_threshold_percent = preference.five_hour_threshold_percent;
+        scoped.auto_pause_weekly_threshold_percent = preference.weekly_threshold_percent;
+        scoped.auto_resume_after_quota_reset = false;
+        scoped.provider_preferences.clear();
+        if provider == Provider::Dsh {
+            scoped.dsh_five_hour_threshold_percent = preference.five_hour_threshold_percent;
+            scoped.dsh_weekly_threshold_percent = preference.weekly_threshold_percent;
+        } else {
+            scoped.dsh_base_url.clear(); scoped.dsh_instance_id.clear(); scoped.dsh_account_id.clear(); scoped.dsh_session_ids.clear();
+            scoped.dsh_five_hour_threshold_percent = 0; scoped.dsh_weekly_threshold_percent = 0;
+        }
+        if provider != Provider::Claude { scoped.claude_live_polling = false; }
+        scoped
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowPosition {
     pub left: f64,
@@ -224,6 +313,8 @@ pub struct SettingsWindowGeometry {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DockPersistence {
+    #[serde(default)]
+    pub hidden: bool,
     pub docked: bool,
     pub edge: Option<crate::dock::Edge>,
 }
@@ -234,6 +325,9 @@ pub struct ConfigManager {
     /// Shared by every clone. DSH uses a source/connection/account namespace,
     /// never the original Codex files, even before it has been configured.
     namespace: Arc<Mutex<String>>,
+    /// Provider runtimes bind this once; cloning or changing a legacy root
+    /// manager cannot redirect an in-flight provider write.
+    bound_namespace: Option<String>,
 }
 
 impl ConfigManager {
@@ -241,14 +335,23 @@ impl ConfigManager {
         let runtime_dir = dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("CodexUsageOverlay");
+        // Isolated native smoke sessions never touch the installed app's files.
+        #[cfg(debug_assertions)]
+        let runtime_dir = std::env::var_os("CODEX_OVERLAY_TEST_RUNTIME_DIR")
+            .filter(|value| !value.is_empty()).map(PathBuf::from).unwrap_or(runtime_dir);
         let _ = fs::create_dir_all(&runtime_dir);
-        Self { runtime_dir, namespace: Arc::default() }
+        Self { runtime_dir, namespace: Arc::default(), bound_namespace: None }
     }
 
     #[cfg(test)]
     pub fn with_runtime_dir(runtime_dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(&runtime_dir);
-        Self { runtime_dir, namespace: Arc::default() }
+        Self { runtime_dir, namespace: Arc::default(), bound_namespace: None }
+    }
+
+    pub fn for_source(&self, settings: &OverlaySettings) -> Self {
+        let key = if settings.provider == Provider::Codex { String::new() } else { source_key(settings) };
+        Self { runtime_dir: self.runtime_dir.clone(), namespace: Arc::default(), bound_namespace: Some(key) }
     }
 
     pub fn runtime_dir(&self) -> &Path {
@@ -257,13 +360,17 @@ impl ConfigManager {
 
     pub fn set_source(&self, settings: &OverlaySettings) {
         let key = source_key(settings);
+        if let Some(bound) = &self.bound_namespace {
+            debug_assert_eq!(bound, &if settings.provider == Provider::Codex { String::new() } else { key });
+            return;
+        }
         *self.namespace.lock().unwrap_or_else(|p| p.into_inner()) =
             if settings.provider == Provider::Codex { String::new() } else { key };
     }
 
     /// Local Codex retains its original names for backwards compatibility.
     fn provider_path(&self, name: &str) -> PathBuf {
-        let namespace = self.namespace.lock().unwrap_or_else(|p| p.into_inner());
+        let namespace = self.bound_namespace.clone().unwrap_or_else(|| self.namespace.lock().unwrap_or_else(|p| p.into_inner()).clone());
         if namespace.is_empty() { self.runtime_dir.join(name) }
         else { self.runtime_dir.join(format!("{namespace}-{name}")) }
     }
@@ -320,11 +427,12 @@ impl ConfigManager {
                     if !settings.auto_check_updates {
                         settings.auto_install_updates = false;
                     }
+                    settings.migrate();
                     return settings;
                 }
             }
         }
-        OverlaySettings::default()
+        let mut settings = OverlaySettings::default(); settings.migrate(); settings
     }
 
     pub fn save_settings_checked(&self, settings: &OverlaySettings) -> Result<(), String> {

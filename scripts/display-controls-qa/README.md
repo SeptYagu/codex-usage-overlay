@@ -16,6 +16,8 @@ The runner starts a loopback-only Vite server on port 1427, renders the producti
 
 These checks exercise Edge rendering and simulated DPI. Native WebView2 sizing, OS tray installation, mixed-monitor transitions and live hover capture still require a separate desktop smoke test before packaging or release.
 
+`node scripts/display-controls-qa/multi-provider.cjs` adds 216 cases for mouse/Enter/Space logo switching, provider-specific credits, display/configuration independence, reachable Settings controls, and translations across both themes, layouts, supported window sizes and device scale factors. It accepts the same optional Playwright directory argument. Reports/screenshots go under ignored `output/multi-provider-qa/`.
+
 For focused percentage-grid regression checks, run:
 
 ```powershell

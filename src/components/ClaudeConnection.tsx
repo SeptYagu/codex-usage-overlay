@@ -18,7 +18,7 @@ const STATUS_POLL_MS = 10_000;
  */
 export const ClaudeConnectionView: React.FC<ClaudeConnectionViewProps> = ({ settings, onPatchSettings }) => {
   const { t } = useTranslation();
-  const { status: protection } = useProtectionStatus();
+  const { status: protection } = useProtectionStatus(settings.provider);
   const [status, setStatus] = useState<ClaudeConnectionStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);

@@ -221,7 +221,7 @@ impl AutoPauseStatus {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct StatusCache {
     latest: Option<AutoPauseStatus>,
     emitted_revision: u64,
@@ -413,6 +413,7 @@ fn derive_summary(
 
 pub async fn publish(app: &tauri::AppHandle, state: &AppState) {
     let status = snapshot(state).await;
+    if !state.is_current() { return; }
     let should_emit = {
         let mut cache = state
             .protection_status

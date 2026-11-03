@@ -278,6 +278,35 @@ describe('main usage startup', () => {
     });
   }
 
+  it('switches to cached background readings immediately and never displays another provider’s late update', async () => {
+    const codex = { ...cached, sourceKey: 'codex', sourceGeneration: 0 };
+    const claude = { ...cached, fiveHourRemainingPercent: 41, sourceKey: 'claude', sourceGeneration: 0 };
+    const snapshot = (provider: 'codex' | 'claude', usage: CodexUsage, revision: number) => ({
+      provider, sourceKey: provider, sourceGeneration: 0, revision, monitorEnabled: true, available: true,
+      health: 'current', error: null, usage,
+    });
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === 'get_settings') return { revision: 0, settings: DEFAULT_SETTINGS, sourceKey: 'codex', sourceGeneration: 0 };
+      if (command === 'get_dock_state') return { docked: false, edge: null, expanded: true, hidden: false };
+      if (command === 'get_last_usage') return codex;
+      if (command === 'get_monitor_snapshots') return [snapshot('codex', codex, 1), snapshot('claude', claude, 2)];
+      if (command === 'cycle_display_provider') return { revision: 1, settings: { ...DEFAULT_SETTINGS, provider: 'claude' }, sourceKey: 'claude', sourceGeneration: 0 };
+      if (command === 'fetch_usage') throw new Error('Switching must use cache');
+      return null;
+    });
+    render(<App />);
+    await screen.findByText('69%');
+    const logo = await screen.findByRole('button', { name: 'Showing Local Codex. Click to show Claude.' });
+    fireEvent.click(logo);
+    await screen.findByText('41%');
+    act(() => tauri.listeners.get('monitor_updated')!({ payload: snapshot('codex', { ...codex, fiveHourRemainingPercent: 12 }, 3) }));
+    expect(screen.queryByText('12%')).toBeNull();
+    expect(screen.getByText('41%')).toBeTruthy();
+    act(() => tauri.listeners.get('monitor_updated')!({ payload: snapshot('claude', { ...claude, fiveHourRemainingPercent: 40 }, 4) }));
+    expect(screen.getByText('40%')).toBeTruthy();
+    expect(tauri.invoke).not.toHaveBeenCalledWith('fetch_usage');
+  });
+
   it('registers the usage listener before reading cache and does not auto-fetch', async () => {
     mockCache(cached);
     render(<App />);

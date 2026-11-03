@@ -5,11 +5,13 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { useTranslation } from 'react-i18next';
 import i18n, { updateLanguage } from './i18n';
-import { CodexUsage, DockStateInfo, OverlaySettings, SettingsEnvelope, DEFAULT_SETTINGS } from './types';
+import { CodexUsage, DockStateInfo, OverlaySettings, SettingsEnvelope, DEFAULT_SETTINGS, SettingsPatch } from './types';
 import { OverlayView } from './components/OverlayView';
 import { SettingsView } from './components/SettingsView';
 import { TrayMenuView } from './components/TrayMenuView';
 import { sourceBinding, UsageSourceScope, usageMatchesSource, usageSourceScope } from './usageSource';
+import { useProviderMonitors } from './hooks/useProviderMonitors';
+import { mergeSettingsPatch, mergePendingPatches, settingsForProvider } from './providerSettings';
 
 export const App: React.FC = () => {
   const { t } = useTranslation();
@@ -18,9 +20,9 @@ export const App: React.FC = () => {
   const [settingsLoadState, setSettingsLoadState] = useState<'loading' | 'ready' | 'error'>('loading');
   const settingsRevision = useRef(-1);
   const settingsLoadToken = useRef(0);
-  const pendingPatches = useRef<Partial<OverlaySettings>[]>([]);
+  const pendingPatches = useRef<SettingsPatch[]>([]);
   const patchQueue = useRef<Promise<void>>(Promise.resolve());
-  const sliderPatch = useRef<Partial<OverlaySettings>>({});
+  const sliderPatch = useRef<SettingsPatch>({});
   const sliderTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [usage, setUsage] = useState<CodexUsage | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -30,12 +32,13 @@ export const App: React.FC = () => {
   const sourceScope = useRef<UsageSourceScope | null>(null);
   const currentSettings = useRef(DEFAULT_SETTINGS);
   const pendingUsage = useRef<CodexUsage | null>(null);
+  const monitors = useProviderMonitors();
 
   const applySavedSettings = useCallback((envelope: SettingsEnvelope) => {
     if (envelope.revision < settingsRevision.current) return;
     settingsRevision.current = envelope.revision;
     const serverSettings = { ...DEFAULT_SETTINGS, ...envelope.settings };
-    const merged = Object.assign({}, serverSettings, ...pendingPatches.current, sliderPatch.current);
+    const merged = [...pendingPatches.current, sliderPatch.current].reduce<OverlaySettings>(mergeSettingsPatch, serverSettings);
     // An optimistic source change has no authoritative identity until its save
     // arrives. Do not associate the old envelope's identity with that binding.
     const confirmed = sourceBinding(merged) === sourceBinding(serverSettings);
@@ -161,10 +164,10 @@ export const App: React.FC = () => {
     };
   }, [applySavedSettings, loadSettings, windowLabel]);
 
-  const enqueuePatch = (patch: Partial<OverlaySettings>, optimistic = true) => {
+  const enqueuePatch = (patch: SettingsPatch, optimistic = true) => {
     pendingPatches.current.push(patch);
     if (optimistic) {
-      const merged = { ...currentSettings.current, ...patch };
+      const merged = mergeSettingsPatch(currentSettings.current, patch);
       if (sourceBinding(merged) !== sourceBinding(currentSettings.current)) {
         sourceScope.current = { binding: sourceBinding(merged), allowLegacy: false };
         pendingUsage.current = null;
@@ -199,10 +202,10 @@ export const App: React.FC = () => {
     if (Object.keys(patch).length) enqueuePatch(patch, optimistic);
   };
 
-  const handlePatchSettings = (patch: Partial<OverlaySettings>, debounce = false) => {
+  const handlePatchSettings = (patch: SettingsPatch, debounce = false) => {
     if (debounce) {
-      sliderPatch.current = { ...sliderPatch.current, ...patch };
-      setSettings((current) => ({ ...current, ...patch }));
+      sliderPatch.current = mergePendingPatches(sliderPatch.current, patch);
+      setSettings((current) => mergeSettingsPatch(current, patch));
       if (sliderTimer.current) clearTimeout(sliderTimer.current);
       sliderTimer.current = setTimeout(flushSliderPatch, 250);
     } else {
@@ -247,7 +250,7 @@ export const App: React.FC = () => {
 
   if (windowLabel === 'tray-menu' || window.location.hash === '#tray-menu') {
     if (settingsLoadState !== 'ready') return null;
-    return <TrayMenuView settings={settings} onPatchSettings={handlePatchSettings} />;
+    return <TrayMenuView settings={settingsForProvider(settings, settings.provider)} onPatchSettings={handlePatchSettings} />;
   }
 
   if (windowLabel === 'main' && (settingsLoadState === 'loading' || dockState === null)) return null;
@@ -255,9 +258,16 @@ export const App: React.FC = () => {
   return (
     <OverlayView
       settings={settings}
-      usage={usage}
-      isLoading={isLoading}
+      usage={monitors[settings.provider]
+        ? (monitors[settings.provider]!.usage && usageMatchesSource(monitors[settings.provider]!.usage!, sourceScope.current) ? monitors[settings.provider]!.usage : null)
+        : usage}
+      isLoading={monitors[settings.provider] ? monitors[settings.provider]!.health === 'checking' : isLoading}
       dockState={dockState ?? undefined}
+      monitors={monitors}
+      onCycleProvider={async () => {
+        try { applySavedSettings(await invoke<SettingsEnvelope>('cycle_display_provider')); }
+        catch (error) { console.error('Could not switch displayed provider:', error); }
+      }}
     />
   );
 };

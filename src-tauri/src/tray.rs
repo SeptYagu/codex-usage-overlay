@@ -79,7 +79,9 @@ pub fn tray_presentation(
     } else {
         TrayQuotaMode::WeeklyOnly
     };
-    let visible_usage = if status == TrayReadStatus::Success { usage } else { None };
+    // Retain the selected provider's last reading during transient failures,
+    // just as the overlay does. The tooltip separately reports read health.
+    let visible_usage = usage;
     let claude = settings.provider == crate::config::Provider::Claude;
     let mut tooltip = match status {
         TrayReadStatus::Pending => "Codex Usage Overlay".to_string(),
@@ -121,6 +123,11 @@ pub fn tray_presentation(
 /// Lock settings first in every presentation entry point so refresh/settings
 /// races cannot repaint a saved new preference with an older snapshot.
 pub async fn repaint_tray<S: TrayPresentationSink>(sink: &S, state: &crate::commands::AppState) {
+    let selected = if state.runtime_provider.is_none() { state.monitors.get().map(|r| {
+        r.get(crate::config::Provider::ALL[state.displayed_provider.load(Ordering::Acquire) as usize])
+    }) } else { None };
+    let state = selected.as_deref().unwrap_or(state);
+    if !state.is_displayed() { return; }
     let protection = crate::pause_control::status::snapshot(state).await;
     let settings = state.settings.lock().await;
     let status = state.tray_read_status.lock().await;
@@ -130,7 +137,8 @@ pub async fn repaint_tray<S: TrayPresentationSink>(sink: &S, state: &crate::comm
         presentation.tooltip.push_str("\n");
         presentation.tooltip.push_str(protection.tooltip(&settings.language));
     }
-    sink.present(presentation);
+    let _tray = state.tray_gate.lock().unwrap_or_else(|p| p.into_inner());
+    if state.is_displayed() { sink.present(presentation); }
 }
 
 pub const TRAY_ID: &str = "main-tray";
@@ -1309,13 +1317,13 @@ mod tests {
                         }
                     }
                 }
-                // Failure after success must keep cache but use unavailable tracks.
+                // A failure retains the selected provider's cached ring values.
                 *sink.next_usage.lock().unwrap() = Some(Err("offline read failure".into()));
                 assert!(crate::commands::refresh_usage(&sink, &state).await.is_err());
-                sink.assert_frame(false, None, None, "Codex 用量读取失败");
+                sink.assert_frame(false, Some(80.0), Some(30.0), "Codex 用量读取失败");
                 for dual in [true, false] {
                     crate::commands::apply_settings_patch(&sink, &state, serde_json::json!({"showFiveHourQuota": dual, "language": "zh-Hant"}), false).await.unwrap();
-                    sink.assert_frame(dual, None, None, "Codex 用量讀取失敗");
+                    sink.assert_frame(dual, Some(80.0), Some(30.0), "Codex 用量讀取失敗");
                     assert_eq!(*state.last_usage.lock().await, Some(usage.clone()));
                 }
                 let missing = CodexUsage { week_remaining_percent: None, ..usage };

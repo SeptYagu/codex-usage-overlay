@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { OverlaySettings } from '../types';
+import { OverlaySettings, Provider, ProviderPreference, SettingsPatch } from '../types';
+import { providerPreference, settingsForProvider } from '../providerSettings';
+import { useProviderMonitors } from '../hooks/useProviderMonitors';
 import { APP_VERSION } from '../version';
 import { useTranslation } from 'react-i18next';
 import { SoundPicker } from './SoundPicker';
@@ -11,7 +13,7 @@ import { DshConnectionView } from './DshConnection';
 
 interface SettingsViewProps {
   settings: OverlaySettings;
-  onPatchSettings: (patch: Partial<OverlaySettings>, debounce?: boolean) => void;
+  onPatchSettings: (patch: SettingsPatch, debounce?: boolean) => void;
 }
 
 /**
@@ -21,10 +23,32 @@ interface SettingsViewProps {
  * integrates with the system (refresh cadence, start-up, updates, reset alerts).
  */
 export const SettingsView: React.FC<SettingsViewProps> = ({
-  settings,
-  onPatchSettings,
+  settings: savedSettings,
+  onPatchSettings: savePatch,
 }) => {
   const { t } = useTranslation();
+  const [configurationProvider, setConfigurationProvider] = useState(savedSettings.provider);
+  // Compatibility for legacy callers that have no independent provider preferences.
+  useEffect(() => { if (!savedSettings.providerPreferences) setConfigurationProvider(savedSettings.provider); }, [savedSettings.provider, savedSettings.providerPreferences]);
+  const settings = settingsForProvider(savedSettings, configurationProvider);
+  const preference = providerPreference(savedSettings, configurationProvider);
+  const monitors = useProviderMonitors();
+  const onPatchSettings = (patch: SettingsPatch, debounce = false) => {
+    const fields: Record<string, keyof ProviderPreference> = {
+      autoPauseOnLowQuota: 'protectionEnabled', autoPauseFiveHourThresholdPercent: 'fiveHourThresholdPercent',
+      autoPauseWeeklyThresholdPercent: 'weeklyThresholdPercent', dshFiveHourThresholdPercent: 'fiveHourThresholdPercent',
+      dshWeeklyThresholdPercent: 'weeklyThresholdPercent',
+    };
+    const global: Record<string, unknown> = {};
+    const scoped: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(patch)) {
+      if (fields[key]) scoped[fields[key]] = value; else global[key] = value;
+    }
+    if (Object.keys(scoped).length) {
+      global.providerPreferences = { [configurationProvider]: scoped };
+    }
+    savePatch(global as SettingsPatch, debounce);
+  };
   const [isInstalled, setIsInstalled] = useState<boolean>(false);
   const [notificationStatus, setNotificationStatus] = useState<'enabled' | 'disabled' | 'unavailable' | 'loading'>('loading');
 
@@ -49,7 +73,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const checkbox = 'w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 accent-cyan-500 cursor-pointer';
 
   // The smart-pause thresholds only apply while the master switch is on.
-  const autoPauseDisabled = !settings.autoPauseOnLowQuota;
+  const autoPauseDisabled = !settings.autoPauseOnLowQuota || !preference.monitorEnabled;
   // Claude has no credit balance and is protected by Claude Code hooks instead
   // of a Codex pause request.
   const claude = settings.provider === 'claude';
@@ -163,7 +187,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             />
           </label>
 
-          {!claude && (
+          {savedSettings.provider !== 'claude' && (
             <label className={toggleRow}>
               <span className="text-sm font-medium">{t('showCredits')}</span>
               <input
@@ -237,16 +261,24 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {/* Right column: system integration, updates and reset alerts */}
         <section aria-label={t('notificationSection')} className="min-h-0 space-y-2.5 overflow-y-auto pr-1">
+          <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
+            <label htmlFor="display-provider" className="text-sm font-medium">{t('displayedProvider')}</label>
+            <select id="display-provider" value={savedSettings.provider}
+              onChange={event => savePatch({ provider: event.target.value as Provider })}
+              className="min-w-0 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1">
+              <option value="codex">{t('providerCodex')}</option>
+              <option value="claude">{t('providerClaude')}</option>
+              <option value="dsh">{t('providerDsh')}</option>
+            </select>
+          </div>
+          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('displayedProviderHint')}</p>
           <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
             <label htmlFor="usage-provider" className="text-sm font-medium">{t('usageProvider')}</label>
             <select
               id="usage-provider"
               aria-describedby="usage-provider-hint"
-              value={settings.provider}
-              onChange={(e) => {
-                const provider = e.target.value as OverlaySettings['provider'];
-                onPatchSettings(provider === 'dsh' ? { provider, autoResumeAfterQuotaReset: false } : { provider }, false);
-              }}
+              value={configurationProvider}
+              onChange={(e) => setConfigurationProvider(e.target.value as Provider)}
               className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500"
             >
               <option value="codex">{t('providerCodex')}</option>
@@ -256,6 +288,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
 
           <p id="usage-provider-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('usageProviderHint')}</p>
+          <label className={toggleRow}>
+            <span className="text-sm font-medium">{t('monitorProvider')}</span>
+            <input type="checkbox" className={checkbox} checked={preference.monitorEnabled}
+              onChange={event => savePatch({ providerPreferences: { [configurationProvider]: {
+                monitorEnabled: event.target.checked, ...(!event.target.checked ? { protectionEnabled: false } : {}),
+              } } })} />
+          </label>
+          <p role="status" className="px-1 text-xs text-slate-500 dark:text-slate-400">
+            {t(`monitorHealth.${monitors[configurationProvider]?.health ?? (preference.monitorEnabled ? 'checking' : 'disabled')}`)}
+          </p>
 
           {claude && <ClaudeConnectionView settings={settings} onPatchSettings={onPatchSettings} />}
           {dsh && <DshConnectionView settings={settings} onPatchSettings={onPatchSettings} />}
@@ -287,6 +329,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 type="checkbox"
                 aria-label={t(claude ? 'claudeGuardOnLowQuota' : 'autoPauseOnLowQuota')}
                 checked={settings.autoPauseOnLowQuota}
+                disabled={!preference.monitorEnabled}
                 onChange={(e) => onPatchSettings({ autoPauseOnLowQuota: e.target.checked })}
                 className={checkbox}
               />

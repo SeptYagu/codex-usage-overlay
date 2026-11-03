@@ -37,6 +37,14 @@ Smart Pause requests cooperation from Codex; accepted delivery does not verify s
 
 **Automatic resume after reset** is a separate preference, off by default. It is unavailable on the current connection because exact-turn interruption, completion and later user activity cannot be verified. The guarded resume store uses `pause-resume-state.json` in the same runtime directory; cooperative deliveries cannot create executable plans. Restored pending plans require review, and unknown submission outcomes are never retried automatically. This build sends only pause requests and creates no external "Continue" timers. Older Codex-created continuation tasks remain external and may still run; disabling the overlay does not cancel them.
 
+## Monitor multiple providers
+
+Available enabled local Codex, Claude and DSH sources keep monitoring in the background, with separate readings and burn-rate histories. Click the overlay's provider logo to cycle Codex → Claude → DSH; only sources with an available reading and enabled monitoring are included. Switching displays cached data immediately and leaves monitoring/protection running independently.
+
+Settings separates **Displayed provider** from **Provider settings**. Select a source to configure its monitor and protection without changing the overlay. Disabling its monitor also disables its protection. On upgrade, only the previously selected source inherits an enabled protection switch; other sources start with protection off. Claude live reading remains opt-in; DSH still needs explicit pairing and account/session selection.
+
+Show/hide is remembered across restarts. A hidden overlay launches hidden while monitoring and the tray continue running. The tray icon follows the displayed source and retains its cached quota during a temporary read failure; the tooltip reports the failure. If the tray is unavailable, the overlay is shown for recovery.
+
 ## DSH subscription usage
 
 The independent **DSH** source reads the subscription plugin of an explicitly paired DSH instance, never local Codex limits. Install the companion tarball from the same release, then select the instance, account and ordinary sessions in Settings. History is isolated by instance/account. DSH thresholds are independent and default to 0% remaining.
@@ -45,7 +53,7 @@ Protection sends a cooperative pause message only to selected running sessions; 
 
 ## Claude usage limits
 
-Set **Usage source** to **Claude** in Settings to show your Claude subscription limits (the 5-hour session window and the weekly window) instead of Codex. One source is active at a time; Codex stays the default.
+Choose **Claude** under **Provider settings** to configure its connection and protection. Choose **Claude** under **Displayed provider**, or click the overlay logo, to show its 5-hour and weekly limits. Other available enabled sources continue monitoring.
 
 - Click **Connect Claude Code**. The overlay registers the bundled `claude-usage-bridge.exe` as Claude Code's statusline command and adds two hooks (`UserPromptSubmit`, `PreToolUse`) to `~/.claude/settings.json`, honoring `CLAUDE_CONFIG_DIR`. It backs up the original file once as `settings.json.codex-overlay.bak`. Your existing statusline keeps rendering through the helper, and **Disconnect** restores it and removes only the entries the overlay added. Claude Code applies hook changes to new sessions.
 - By default, limits come from the `rate_limits` data Claude Code passes to its statusline. This needs Claude Code 2.1.80 or later, signed in with a Pro or Max plan; API-key sessions report none. In this mode the overlay reads no Claude credentials and makes no network requests. Values update only while the **terminal `claude` CLI** is in use: the desktop app and IDE extensions never run a statusline.

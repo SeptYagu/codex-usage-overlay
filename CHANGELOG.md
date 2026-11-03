@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0-preview.3] - 2026-11-03
+
+### Added
+- Independent background monitoring and burn-rate histories for all available enabled Codex, Claude and DSH providers. Display selection and per-provider monitoring/protection settings are separate; legacy protection enablement migrates only to the previously selected provider.
+- Click or keyboard-activate the overlay logo to cycle available providers using their cached readings. New controls and descriptions support English, Simplified Chinese and Traditional Chinese.
+
+### Fixed
+- Show/hide state persists across launches; hidden startup avoids a visible flash while monitoring continues.
+- Tray quota rings follow the displayed provider and retain its cached values on temporary read failures. Background providers cannot overwrite the selected icon.
+- Provider-scoped cancellation, immutable history stores and monotonic status revisions preserve source isolation during account changes. DSH attempt deduplication survives account switching and display changes.
+
 ## [1.6.0-preview.2] - 2026-11-02
 
 ### Changed

@@ -10,7 +10,7 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
   onPatchSettings?: (patch: Partial<OverlaySettings>) => void;
 }) {
   const { t } = useTranslation();
-  const { status: observedStatus, unavailable } = useProtectionStatus();
+  const { status: observedStatus, unavailable } = useProtectionStatus(settings.provider);
   // Never render a previous provider's local resume actions after switching.
   const status = observedStatus?.provider === settings.provider ? observedStatus : null;
   const dsh = settings.provider === 'dsh';
@@ -37,14 +37,14 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
   const cancel = async () => {
     setActionError(false);
     setResumeError(null);
-    try { await invoke('cancel_resume_plans'); }
+    try { await invoke('cancel_resume_plans', { provider: settings.provider }); }
     catch { setActionError(true); }
   };
   const resume = async (threadId: string) => {
     setResumingThreadId(threadId);
     setResumeError(null);
     try {
-      await invoke('resume_chat', { threadId });
+      await invoke('resume_chat', { threadId, provider: settings.provider });
     } catch (err: unknown) {
       const errMsg = typeof err === 'string' ? err : err instanceof Error ? err.message : '';
       setResumeError(errMsg.includes('quotaStillLow') ? 'quotaStillLow' : errMsg.includes('quotaStale') ? 'quotaStale' : 'generic');

@@ -90,7 +90,8 @@ describe.each(['grouped', 'stacks'] as const)('%s layout', (overlayLayout) => {
     const { container, rerender } = render(
       <OverlayView settings={{ ...settings, provider, showProviderLogo: true }} usage={{ ...usage, hasCredits: provider !== 'claude' }} isLoading={false} />,
     );
-    const logo = screen.getByRole('img', { name: provider === 'claude' ? 'Claude' : provider === 'dsh' ? 'DSH Codex subscription' : 'Local Codex' });
+    const current = provider === 'claude' ? 'Claude' : provider === 'dsh' ? 'DSH Codex subscription' : 'Local Codex';
+    const logo = screen.getByRole('button', { name: i18n.t('singleProviderHint', { current }) });
     expect(logo.classList.contains('overlay-provider')).toBe(true);
     expect(logo.querySelector('svg')?.getAttribute('data-provider')).toBe(provider);
     // Same position the provider label had: the first element of the capsule.
@@ -421,4 +422,20 @@ it('remeasures docked content immediately when either display preference changes
   await waitFor(() => expect(tauri.setSize).toHaveBeenLastCalledWith(expect.objectContaining({ width: 150, height: 69 })));
   expect(tauri.invoke).toHaveBeenCalledWith('dock_window_resized');
   expect(tauri.invoke).not.toHaveBeenCalledWith('fetch_usage');
+});
+
+it('cycles through available providers on the logo without beginning a drag', async () => {
+  const onCycleProvider = vi.fn(async () => {});
+  const { container } = render(<OverlayView settings={DEFAULT_SETTINGS} usage={usage} isLoading={false}
+    monitors={{ claude: { provider: 'claude', sourceKey: 'claude', sourceGeneration: 0, revision: 1,
+      monitorEnabled: true, available: true, health: 'current', error: null, usage: null } }} onCycleProvider={onCycleProvider} />);
+  const logo = screen.getByRole('button', { name: 'Showing Local Codex. Click to show Claude.' });
+  fireEvent.mouseDown(logo, { button: 0 });
+  await act(async () => { fireEvent.click(logo); });
+  expect(onCycleProvider).toHaveBeenCalledTimes(1);
+  expect(tauri.invoke).not.toHaveBeenCalledWith('start_dragging');
+  fireEvent.mouseDown(container.querySelector('.overlay-capsule')!, { button: 0 });
+  expect(tauri.invoke).toHaveBeenCalledWith('start_dragging');
+  fireEvent.contextMenu(logo);
+  expect(tauri.invoke).toHaveBeenCalledWith('show_overlay_menu');
 });

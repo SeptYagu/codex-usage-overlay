@@ -1,5 +1,9 @@
 # Handoff index
 
+2026-11-03 multi-provider implementation: [implementation, validation and native-access limits](2026-11-03-multi-provider-implementation.md). Independent monitoring/protection, clickable provider logo, preserved show/hide and displayed-provider tray rendering. Target prerelease: `v1.6.0-preview.3`.
+
+2026-11-02 multi-provider monitoring proposal: [background monitoring and logo switching plan](2026-11-02-multi-provider-monitoring-plan.md). Separates displayed provider from independent source runtimes, immutable history stores and independently enabled protection. Includes settings migration, availability semantics, i18n and regression/native acceptance gates. Plan only; no application changes.
+
 2026-11-02 DSH test gate: [implementation and offline regression evidence](2026-11-02-dsh-implementation-tests.md). Main library 415 passed / 7 ignored, Claude helper 10 passed, frontend 153 passed, companion 15 passed on Node 22 and 24; production build and 7 packaging cases passed. Real DSH installation/delivery and visual WebView acceptance remain unverified; first release is a preview.
 
 2026-11-02 DSH implementation: independent provider, instance/account namespaced history, generation-guarded readings and opt-in selected-session cooperative pause. A restricted zero-dependency companion supplies Desktop pairing without reading Host/OAuth secrets. [User setup and limits](../dsh-subscription.md), [companion protocol](../../integrations/dsh-bridge/README.md). The read-only investigation below is historical; real DSH installation/pause remains a separate user acceptance step.

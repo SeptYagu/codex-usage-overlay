@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
-import { CodexUsage, DockStateInfo, OverlaySettings } from '../types';
+import { CodexUsage, DockStateInfo, OverlaySettings, MonitorSnapshot, Provider } from '../types';
 import { useTranslation } from 'react-i18next';
 import { ProviderLogo } from './ProviderLogo';
 
@@ -11,6 +11,8 @@ interface OverlayViewProps {
   usage: CodexUsage | null;
   isLoading: boolean;
   dockState?: DockStateInfo;
+  monitors?: Partial<Record<Provider, MonitorSnapshot>>;
+  onCycleProvider?: () => Promise<void>;
 }
 
 function formatResetCountdown(resetsAt: number | null | undefined, weekly = false): string {
@@ -43,7 +45,7 @@ export function formatBurnRate(rate: number | null | undefined): string {
  */
 const PERCENTAGE_GRID_TICKS = [10, 20, 30, 40, 50, 60, 70, 80, 90];
 
-export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoading, dockState }) => {
+export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoading, dockState, monitors = {}, onCycleProvider }) => {
   const { t } = useTranslation();
   const [, setTick] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -61,6 +63,13 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
   const claude = settings.provider === 'claude';
   const showCredits = settings.showCredits && !claude;
   const showLogo = settings.showProviderLogo;
+  const [switching, setSwitching] = useState(false);
+  const order: Provider[] = ['codex', 'claude', 'dsh'];
+  const nextProvider = [1, 2].map(offset => order[(order.indexOf(settings.provider) + offset) % 3])
+    .find(provider => monitors[provider]?.available && monitors[provider]?.monitorEnabled);
+  const providerLabel = (provider: Provider) => t(provider === 'claude' ? 'providerClaude' : provider === 'dsh' ? 'providerDsh' : 'providerCodex');
+  const logoHint = nextProvider ? t('switchProviderHint', { current: providerLabel(settings.provider), next: providerLabel(nextProvider) })
+    : t('singleProviderHint', { current: providerLabel(settings.provider) });
 
   // WebView2 renders content at devicePixelRatio = monitor DPI scale x system
   // text scaling (Windows "make text bigger"), while Tauri converts window
@@ -269,9 +278,18 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
       >
         {showLogo && (
           <>
-            <span className="overlay-provider" role="img" aria-label={t(claude ? 'providerClaude' : settings.provider === 'dsh' ? 'providerDsh' : 'providerCodex')}>
+            <button type="button" className="overlay-provider" aria-label={logoHint} title={logoHint}
+              disabled={!nextProvider || !onCycleProvider || switching}
+              onMouseDown={event => { event.stopPropagation(); }}
+              onDoubleClick={event => { event.preventDefault(); event.stopPropagation(); }}
+              onClick={async event => {
+                event.stopPropagation();
+                if (!nextProvider || !onCycleProvider || switching) return;
+                setSwitching(true);
+                try { await onCycleProvider(); } finally { setSwitching(false); }
+              }}>
               <ProviderLogo provider={settings.provider} />
-            </span>
+            </button>
             {layout === 'grouped' && <span aria-hidden="true" className="overlay-divider" />}
           </>
         )}

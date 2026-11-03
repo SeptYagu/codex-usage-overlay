@@ -18,11 +18,39 @@ use crate::tray::{open_settings_window as show_settings_win, TrayPresentationSin
 #[cfg(test)]
 mod dsh_tests;
 
+/// Window/updater services are shared by every provider pipeline.
+pub struct AppServices {
+    pub tray_gate: StdMutex<()>,
+    pub dsh: crate::dsh::Manager,
+    pub dock: crate::dock::DockManager,
+    pub last_valid_settings_geometry: StdMutex<Option<crate::config::SettingsWindowGeometry>>,
+    pub tray_menu_focus: StdMutex<crate::tray::TrayMenuFocusState>,
+    pub autostart_update: Mutex<()>,
+    pub update_check: Mutex<()>,
+    pub update_install: Mutex<()>,
+    pub update_installing: AtomicBool,
+    pub pending_update: Mutex<Option<tauri_plugin_updater::Update>>,
+    pub prepared_update: StdMutex<Option<PreparedUpdate>>,
+    pub available_update: Mutex<Option<AvailableUpdate>>,
+    pub update_error: Mutex<Option<String>>,
+    pub last_auto_notified_version: Mutex<Option<String>>,
+    #[cfg(windows)]
+    pub audio: OnceLock<crate::audio::AudioHandle>,
+    pub owner: std::sync::OnceLock<std::sync::Weak<AppState>>,
+    pub displayed_provider: std::sync::atomic::AtomicU8,
+}
+
+/// One independent quota/protection pipeline. The app-owned context also holds
+/// the persisted display settings; monitor contexts receive provider projections.
 pub struct AppState {
+    pub services: Arc<AppServices>,
+    pub monitors: std::sync::OnceLock<crate::monitor::Registry>,
+    pub runtime_provider: Option<Provider>,
+    pub monitor_enabled: AtomicBool,
+    pub has_reading: AtomicBool,
     pub client: Mutex<CodexClient>,
     pub refresh_guard: Mutex<()>,
     pub source_generation: AtomicU64,
-    pub dsh: crate::dsh::Manager,
     pub dsh_control: StdMutex<crate::dsh_control::ControlState>,
     pub last_refresh_result: StdMutex<Option<Result<CodexUsage, String>>>,
     pub reader: StdMutex<ReaderState>,
@@ -34,75 +62,27 @@ pub struct AppState {
     pub burn_rate: Mutex<BurnRateTracker>,
     pub settings_patch: Mutex<()>,
     pub config_manager: ConfigManager,
-    pub dock: crate::dock::DockManager,
     pub last_usage: Mutex<Option<CodexUsage>>,
-    /// The last live Claude reading and when it was fetched, which throttles
-    /// the usage endpoint to one request per `claude::live::MIN_INTERVAL`.
     pub claude_live: StdMutex<crate::claude::live::LiveState>,
     pub tray_read_status: Mutex<TrayReadStatus>,
     pub settings: Mutex<OverlaySettings>,
     pub settings_revision: AtomicU64,
-    /// Last settings-window geometry observed while the window was on screen and
-    /// not minimized. A minimized window reports an unusable 0x0 client rect, so
-    /// this cache is what lets `CloseRequested` / `RunEvent::Exit` still persist
-    /// the user's placement when the session ends while minimized.
-    pub last_valid_settings_geometry: StdMutex<Option<crate::config::SettingsWindowGeometry>>,
-    /// Focus grace period of the tray popup: the instant it was last shown plus the
-    /// blur observed inside that window. Kept on `AppState` so the `on_window_event`
-    /// closure and the grace timer can share it, and so an offline test can drive it
-    /// through `AppState::for_test`.
-    pub tray_menu_focus: StdMutex<crate::tray::TrayMenuFocusState>,
-    pub autostart_update: Mutex<()>,
-    pub update_check: Mutex<()>,
-    pub update_install: Mutex<()>,
-    pub update_installing: AtomicBool,
-    pub pending_update: Mutex<Option<tauri_plugin_updater::Update>>,
-    pub prepared_update: StdMutex<Option<PreparedUpdate>>,
-    pub available_update: Mutex<Option<AvailableUpdate>>,
-    pub update_error: Mutex<Option<String>>,
-    pub last_auto_notified_version: Mutex<Option<String>>,
     pub reset_state: Mutex<ResetStateFile>,
     pub pending_reset_fetches: Mutex<PendingResetFetches>,
-    /// The auto-pause ledger, the queued sample and the bridge transport.
-    ///
-    /// It is a standard mutex on purpose: the critical sections only exchange
-    /// short-lived in-memory state, so the delivery worker never holds it
-    /// across an await and never blocks the quota read.
     pub auto_pause: StdMutex<crate::pause_control::AutoPauseController>,
-    #[cfg(windows)]
-    pub audio: OnceLock<crate::audio::AudioHandle>,
 }
 
-/// A state for unit tests that never touch a window, the event loop, the tray or
-/// the network. The caller's `config_manager` is kept so tests can assert on the
-/// files it writes.
-#[cfg(test)]
+impl std::ops::Deref for AppState {
+    type Target = AppServices;
+    fn deref(&self) -> &Self::Target { &self.services }
+}
+
 impl AppState {
-    pub(crate) fn for_test(config_manager: ConfigManager) -> Self {
-        let settings = config_manager.load_settings();
-        config_manager.set_source(&settings);
-        Self {
-            client: Mutex::new(CodexClient::new()),
-            refresh_guard: Mutex::new(()),
-            source_generation: AtomicU64::new(0),
+    pub fn new(config_manager: ConfigManager, settings: OverlaySettings) -> Self {
+        let services = Arc::new(AppServices {
+            tray_gate: StdMutex::new(()),
             dsh: Default::default(),
-            dsh_control: StdMutex::new(Default::default()),
-            last_refresh_result: StdMutex::new(None),
-            reader: StdMutex::new(ReaderState::load(&config_manager)),
-            polling: StdMutex::new(crate::polling::PollState::default()),
-            poll_wake: tokio::sync::Notify::new(),
-            protection_status: StdMutex::new(Default::default()),
-            resume: Mutex::new(crate::pause_control::resume::ResumeManager::load(&config_manager)),
-            resume_update: Mutex::new(()),
-            burn_rate: Mutex::new(BurnRateTracker::load(&config_manager)),
-            settings_patch: Mutex::new(()),
-            config_manager: config_manager.clone(),
             dock: crate::dock::DockManager::new(config_manager.clone()),
-            last_usage: Mutex::new(None),
-            claude_live: StdMutex::new(Default::default()),
-            tray_read_status: Mutex::new(TrayReadStatus::Pending),
-            settings: Mutex::new(settings),
-            settings_revision: AtomicU64::new(0),
             last_valid_settings_geometry: StdMutex::new(None),
             tray_menu_focus: StdMutex::new(crate::tray::TrayMenuFocusState::default()),
             autostart_update: Mutex::new(()),
@@ -114,12 +94,60 @@ impl AppState {
             available_update: Mutex::new(None),
             update_error: Mutex::new(None),
             last_auto_notified_version: Mutex::new(None),
+            #[cfg(windows)]
+            audio: OnceLock::new(),
+            owner: Default::default(),
+            displayed_provider: std::sync::atomic::AtomicU8::new(settings.provider.index()),
+        });
+        Self::with_services(config_manager, settings, services, None)
+    }
+
+    pub(crate) fn with_services(config_manager: ConfigManager, settings: OverlaySettings,
+        services: Arc<AppServices>, runtime_provider: Option<Provider>) -> Self {
+        Self {
+            services, runtime_provider, monitors: Default::default(),
+            monitor_enabled: AtomicBool::new(true), has_reading: AtomicBool::new(false),
+            client: Mutex::new(CodexClient::new()),
+            refresh_guard: Mutex::new(()),
+            source_generation: AtomicU64::new(0),
+            dsh_control: StdMutex::new(Default::default()),
+            last_refresh_result: StdMutex::new(None),
+            reader: StdMutex::new(ReaderState::load(&config_manager)),
+            polling: StdMutex::new(crate::polling::PollState::default()),
+            poll_wake: tokio::sync::Notify::new(),
+            protection_status: StdMutex::new(Default::default()),
+            resume: Mutex::new(crate::pause_control::resume::ResumeManager::load(&config_manager)),
+            resume_update: Mutex::new(()),
+            burn_rate: Mutex::new(BurnRateTracker::load(&config_manager)),
+            settings_patch: Mutex::new(()),
+            config_manager: config_manager.clone(),
+            last_usage: Mutex::new(None),
+            claude_live: StdMutex::new(Default::default()),
+            tray_read_status: Mutex::new(TrayReadStatus::Pending),
+            settings: Mutex::new(settings),
+            settings_revision: AtomicU64::new(0),
             reset_state: Mutex::new(crate::notify::load_reset_state(&config_manager)),
             pending_reset_fetches: Mutex::new(PendingResetFetches::default()),
             auto_pause: StdMutex::new(crate::pause_control::AutoPauseController::new()),
-            #[cfg(windows)]
-            audio: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn is_displayed(&self) -> bool {
+        self.is_current() && self.runtime_provider.is_none_or(|provider| self.displayed_provider.load(Ordering::Acquire) == provider.index())
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        let Some(provider) = self.runtime_provider else { return true; };
+        self.owner.get().and_then(|owner| owner.upgrade()).is_some_and(|owner| {
+            owner.monitors.get().is_some_and(|registry| std::ptr::eq(registry.get(provider).as_ref(), self))
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(config_manager: ConfigManager) -> Self {
+        let settings = config_manager.load_settings();
+        config_manager.set_source(&settings);
+        Self::new(config_manager, settings)
     }
 }
 
@@ -135,7 +163,8 @@ pub struct SettingsEnvelope {
 impl SettingsEnvelope {
     fn new(state: &AppState, revision: u64, settings: OverlaySettings) -> Self {
         Self { source_key: crate::config::source_key(&settings),
-            source_generation: state.source_generation.load(Ordering::Acquire),
+            source_generation: state.monitors.get().map(|registry| registry.get(settings.provider).source_generation.load(Ordering::Acquire))
+                .unwrap_or_else(|| state.source_generation.load(Ordering::Acquire)),
             revision, settings }
     }
 }
@@ -231,7 +260,7 @@ impl UsageSource for AppHandle {
             let _source_commit = state.settings_patch.lock().await;
             if state.source_generation.load(Ordering::Acquire) != generation { return; }
             observe_read_event(self, state, event).await;
-            if finished { queue_reader_history(self); }
+            if finished { queue_reader_history(self, state); }
         };
         let result = client.fetch_usage(&mut observer).await;
         let _source_commit = state.settings_patch.lock().await;
@@ -254,7 +283,7 @@ impl UsageSource for AppHandle {
                     diagnostic.elapsed_ms = reader::REFRESH_BUDGET.as_millis() as u64;
                     status.record(diagnostic);
                     drop(status);
-                    queue_reader_history(self);
+                    queue_reader_history(self, state);
                 }
                 Err(error.to_string())
             }
@@ -374,8 +403,9 @@ pub(crate) async fn observe_read_event<S: TrayPresentationSink>(sink: &S, state:
 
 // Coalesce persistence work: one writer per app, snapshots taken after acquiring
 // ownership, and at most one latest revision waiting behind a slow disk write.
-fn queue_reader_history(app: &AppHandle) {
-    let state = app.state::<Arc<AppState>>().inner().clone();
+fn queue_reader_history(app: &AppHandle, context: &AppState) {
+    let owner = app.state::<Arc<AppState>>().inner().clone();
+    let state = context.runtime_provider.map(|provider| crate::monitor::selected(&owner, provider)).unwrap_or(owner);
     let generation = state.source_generation.load(Ordering::Acquire);
     {
         let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
@@ -420,6 +450,7 @@ impl Drop for RefreshCompletion<'_> {
 }
 
 pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState>) -> Result<CodexUsage, String> {
+    if !state.monitor_enabled.load(Ordering::Acquire) { return Err("Monitoring is disabled for this provider".into()); }
     let _refresh_guard = match state.refresh_guard.try_lock() {
         Ok(guard) => guard,
         Err(_) => {
@@ -545,7 +576,11 @@ pub(crate) async fn process_usage_error<S: TrayPresentationSink>(sink: &S, state
     let settings = state.settings.lock().await;
     let mut status = state.tray_read_status.lock().await;
     *status = TrayReadStatus::Error;
-    sink.present(crate::tray::tray_presentation(&settings, None, *status));
+    let cached = state.last_usage.lock().await.clone();
+    {
+        let _tray = state.tray_gate.lock().unwrap_or_else(|p| p.into_inner());
+        if state.is_displayed() { sink.present(crate::tray::tray_presentation(&settings, cached.as_ref(), *status)); }
+    }
 }
 
 pub(crate) fn overlay_geometry_changed(previous: &OverlaySettings, next: &OverlaySettings) -> bool {
@@ -561,8 +596,12 @@ pub(crate) fn overlay_geometry_changed(previous: &OverlaySettings, next: &Overla
 
 #[tauri::command]
 pub async fn fetch_usage(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<UsageEnvelope, String> {
+    let provider = state.settings.lock().await.provider;
+    let runtime = crate::monitor::selected(state.inner(), provider);
+    if !runtime.monitor_enabled.load(Ordering::Acquire) { return Err("Monitoring is disabled for this provider".into()); }
+    let state = &runtime;
     let generation = state.source_generation.load(Ordering::Acquire);
-    let usage = refresh_usage(&app, state.inner()).await?;
+    let usage = refresh_usage(&app, state).await?;
     let _source_commit = state.settings_patch.lock().await;
     if state.source_generation.load(Ordering::Acquire) != generation { return Err("Usage source changed".into()); }
     let settings = state.settings.lock().await;
@@ -571,9 +610,13 @@ pub async fn fetch_usage(state: State<'_, Arc<AppState>>, app: AppHandle) -> Res
 
 #[tauri::command]
 pub async fn get_last_usage(state: State<'_, Arc<AppState>>) -> Result<Option<UsageEnvelope>, String> {
+    let provider = state.settings.lock().await.provider;
+    let runtime = crate::monitor::selected(state.inner(), provider);
+    let state = &runtime;
     let _source_commit = state.settings_patch.lock().await;
     let settings = state.settings.lock().await;
-    Ok(state.last_usage.lock().await.clone().map(|usage| usage_envelope(&state, &settings, usage)))
+    let usage = state.last_usage.lock().await.clone();
+    Ok(usage.map(|usage| usage_envelope(&state, &settings, usage)))
 }
 
 #[tauri::command]
@@ -666,8 +709,10 @@ async fn publish_dsh_binding(app: &AppHandle, state: &Arc<AppState>, origin: Opt
     };
     // An explicit re-pair is the only user action that clears the at-most-once
     // ledger. Source/account/target switches only cancel queued work.
-    state.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).reset();
-    switch_provider(state, next.provider).await;
+    let dsh_runtime = crate::monitor::selected(state, Provider::Dsh);
+    dsh_runtime.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).reset();
+    if let Some(registry) = state.monitors.get() { registry.synchronize(state, &next).await; }
+    else { switch_provider(state, next.provider).await; }
     let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
     let _ = app.emit("settings_updated", SettingsEnvelope::new(state, revision, next));
     state.polling.lock().unwrap_or_else(|p| p.into_inner()).request_now(std::time::Instant::now());
@@ -683,19 +728,26 @@ async fn publish_dsh_binding(app: &AppHandle, state: &Arc<AppState>, origin: Opt
 /// claims a delivery that the bridge did not confirm.
 #[tauri::command]
 pub async fn get_auto_pause_status(
+    provider: Option<Provider>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<crate::pause_control::AutoPauseStatus, String> {
-    Ok(crate::pause_control::status::snapshot(state.inner()).await)
+    let provider = provider.unwrap_or(state.settings.lock().await.provider);
+    let runtime = crate::monitor::selected(state.inner(), provider);
+    Ok(crate::pause_control::status::snapshot(&runtime).await)
 }
 
 #[tauri::command]
 pub async fn resume_chat(
     thread_id: Option<String>,
+    provider: Option<Provider>,
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<String, String> {
+    let provider = provider.unwrap_or(state.settings.lock().await.provider);
+    let runtime = crate::monitor::selected(state.inner(), provider);
+    let state = &runtime;
     if state.settings.lock().await.provider != Provider::Codex { return Err("Resume is only supported for the local Codex source".into()); }
-    refresh_usage(&app, state.inner()).await?;
+    refresh_usage(&app, state).await?;
     // A newer refresh may finish while this caller is being resumed. Capture
     // matching cached values/timing under the refresh guard, then release it
     // before bridge I/O. The dispatch guard rejects subsequent observations.
@@ -745,8 +797,8 @@ pub async fn resume_chat(
     )
     .await;
     if outcome.is_ok() { state.resume.lock().await.complete_plan_for_thread(&target_thread_id, "resumedByUser"); }
-    crate::pause_control::resume::update(state.inner(), None).await;
-    crate::pause_control::status::publish(&app, state.inner()).await;
+    crate::pause_control::resume::update(state, None).await;
+    crate::pause_control::status::publish(&app, state).await;
     outcome
 }
 
@@ -759,11 +811,14 @@ fn resume_quota_gate(settings: &OverlaySettings, usage: &CodexUsage, fresh: bool
 }
 
 #[tauri::command]
-pub async fn cancel_resume_plans(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+pub async fn cancel_resume_plans(provider: Option<Provider>, state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+    let provider = provider.unwrap_or(state.settings.lock().await.provider);
+    let runtime = crate::monitor::selected(state.inner(), provider);
+    let state = &runtime;
     if state.settings.lock().await.provider != Provider::Codex { return Err("Resume is only supported for the local Codex source".into()); }
     state.resume.lock().await.cancel_all("cancelledByUser");
-    crate::pause_control::resume::update(state.inner(), None).await;
-    crate::pause_control::status::publish(&app, state.inner()).await;
+    crate::pause_control::resume::update(state, None).await;
+    crate::pause_control::status::publish(&app, state).await;
     let error = state.resume.lock().await.error.clone();
     match error {
         Some(error) => Err(error),
@@ -801,6 +856,14 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "refreshIntervalSeconds" => value.as_u64().is_some_and(|n| (15..=3600).contains(&n)),
             "language" => matches!(value.as_str(), Some("auto" | "en-US" | "zh-CN" | "zh-Hant")),
             "provider" => matches!(value.as_str(), Some("codex" | "claude" | "dsh")),
+            "providerPreferences" => value.as_object().is_some_and(|providers| !providers.is_empty() && providers.iter().all(|(provider, fields)| {
+                matches!(provider.as_str(), "codex" | "claude" | "dsh") && fields.as_object().is_some_and(|fields| !fields.is_empty() && fields.iter().all(|(key, value)| match key.as_str() {
+                    "monitorEnabled" | "protectionEnabled" => value.is_boolean(),
+                    "fiveHourThresholdPercent" => value.as_u64().is_some_and(|v| (if provider == "dsh" {0} else {1}..=15).contains(&v)),
+                    "weeklyThresholdPercent" => value.as_u64().is_some_and(|v| (if provider == "dsh" {0} else {1}..=10).contains(&v)),
+                    _ => false,
+                }))
+            })),
             "dshAccountId" => value.as_str().is_some_and(|s| s.is_empty() || crate::pause_control::looks_like_thread_id(s)),
             "dshSessionIds" => value.as_array().is_some_and(|items| items.len() <= 32 && items.iter().all(|v| v.as_str().is_some_and(|id| crate::pause_control::looks_like_thread_id(id.strip_prefix("session-").unwrap_or(id))))),
             "dshFiveHourThresholdPercent" => value.as_u64().is_some_and(|n| n <= 15),
@@ -833,7 +896,15 @@ pub fn merge_settings_patch(settings: &mut OverlaySettings, patch: &Value) -> Re
     let mut merged = serde_json::to_value(&*settings).map_err(|e| e.to_string())?;
     let fields = merged.as_object_mut().ok_or("Settings are not an object")?;
     for (key, value) in changes {
-        fields.insert(key.clone(), value.clone());
+        if key == "providerPreferences" {
+            let target = fields.entry(key.clone()).or_insert_with(|| serde_json::json!({}));
+            for (provider, values) in value.as_object().ok_or("Invalid provider preferences")? {
+                let entry = target.as_object_mut().ok_or("Invalid stored preferences")?.entry(provider.clone()).or_insert_with(|| serde_json::json!({}));
+                for (key, value) in values.as_object().ok_or("Invalid provider preferences")? {
+                    entry.as_object_mut().ok_or("Invalid stored preference")?.insert(key.clone(), value.clone());
+                }
+            }
+        } else { fields.insert(key.clone(), value.clone()); }
     }
     *settings = serde_json::from_value(merged).map_err(|e| e.to_string())?;
     Ok(())
@@ -994,6 +1065,11 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     // Serialize native side effects with the matching persisted preference, even
     // when Settings and the tray submit changes at the same time.
     let _patch_guard = state.settings_patch.lock().await;
+    let patch = if patch == serde_json::json!({"cycleProvider": true}) {
+        let current = state.settings.lock().await.provider;
+        let next = state.monitors.get().and_then(|r| r.next(current)).ok_or("No other monitored provider is available")?;
+        serde_json::json!({"provider": next})
+    } else { patch };
     let changes = validate_settings_patch(&patch, allow_auto_start)?;
     if changes.contains_key("dshAccountId") || changes.contains_key("dshSessionIds") {
         let mut selected = state.settings.lock().await.clone();
@@ -1032,6 +1108,20 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         let mut next = settings.clone();
         merge_settings_patch(&mut next, &patch)?;
         reconcile_update_preferences(&mut next, changes);
+        if state.monitors.get().is_some() {
+            next.migrate();
+            let key = next.provider.key().to_string();
+            let preference = next.provider_preferences.get_mut(&key).unwrap();
+            if changes.contains_key("autoPauseOnLowQuota") { preference.protection_enabled = next.auto_pause_on_low_quota; }
+            if changes.contains_key("autoPauseFiveHourThresholdPercent") { preference.five_hour_threshold_percent = next.auto_pause_five_hour_threshold_percent; }
+            if changes.contains_key("autoPauseWeeklyThresholdPercent") { preference.weekly_threshold_percent = next.auto_pause_weekly_threshold_percent; }
+            if next.provider == Provider::Dsh {
+                if changes.contains_key("dshFiveHourThresholdPercent") { preference.five_hour_threshold_percent = next.dsh_five_hour_threshold_percent; }
+                if changes.contains_key("dshWeeklyThresholdPercent") { preference.weekly_threshold_percent = next.dsh_weekly_threshold_percent; }
+            }
+            if !preference.monitor_enabled { preference.protection_enabled = false; }
+            next.mirror_display_preferences();
+        }
         state.config_manager.save_settings_checked(&next)?;
         let auto_check_just_enabled = !settings.auto_check_updates && next.auto_check_updates;
         let auto_install_just_enabled = !settings.auto_install_updates && next.auto_install_updates;
@@ -1067,6 +1157,10 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         }
     }
 
+    if let Some(registry) = state.monitors.get() {
+        registry.synchronize(state, &envelope.settings).await;
+        envelope.source_generation = registry.get(envelope.settings.provider).source_generation.load(Ordering::Acquire);
+    } else {
     if provider_changed {
         switch_provider(state, envelope.settings.provider).await;
         envelope.source_generation = state.source_generation.load(Ordering::Acquire);
@@ -1103,6 +1197,8 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         }
     }
     state.poll_wake.notify_one();
+
+    }
 
     if let Some(app) = sink.app_handle() {
         if auto_edge_hide_changed {
@@ -1165,7 +1261,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         }
     }
 
-    if changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota"
+    if state.monitors.get().is_none() && changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota"
         | "autoResumeAfterQuotaReset" | "autoPauseFiveHourThresholdPercent"
         | "autoPauseWeeklyThresholdPercent")) {
         crate::pause_control::resume::update(state, None).await;
@@ -1227,6 +1323,8 @@ pub async fn claude_connection_status(state: State<'_, Arc<AppState>>) -> Result
     let settings_path = crate::claude::install::claude_settings_path();
     let bridge = crate::claude::install::bridge_path();
     let mut status = crate::claude::install::status(settings_path.as_deref(), state.config_manager.runtime_dir(), bridge.as_deref());
+    let runtime = crate::monitor::selected(state.inner(), Provider::Claude);
+    let state = &runtime;
     let settings = state.settings.lock().await.clone();
     if settings.provider == Provider::Claude {
         // A failed live read falls back to the stored reading, which clears
@@ -1246,8 +1344,9 @@ pub async fn claude_connect(state: State<'_, Arc<AppState>>) -> Result<crate::cl
     let settings_path = crate::claude::install::claude_settings_path().ok_or("Could not locate the Claude Code settings folder")?;
     let bridge = crate::claude::install::bridge_path().ok_or("Could not locate the overlay executable")?;
     crate::claude::install::connect(&settings_path, state.config_manager.runtime_dir(), &bridge)?;
-    state.polling.lock().unwrap_or_else(|p| p.into_inner()).request_now(std::time::Instant::now());
-    state.poll_wake.notify_one();
+    let runtime = crate::monitor::selected(state.inner(), Provider::Claude);
+    runtime.polling.lock().unwrap_or_else(|p| p.into_inner()).request_now(std::time::Instant::now());
+    runtime.poll_wake.notify_one();
     claude_connection_status(state).await
 }
 

@@ -1,5 +1,10 @@
 # Status
 
+## v1.6.0-preview.3 preparation — 2026-11-03
+
+- Multi-provider monitoring, independent protection, logo switching, persisted show/hide and selected-provider tray rendering are implemented. Schema 2 preserves histories and enables protection only for the previously selected provider on migration.
+- Validation and native-access limits are recorded in the [implementation report](docs/handoff/2026-11-03-multi-provider-implementation.md). [Release notes](docs/releases/v1.6.0-preview.3.md).
+
 ## v1.6.0-preview.2 preparation — 2026-11-02
 
 - Clarified settings descriptions in English, Simplified Chinese and Traditional Chinese. The percentage-grid toggle is shown only when edge auto-hide is enabled; its saved preference survives hiding.

@@ -242,7 +242,7 @@ describe('smart pause settings', () => {
 
     expect(onPatchSettings).toHaveBeenCalledTimes(1);
     // Only the master switch is patched; no threshold rides along.
-    expect(onPatchSettings.mock.calls[0][0]).toEqual({ autoPauseOnLowQuota: true });
+    expect(onPatchSettings.mock.calls[0][0]).toEqual({ providerPreferences: { codex: { protectionEnabled: true } } });
     // Immediate save: the call is not routed through the debounced slider path.
     expect(onPatchSettings.mock.calls[0][1]).toBeFalsy();
   });
@@ -263,25 +263,25 @@ describe('smart pause settings', () => {
     expect(enabledWeekly.disabled).toBe(false);
   });
 
-  it('patches the 5-hour threshold through the debounced slider path', async () => {
+  it('patches the 5-hour threshold for Codex independently', async () => {
     const { right, onPatchSettings } = await renderSettings({ autoPauseOnLowQuota: true });
     const five = within(right).getByRole('slider', { name: '5-hour quota threshold' });
 
     fireEvent.change(five, { target: { value: '7' } });
 
     expect(onPatchSettings).toHaveBeenCalledTimes(1);
-    expect(onPatchSettings.mock.calls[0][0]).toEqual({ autoPauseFiveHourThresholdPercent: 7 });
+    expect(onPatchSettings.mock.calls[0][0]).toEqual({ providerPreferences: { codex: { fiveHourThresholdPercent: 7 } } });
     expect(onPatchSettings.mock.calls[0][1]).toBe(true);
   });
 
-  it('patches the weekly threshold through the debounced slider path', async () => {
+  it('patches the weekly threshold for Codex independently', async () => {
     const { right, onPatchSettings } = await renderSettings({ autoPauseOnLowQuota: true });
     const weekly = within(right).getByRole('slider', { name: 'Weekly quota threshold' });
 
     fireEvent.change(weekly, { target: { value: '4' } });
 
     expect(onPatchSettings).toHaveBeenCalledTimes(1);
-    expect(onPatchSettings.mock.calls[0][0]).toEqual({ autoPauseWeeklyThresholdPercent: 4 });
+    expect(onPatchSettings.mock.calls[0][0]).toEqual({ providerPreferences: { codex: { weeklyThresholdPercent: 4 } } });
     expect(onPatchSettings.mock.calls[0][1]).toBe(true);
   });
 
@@ -307,7 +307,7 @@ it.each([
   expect(toggle.checked).toBe(false);
   fireEvent.click(toggle);
   expect(onPatchSettings).toHaveBeenCalledTimes(1);
-  expect(onPatchSettings.mock.calls[0][0]).toEqual({ autoPauseOnLowQuota: true });
+  expect(onPatchSettings.mock.calls[0][0]).toEqual({ providerPreferences: { codex: { protectionEnabled: true } } });
 
   const five = within(right).getByRole('slider', { name: fiveName }) as HTMLInputElement;
   const weekly = within(right).getByRole('slider', { name: weeklyName }) as HTMLInputElement;
@@ -345,6 +345,20 @@ it.each([
 });
 
 describe('usage provider', () => {
+  it('configures a background provider without changing the displayed source or other protection settings', async () => {
+    const { getByLabelText, getByRole, onPatchSettings } = await renderSettings({ provider: 'codex', providerPreferences: {
+      codex: { monitorEnabled: true, protectionEnabled: true, fiveHourThresholdPercent: 7, weeklyThresholdPercent: 3 },
+      claude: { monitorEnabled: true, protectionEnabled: false, fiveHourThresholdPercent: 4, weeklyThresholdPercent: 2 },
+    } });
+    fireEvent.change(getByLabelText('Provider settings'), { target: { value: 'claude' } });
+    expect((getByLabelText('Displayed provider') as HTMLSelectElement).value).toBe('codex');
+    expect(onPatchSettings).not.toHaveBeenCalled();
+    fireEvent.click(getByRole('checkbox', { name: 'Block Claude Code requests when quota runs low' }));
+    expect(onPatchSettings).toHaveBeenLastCalledWith({ providerPreferences: { claude: { protectionEnabled: true } } }, false);
+    onPatchSettings.mockClear();
+    fireEvent.click(getByRole('checkbox', { name: 'Monitor this provider' }));
+    expect(onPatchSettings).toHaveBeenCalledWith({ providerPreferences: { claude: { monitorEnabled: false, protectionEnabled: false } } });
+  });
   const claudeStatus = {
     statusLine: false, hooks: false, bridgeAvailable: true,
     settingsPath: 'C:\\Users\\me\\.claude\\settings.json',
@@ -356,15 +370,15 @@ describe('usage provider', () => {
     expect(getByText('Show Credit Balance')).toBeTruthy();
     expect(getByText('Pause Codex when quota runs low')).toBeTruthy();
     expect(queryByText('Claude Code connection')).toBeNull();
-    fireEvent.change(getByLabelText('Usage source'), { target: { value: 'claude' } });
-    expect(onPatchSettings).toHaveBeenCalledWith({ provider: 'claude' }, false);
+    fireEvent.change(getByLabelText('Displayed provider'), { target: { value: 'claude' } });
+    expect(onPatchSettings).toHaveBeenCalledWith({ provider: 'claude' });
   });
 
   it('switches to DSH without auto-resume and exposes all three independent source labels', async () => {
-    const { onPatchSettings, getByLabelText, getByRole } = await renderSettings();
-    for (const name of ['Local Codex', 'DSH Codex subscription', 'Claude']) expect(getByRole('option', { name })).toBeTruthy();
-    fireEvent.change(getByLabelText('Usage source'), { target: { value: 'dsh' } });
-    expect(onPatchSettings).toHaveBeenCalledWith({ provider: 'dsh', autoResumeAfterQuotaReset: false }, false);
+    const { onPatchSettings, getByLabelText } = await renderSettings();
+    for (const name of ['Local Codex', 'DSH Codex subscription', 'Claude']) expect(within(getByLabelText('Displayed provider')).getByRole('option', { name })).toBeTruthy();
+    fireEvent.change(getByLabelText('Displayed provider'), { target: { value: 'dsh' } });
+    expect(onPatchSettings).toHaveBeenCalledWith({ provider: 'dsh' });
   });
 
   it('uses independent zero-capable DSH thresholds and preserves local threshold ranges and values', async () => {
@@ -375,9 +389,9 @@ describe('usage provider', () => {
     expect([weekly.value, weekly.min, weekly.max]).toEqual(['0', '0', '10']);
     expect(within(right).getByText(i18n.t('quotaThresholdZeroHint'))).toBeTruthy();
     fireEvent.change(five, { target: { value: '3' } });
-    expect(onPatchSettings).toHaveBeenLastCalledWith({ dshFiveHourThresholdPercent: 3 }, true);
+    expect(onPatchSettings).toHaveBeenLastCalledWith({ providerPreferences: { dsh: { fiveHourThresholdPercent: 3 } } }, true);
     fireEvent.change(weekly, { target: { value: '4' } });
-    expect(onPatchSettings).toHaveBeenLastCalledWith({ dshWeeklyThresholdPercent: 4 }, true);
+    expect(onPatchSettings).toHaveBeenLastCalledWith({ providerPreferences: { dsh: { weeklyThresholdPercent: 4 } } }, true);
     rerender(<SettingsView settings={{ ...DEFAULT_SETTINGS, autoPauseOnLowQuota: true }} onPatchSettings={onPatchSettings} />);
     expect([five.value, five.min, five.max]).toEqual(['5', '1', '15']);
     expect([weekly.value, weekly.min, weekly.max]).toEqual(['2', '1', '10']);
@@ -456,7 +470,7 @@ describe('provider logo and live Claude reading', () => {
     // The sign-in hint belongs to live reading only.
     expect(card.queryByText(/No usable terminal login/)).toBeNull();
     fireEvent.click(card.getByLabelText('Read limits live with your Claude login'));
-    expect(off.onPatchSettings).toHaveBeenCalledWith({ claudeLivePolling: true });
+    expect(off.onPatchSettings).toHaveBeenCalledWith({ claudeLivePolling: true }, false);
     cleanup();
 
     const on = await renderSettings({ provider: 'claude', claudeLivePolling: true });

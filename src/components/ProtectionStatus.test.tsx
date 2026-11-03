@@ -176,7 +176,7 @@ describe('protection status', () => {
     ] }));
     render(<ProtectionStatusView settings={settings} />);
     fireEvent.click(await screen.findByText('Cancel pending resume plans'));
-    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('cancel_resume_plans'));
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('cancel_resume_plans', { provider: 'codex' }));
   });
   it('resumes a chat when clicking the resume button', async () => {
     tauri.invoke.mockImplementation(async (cmd) => {
@@ -189,7 +189,7 @@ describe('protection status', () => {
     });
     render(<ProtectionStatusView settings={settings} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Resume chat' }));
-    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('resume_chat', { threadId: 'chat-abc' }));
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('resume_chat', { threadId: 'chat-abc', provider: 'codex' }));
   });
   it('displays error when resume fails because quota is still low', async () => {
     tauri.invoke.mockImplementation(async (cmd) => {

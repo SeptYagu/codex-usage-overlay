@@ -134,13 +134,14 @@ impl DockManager {
             (true, Some(edge)) => DockState::Docked(edge),
             _ => DockState::Free,
         };
+        let hidden = persisted.hidden;
         Self {
             config,
             persisted: Arc::new(Mutex::new(persisted)),
             runtime: Arc::new(Mutex::new(Runtime {
-                state,
+                state: if hidden { DockState::ManualHidden } else { state },
                 expanded: !matches!(state, DockState::Docked(_)),
-                manual_hidden: false,
+                manual_hidden: hidden,
                 dragging: false,
                 menu_open: false,
                 pointer_inside: false,
@@ -164,6 +165,7 @@ impl DockManager {
 
     fn save_docked(&self, edge: Option<Edge>) {
         let next = DockPersistence {
+            hidden: lock(&self.persisted).hidden,
             docked: edge.is_some(),
             edge,
         };
@@ -365,10 +367,15 @@ impl DockManager {
         Some(edge)
     }
 
-    fn set_manual_hidden(&self, hidden: bool) -> Option<Edge> {
+    pub(crate) fn set_manual_hidden(&self, hidden: bool) -> Option<Edge> {
         let mut runtime = lock(&self.runtime);
         runtime.timer_generation = runtime.timer_generation.wrapping_add(1);
         runtime.manual_hidden = hidden;
+        {
+            let mut persisted = lock(&self.persisted);
+            persisted.hidden = hidden;
+            self.config.save_dock_state(&persisted);
+        }
         runtime.dragging = false;
         runtime.menu_open = false;
         if hidden {
@@ -715,6 +722,8 @@ pub fn restore_startup(window: &WebviewWindow, manager: &DockManager, settings: 
             }
         }
     }
+    if manager.info().hidden { let _ = window.hide(); }
+    else { let _ = window.show(); }
 }
 
 /// Every attached monitor's work area, in physical pixels.
@@ -1553,6 +1562,26 @@ pub fn install_native_window_hook(_window: &WebviewWindow, _app: &AppHandle) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manual_visibility_survives_restart_and_docking_changes() {
+        let dir = std::env::temp_dir().join(format!("overlay-visibility-{}", std::process::id()));
+        let config = ConfigManager::with_runtime_dir(dir.clone());
+        let manager = DockManager::new(config.clone());
+        assert!(!manager.info().hidden);
+        manager.save_docked(Some(Edge::Left));
+        manager.set_manual_hidden(true);
+        let restored = DockManager::new(config.clone());
+        assert!(restored.info().hidden);
+        assert!(restored.info().docked);
+        restored.disable_auto_hide();
+        assert!(DockManager::new(config.clone()).info().hidden, "changing docking must preserve a manual hide");
+        restored.set_manual_hidden(false);
+        assert!(!DockManager::new(config.clone()).info().hidden);
+        // Existing files without the new field continue to launch shown.
+        std::fs::write(config.dock_state_path(), r#"{"docked":false,"edge":null}"#).unwrap();
+        assert!(!DockManager::new(config).info().hidden);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     use super::*;
 
     fn work() -> PhysicalRect {
@@ -2208,13 +2237,15 @@ mod tests {
     }
 
     fn manager_with(state: DockState, expanded: bool) -> DockManager {
-        let config = ConfigManager::new();
+        let config = ConfigManager::with_runtime_dir(std::env::temp_dir().join(format!("overlay-dock-fixture-{}", std::process::id())));
         let persisted = match state {
             DockState::Docked(edge) => DockPersistence {
+                hidden: false,
                 docked: true,
                 edge: Some(edge),
             },
             _ => DockPersistence {
+                hidden: false,
                 docked: false,
                 edge: None,
             },
