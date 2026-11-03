@@ -43,22 +43,24 @@ pub fn source_key(settings: &OverlaySettings) -> String {
                 settings.dsh_base_url.trim().trim_end_matches('/'),
                 settings.dsh_instance_id.as_str(),
                 settings.dsh_account_id.as_str(),
-            )).unwrap_or_default();
+            ))
+            .unwrap_or_default();
             // Stable FNV-1a, for namespace separation only, not authentication.
-            let hash = identity.bytes().fold(0xcbf29ce484222325u64,
-                |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3));
+            let hash = identity.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+            });
             format!("dsh-{hash:016x}")
         }
     }
 }
 
 pub fn same_source(left: &OverlaySettings, right: &OverlaySettings) -> bool {
-    left.provider == right.provider && (left.provider != Provider::Dsh || (
-        left.dsh_base_url == right.dsh_base_url
-            && left.dsh_instance_id == right.dsh_instance_id
-            && left.dsh_account_id == right.dsh_account_id
-            && left.dsh_session_ids == right.dsh_session_ids
-    ))
+    left.provider == right.provider
+        && (left.provider != Provider::Dsh
+            || (left.dsh_base_url == right.dsh_base_url
+                && left.dsh_instance_id == right.dsh_instance_id
+                && left.dsh_account_id == right.dsh_account_id
+                && left.dsh_session_ids == right.dsh_session_ids))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +75,9 @@ pub struct OverlaySettings {
     pub dsh_base_url: String,
     #[serde(default)]
     pub dsh_instance_id: String,
+    /// Public companion profile fingerprint used only to prefer the same profile.
+    #[serde(default)]
+    pub dsh_profile_id: String,
     #[serde(default)]
     pub dsh_account_id: String,
     #[serde(default)]
@@ -153,13 +158,27 @@ pub struct OverlaySettings {
     pub auto_pause_weekly_threshold_percent: u32,
 }
 
-fn default_scale() -> u32 { 175 }
-fn default_transparency() -> u32 { 23 }
-fn default_true() -> bool { true }
-fn default_refresh_interval() -> u32 { 60 }
-fn default_language() -> String { "auto".to_string() }
-fn default_auto_pause_five_hour_threshold() -> u32 { 5 }
-fn default_auto_pause_weekly_threshold() -> u32 { 2 }
+fn default_scale() -> u32 {
+    175
+}
+fn default_transparency() -> u32 {
+    23
+}
+fn default_true() -> bool {
+    true
+}
+fn default_refresh_interval() -> u32 {
+    60
+}
+fn default_language() -> String {
+    "auto".to_string()
+}
+fn default_auto_pause_five_hour_threshold() -> u32 {
+    5
+}
+fn default_auto_pause_weekly_threshold() -> u32 {
+    2
+}
 
 impl Default for OverlaySettings {
     fn default() -> Self {
@@ -167,6 +186,7 @@ impl Default for OverlaySettings {
             provider: Provider::default(),
             dsh_base_url: String::new(),
             dsh_instance_id: String::new(),
+            dsh_profile_id: String::new(),
             dsh_account_id: String::new(),
             dsh_session_ids: Vec::new(),
             dsh_five_hour_threshold_percent: 0,
@@ -242,13 +262,19 @@ impl ConfigManager {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("CodexUsageOverlay");
         let _ = fs::create_dir_all(&runtime_dir);
-        Self { runtime_dir, namespace: Arc::default() }
+        Self {
+            runtime_dir,
+            namespace: Arc::default(),
+        }
     }
 
     #[cfg(test)]
     pub fn with_runtime_dir(runtime_dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(&runtime_dir);
-        Self { runtime_dir, namespace: Arc::default() }
+        Self {
+            runtime_dir,
+            namespace: Arc::default(),
+        }
     }
 
     pub fn runtime_dir(&self) -> &Path {
@@ -258,14 +284,21 @@ impl ConfigManager {
     pub fn set_source(&self, settings: &OverlaySettings) {
         let key = source_key(settings);
         *self.namespace.lock().unwrap_or_else(|p| p.into_inner()) =
-            if settings.provider == Provider::Codex { String::new() } else { key };
+            if settings.provider == Provider::Codex {
+                String::new()
+            } else {
+                key
+            };
     }
 
     /// Local Codex retains its original names for backwards compatibility.
     fn provider_path(&self, name: &str) -> PathBuf {
         let namespace = self.namespace.lock().unwrap_or_else(|p| p.into_inner());
-        if namespace.is_empty() { self.runtime_dir.join(name) }
-        else { self.runtime_dir.join(format!("{namespace}-{name}")) }
+        if namespace.is_empty() {
+            self.runtime_dir.join(name)
+        } else {
+            self.runtime_dir.join(format!("{namespace}-{name}"))
+        }
     }
 
     pub fn settings_path(&self) -> PathBuf {
@@ -467,7 +500,10 @@ mod tests {
         assert!(settings.show_burn_rate);
         assert!(OverlaySettings::default().show_five_hour_quota);
         assert!(OverlaySettings::default().show_burn_rate);
-        assert_eq!(OverlaySettings::default().overlay_layout, OverlayLayout::Grouped);
+        assert_eq!(
+            OverlaySettings::default().overlay_layout,
+            OverlayLayout::Grouped
+        );
         assert!(settings.five_hour_reset_notification);
         assert!(settings.weekly_reset_notification);
         assert_eq!(settings.five_hour_sound_mode, SoundMode::Windows);
@@ -480,7 +516,10 @@ mod tests {
 
     #[test]
     fn both_layouts_round_trip_with_existing_preferences() {
-        for (wire, layout) in [("grouped", OverlayLayout::Grouped), ("stacks", OverlayLayout::Stacks)] {
+        for (wire, layout) in [
+            ("grouped", OverlayLayout::Grouped),
+            ("stacks", OverlayLayout::Stacks),
+        ] {
             let mut value = legacy_settings();
             value["overlayLayout"] = json!(wire);
             value["autoCheckUpdates"] = json!(true);
@@ -491,7 +530,8 @@ mod tests {
             for key in value.as_object().unwrap().keys() {
                 assert_eq!(serialized.get(key), value.get(key));
             }
-            let restored: OverlaySettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            let restored: OverlaySettings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
             assert_eq!(restored.overlay_layout, layout);
             assert_preferences(&restored);
         }
@@ -526,7 +566,8 @@ mod tests {
         settings.auto_edge_hide = true;
         settings.mouse_passthrough = true;
         settings.auto_install_updates = true;
-        let restored: OverlaySettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        let restored: OverlaySettings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert!(!restored.five_hour_reset_notification);
         assert!(restored.weekly_reset_notification);
         assert_eq!(restored.five_hour_sound_mode, SoundMode::Windows);
@@ -550,17 +591,26 @@ mod tests {
 
         let mut enabled = legacy_settings();
         enabled["showPercentageGrid"] = json!(true);
-        assert!(serde_json::from_value::<OverlaySettings>(enabled).unwrap().show_percentage_grid);
+        assert!(
+            serde_json::from_value::<OverlaySettings>(enabled)
+                .unwrap()
+                .show_percentage_grid
+        );
 
         let mut disabled = legacy_settings();
         disabled["showPercentageGrid"] = json!(false);
-        assert!(!serde_json::from_value::<OverlaySettings>(disabled).unwrap().show_percentage_grid);
+        assert!(
+            !serde_json::from_value::<OverlaySettings>(disabled)
+                .unwrap()
+                .show_percentage_grid
+        );
 
         let mut settings = OverlaySettings::default();
         settings.show_percentage_grid = true;
         let wire = serde_json::to_value(&settings).unwrap();
         assert_eq!(wire.get("showPercentageGrid"), Some(&json!(true)));
-        let restored: OverlaySettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        let restored: OverlaySettings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert!(restored.show_percentage_grid);
     }
 
@@ -578,7 +628,10 @@ mod tests {
             OverlaySettings::default().auto_pause_five_hour_threshold_percent,
             5
         );
-        assert_eq!(OverlaySettings::default().auto_pause_weekly_threshold_percent, 2);
+        assert_eq!(
+            OverlaySettings::default().auto_pause_weekly_threshold_percent,
+            2
+        );
 
         // A partially migrated profile keeps its explicit values.
         let mut partial = legacy_settings();
@@ -629,8 +682,13 @@ mod tests {
             scale_factor: Some(1.5),
         };
         manager.save_settings_geometry(&geometry);
-        let loaded = manager.load_settings_geometry().expect("saved geometry should load");
-        assert_eq!((loaded.x, loaded.y, loaded.width, loaded.height), (120.0, 80.0, 480.0, 660.0));
+        let loaded = manager
+            .load_settings_geometry()
+            .expect("saved geometry should load");
+        assert_eq!(
+            (loaded.x, loaded.y, loaded.width, loaded.height),
+            (120.0, 80.0, 480.0, 660.0)
+        );
         assert_eq!(loaded.scale_factor, Some(1.5));
 
         let path = manager.settings_geometry_path();
@@ -657,7 +715,9 @@ mod tests {
 
         let path = manager.settings_geometry_path();
         fs::write(&path, r#"{"x":10.0,"y":20.0,"width":480.0,"height":660.0}"#).unwrap();
-        let loaded = manager.load_settings_geometry().expect("legacy geometry should load");
+        let loaded = manager
+            .load_settings_geometry()
+            .expect("legacy geometry should load");
         assert_eq!(loaded.scale_factor, None);
 
         // An unusable scale factor is discarded instead of poisoning the record.

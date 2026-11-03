@@ -185,7 +185,15 @@ export interface DshBridgeInstance {
 
 export interface DshConnectionStatus {
   connected: boolean;
+  origin: string | null;
   instanceId: string | null;
+  activeAccountId: string | null;
+  // Binding epoch, checked atomically by dsh_bind_targets before saving.
+  connectionRevision: number;
+  autoPhase: string;
+  autoMessage?: string | null;
+  // Monotonic cached-status revision, including across automatic reconnects.
+  autoRevision: number;
   accounts: Array<{ id: string; label: string; active: boolean }>;
   sessions: Array<{ id: string; title: string; provider: string; busy: boolean }>;
   error: string | null;

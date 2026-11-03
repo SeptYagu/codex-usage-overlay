@@ -1,5 +1,7 @@
 # Handoff index
 
+2026-11-02 DSH active connection: [automatic Desktop setup and acceptance record](2026-11-02-dsh-auto-connect-report.md). Replaces preview.1's manual prerequisite with native background discovery, official offline CLI installation, authenticated connection, active-account quota and explicit-only pause targets. Isolated CLI/package checks pass; the record distinguishes implementation tests, real Host acceptance and release status. The following preview.1 investigation/test entries are historical, not proof of active connection.
+
 2026-11-02 DSH test gate: [implementation and offline regression evidence](2026-11-02-dsh-implementation-tests.md). Main library 415 passed / 7 ignored, Claude helper 10 passed, frontend 153 passed, companion 15 passed on Node 22 and 24; production build and 7 packaging cases passed. Real DSH installation/delivery and visual WebView acceptance remain unverified; first release is a preview.
 
 2026-11-02 DSH implementation: independent provider, instance/account namespaced history, generation-guarded readings and opt-in selected-session cooperative pause. A restricted zero-dependency companion supplies Desktop pairing without reading Host/OAuth secrets. [User setup and limits](../dsh-subscription.md), [companion protocol](../../integrations/dsh-bridge/README.md). The read-only investigation below is historical; real DSH installation/pause remains a separate user acceptance step.

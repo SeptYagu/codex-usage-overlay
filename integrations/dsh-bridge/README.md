@@ -22,9 +22,13 @@ node --test test/*.test.js
 
 测试使用伪 Connection 和本目录下忽略提交的 `.test-tmp`；Windows 上确实执行系统 ACL 建立/验证，验证失败时测试也会失败。测试覆盖 HTTP 鉴权、Origin/Host、严格路由与 schema、32 KiB 限制、错误脱敏、请求超时、双实例、文件安全、启动取消和卸载清理。
 
-## 手工安装到 DSH
+## 自动配置与可选手工安装
 
-**自动化验收没有实际安装，也没有重启当前 DSH。** 从 overlay 发布页下载 companion `.tgz`，由用户在目标 DSH GUI 的“插件 → 添加插件 → 包名或地址”中选择下载文件的绝对路径。源码开发也可使用当前目录的绝对 `file:` spec。
+新版 overlay 内嵌本包。选择 DSH 来源后，后台寻找运行中的 Desktop，通过该安装自带的官方 CLI 执行本地、离线、禁用安装脚本的 `plugin --profile desktop add`。CLI 使用 DSH 自己的 manifest writer 锁，自动将新 bundle 加入选择；默认的 Host HMR 监听 manifest 并加载纯 Host bridge。不要求用户预装本包、寻找文件或粘贴 token。
+
+官方 CLI 返回成功**不等于**连接成功；overlay 必须等发现记录、认证握手与订阅数据校验。HMR 被关闭或重组要求重启时，界面提示由用户安全重启，不停止当前 DSH。已经安装但被用户禁用的 bundle 不会被自动重新启用。自动配置只支持 Windows 的默认 Desktop home；不猜测自定义运行环境，也不读凭据。
+
+开发或自定义 profile 仍可在目标 DSH 插件管理器选择本机 `.tgz` 或绝对 `file:` spec；这不是默认接入的前置条件。
 
 如 GUI 要求 tarball，先在本目录打包：
 
@@ -32,7 +36,7 @@ node --test test/*.test.js
 npm pack
 ```
 
-再在 GUI 中选择生成的绝对 `.tgz` 路径。按 DSH 插件管理器的 restart-required 提示操作；不要用另一个正在运行的 CLI 修改活动 Desktop profile，不要手改安装目录或已装订阅插件。
+再在 GUI 中选择生成的绝对 `.tgz` 路径。按 DSH 插件管理器的 restart-required 提示操作；不要手改安装目录、manifest、writer 锁或已装订阅插件。自动配置使用的是 Desktop 随附的官方 CLI 和其自身安装事务，不是另建一个 DSH Host 或修改 ASAR。
 
 包的 ESM 命名导出为 `name`、`inject=['connection']`、`apply(ctx,config={})`，Host bundle 入口由 [package.json](./package.json) 与 [cordis.patch.yml](./cordis.patch.yml) 声明；没有 client bundle。唯一可选配置为 `profileLabel`：1–80 字符、不含控制字符，默认不写该字段。标签只是用户提示，**不是认证身份**。
 
@@ -54,10 +58,11 @@ POSIX:   $HOME/.local/state/CodexUsageOverlay/dsh-bridges/<instance UUID>.json
   origin: string;     // http://127.0.0.1:<随机端口>
   token: string;      // randomBytes(32).toString('hex')，桥专用 256-bit pairing token
   profileLabel?: string;
+  profileId?: string;  // 公开 profile 目录规范化后的 SHA-256；跨重启稳定、不是凭据
 }
 ```
 
-native `connect_bridge` 应读取记录、校验 schema/UUID/严格 loopback origin，使用 `instanceId` 隔离数据源，并让用户明确选择目标实例。不要采用“第一个文件”，不要扫描 DSH Cookie/签名密钥，不要把桥数据和 Codex CLI 来源合并。`token` 不是 OAuth token 或 Host secret，不应出现在日志、UI、错误报告、导出配置、URL、命令行或 git 中。
+native 自动连接器读取记录，校验 schema/UUID/严格 loopback origin，并实际握手排除陈旧记录。只有唯一合格实例或已保存的稳定 `profileId` 精确匹配时自动选择；多实例有歧义时不按排序任取。`profileId` 来自公开、纯数据的 `ctx.get('profileContext').dir` 的哈希，只用于找回同一 profile；真正的数据隔离仍包含本次 `instanceId` 和账户。不要扫描 DSH Cookie/签名密钥，不要把桥数据和 Codex CLI 来源合并。`token` 不是 OAuth token 或 Host secret，不应出现在日志、UI、错误报告、导出配置、URL、命令行或 git 中。
 
 每次启动都会产生新的 instanceId/token/端口。卸载删除自己的完整匹配记录，绝不删除其他实例、替换记录或整个发现目录。进程崩溃可能留下过期记录，native 应把连接失败标记为不可用，不使用旧用量触发自动动作；本插件不清扫其他/历史记录。
 

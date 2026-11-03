@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import path from 'node:path';
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { prepareDirectory, publishDiscovery, removeOwnedDiscovery, restrictPath } from './file-security.js';
 
 export const name = 'codex-usage-overlay-bridge';
@@ -164,13 +164,22 @@ async function closeServer(server) {
   });
 }
 
+/** Stable public profile identity, not an authentication secret or a process identity. */
+export function deriveProfileId(directory) {
+  if (directory === undefined) return undefined;
+  if (typeof directory !== 'string' || !path.isAbsolute(directory)) throw new Error('Invalid DSH profile location');
+  const normalized = path.resolve(directory);
+  return createHash('sha256').update(process.platform === 'win32' ? normalized.toLowerCase() : normalized).digest('hex');
+}
+
 /** Public only for embedding/tests. Production plugin never accepts filesystem or security overrides. */
-export async function startBridge({ connection, discoveryDirectory = defaultDiscoveryDirectory(), profileLabel,
+export async function startBridge({ connection, discoveryDirectory = defaultDiscoveryDirectory(), profileLabel, profileDirectory,
   signal, requestTimeoutMs = 15_000, securePath = restrictPath } = {}) {
   if (!connection || typeof connection.createPeer !== 'function' || typeof connection.createSharedFetchHandler !== 'function') {
     throw new Error('DSH connection service is unavailable');
   }
   validateLabel(profileLabel);
+  const profileId = deriveProfileId(profileDirectory);
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 60_000) throw new Error('Invalid bridge timeout');
   const controller = new AbortController();
   const instanceId = randomUUID();
@@ -217,7 +226,8 @@ export async function startBridge({ connection, discoveryDirectory = defaultDisc
     const address = server.address();
     if (!address || typeof address === 'string' || address.address !== '127.0.0.1') throw new Error('Invalid bridge listener');
     const origin = `http://127.0.0.1:${address.port}`;
-    record = { schemaVersion: 1, instanceId, origin, token, ...(profileLabel === undefined ? {} : { profileLabel }) };
+    record = { schemaVersion: 1, instanceId, origin, token, ...(profileLabel === undefined ? {} : { profileLabel }),
+      ...(profileId === undefined ? {} : { profileId }) };
     recordPath = await publishDiscovery(root, record, controller.signal, securePath);
     controller.signal.throwIfAborted();
     started = true;
@@ -295,7 +305,9 @@ export function apply(ctx, config = {}) {
   const lifecycle = new AbortController();
   let ready;
   ctx.effect(() => {
-    ready = startBridge({ connection: ctx.connection, profileLabel: config.profileLabel, signal: lifecycle.signal });
+    // Public, data-only launch context; never inspect credentials or Host internals.
+    const profileDirectory = ctx.get?.('profileContext')?.dir;
+    ready = startBridge({ connection: ctx.connection, profileLabel: config.profileLabel, profileDirectory, signal: lifecycle.signal });
     ready.catch(() => {});
     return async () => {
       lifecycle.abort();

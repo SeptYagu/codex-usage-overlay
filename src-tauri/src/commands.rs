@@ -1,19 +1,23 @@
-use std::sync::{Arc, Mutex as StdMutex};
-#[cfg(windows)]
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(test)]
-use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(windows)]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex as StdMutex};
+#[cfg(test)]
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
+use crate::codex::reader::{
+    self, FailureKind, ReadDiagnostic, ReadEvent, ReadFailure, ReadStage, ReaderState,
+};
 use crate::codex::{BurnRateTracker, CodexClient, CodexUsage, RawCodexUsage};
-use crate::codex::reader::{self, FailureKind, ReadDiagnostic, ReadEvent, ReadFailure, ReaderState, ReadStage};
 use crate::config::{ConfigManager, OverlaySettings, Provider};
 use crate::notify::{PendingResetFetches, ResetStateFile};
-use crate::tray::{open_settings_window as show_settings_win, TrayPresentationSink, TrayReadStatus};
+use crate::tray::{
+    open_settings_window as show_settings_win, TrayPresentationSink, TrayReadStatus,
+};
 
 #[cfg(test)]
 mod dsh_tests;
@@ -23,6 +27,7 @@ pub struct AppState {
     pub refresh_guard: Mutex<()>,
     pub source_generation: AtomicU64,
     pub dsh: crate::dsh::Manager,
+    pub dsh_auto: crate::dsh::auto::Controller,
     pub dsh_control: StdMutex<crate::dsh_control::ControlState>,
     pub last_refresh_result: StdMutex<Option<Result<CodexUsage, String>>>,
     pub reader: StdMutex<ReaderState>,
@@ -86,13 +91,16 @@ impl AppState {
             refresh_guard: Mutex::new(()),
             source_generation: AtomicU64::new(0),
             dsh: Default::default(),
+            dsh_auto: Default::default(),
             dsh_control: StdMutex::new(Default::default()),
             last_refresh_result: StdMutex::new(None),
             reader: StdMutex::new(ReaderState::load(&config_manager)),
             polling: StdMutex::new(crate::polling::PollState::default()),
             poll_wake: tokio::sync::Notify::new(),
             protection_status: StdMutex::new(Default::default()),
-            resume: Mutex::new(crate::pause_control::resume::ResumeManager::load(&config_manager)),
+            resume: Mutex::new(crate::pause_control::resume::ResumeManager::load(
+                &config_manager,
+            )),
             resume_update: Mutex::new(()),
             burn_rate: Mutex::new(BurnRateTracker::load(&config_manager)),
             settings_patch: Mutex::new(()),
@@ -133,10 +141,13 @@ pub struct SettingsEnvelope {
 }
 
 impl SettingsEnvelope {
-    fn new(state: &AppState, revision: u64, settings: OverlaySettings) -> Self {
-        Self { source_key: crate::config::source_key(&settings),
+    pub(crate) fn new(state: &AppState, revision: u64, settings: OverlaySettings) -> Self {
+        Self {
+            source_key: crate::config::source_key(&settings),
             source_generation: state.source_generation.load(Ordering::Acquire),
-            revision, settings }
+            revision,
+            settings,
+        }
     }
 }
 
@@ -149,9 +160,16 @@ pub struct UsageEnvelope {
     pub source_generation: u64,
 }
 
-pub(crate) fn usage_envelope(state: &AppState, settings: &OverlaySettings, usage: CodexUsage) -> UsageEnvelope {
-    UsageEnvelope { usage, source_key: crate::config::source_key(settings),
-        source_generation: state.source_generation.load(Ordering::Acquire) }
+pub(crate) fn usage_envelope(
+    state: &AppState,
+    settings: &OverlaySettings,
+    usage: CodexUsage,
+) -> UsageEnvelope {
+    UsageEnvelope {
+        usage,
+        source_key: crate::config::source_key(settings),
+        source_generation: state.source_generation.load(Ordering::Acquire),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -177,7 +195,9 @@ struct UpdateProgress {
 pub fn match_supported_locale(system_locale: &str) -> &'static str {
     let normalized = system_locale.trim().to_ascii_lowercase().replace('_', "-");
     match normalized.as_str() {
-        "zh-tw" | "zh-hk" | "zh-mo" | "zh-hant" | "zh-hant-tw" | "zh-hant-hk" | "zh-hant-mo" => "zh-Hant",
+        "zh-tw" | "zh-hk" | "zh-mo" | "zh-hant" | "zh-hant-tw" | "zh-hant-hk" | "zh-hant-mo" => {
+            "zh-Hant"
+        }
         "zh" | "zh-cn" | "zh-sg" | "zh-hans" | "zh-hans-cn" | "zh-hans-sg" => "zh-CN",
         _ => "en-US",
     }
@@ -198,7 +218,10 @@ pub fn resolve_locale(language_setting: &str) -> &'static str {
 /// Inject only the usage fetch at the production refresh boundary. The guard,
 /// acceptance, persistence, error and success paths remain the real pipeline.
 pub(crate) trait UsageSource: TrayPresentationSink {
-    fn read_usage(&self, state: &AppState) -> impl std::future::Future<Output = Result<RawCodexUsage, String>> + Send;
+    fn read_usage(
+        &self,
+        state: &AppState,
+    ) -> impl std::future::Future<Output = Result<RawCodexUsage, String>> + Send;
 }
 
 impl UsageSource for AppHandle {
@@ -214,9 +237,20 @@ impl UsageSource for AppHandle {
         let started_at = reader::unix_now();
         // Cancellation of an earlier read must not carry recovery evidence into
         // the next sample. This is also idempotent after an ordinary failure.
-        let previous_failed = state.reader.lock().unwrap_or_else(|p| p.into_inner()).failure.is_some();
-        if previous_failed { crate::pause_control::resume::update(state, None).await; }
-        let server_wait = state.polling.lock().unwrap_or_else(|p| p.into_inner()).server_wait(std::time::Instant::now());
+        let previous_failed = state
+            .reader
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .failure
+            .is_some();
+        if previous_failed {
+            crate::pause_control::resume::update(state, None).await;
+        }
+        let server_wait = state
+            .polling
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .server_wait(std::time::Instant::now());
         if let Some(wait) = server_wait {
             let mut failure = ReadFailure::new(ReadStage::Quota, FailureKind::Rpc);
             failure.http_status = Some(429);
@@ -229,19 +263,29 @@ impl UsageSource for AppHandle {
         let mut observer = |event| async move {
             let finished = matches!(&event, ReadEvent::Finished(_));
             let _source_commit = state.settings_patch.lock().await;
-            if state.source_generation.load(Ordering::Acquire) != generation { return; }
+            if state.source_generation.load(Ordering::Acquire) != generation {
+                return;
+            }
             observe_read_event(self, state, event).await;
-            if finished { queue_reader_history(self); }
+            if finished {
+                queue_reader_history(self);
+            }
         };
         let result = client.fetch_usage(&mut observer).await;
         let _source_commit = state.settings_patch.lock().await;
-        if state.source_generation.load(Ordering::Acquire) != generation { return Err("Usage source changed during the read".into()); }
+        if state.source_generation.load(Ordering::Acquire) != generation {
+            return Err("Usage source changed during the read".into());
+        }
         let mut status = state.reader.lock().unwrap_or_else(|p| p.into_inner());
         match result {
             Ok(value) => {
                 status.observation = Some(value.timing);
                 status.failure = None;
-                status.phase = if status.display_only() { "stale" } else { "success" };
+                status.phase = if status.display_only() {
+                    "stale"
+                } else {
+                    "success"
+                };
                 Ok(value.usage)
             }
             Err(error) => {
@@ -280,7 +324,9 @@ async fn read_claude_usage(state: &AppState, generation: u64) -> Result<RawCodex
         crate::claude::source::read_usage(dir, now)
     };
     let _source_commit = state.settings_patch.lock().await;
-    if state.source_generation.load(Ordering::Acquire) != generation { return Err("Usage source changed during the read".into()); }
+    if state.source_generation.load(Ordering::Acquire) != generation {
+        return Err("Usage source changed during the read".into());
+    }
     let mut status = state.reader.lock().unwrap_or_else(|p| p.into_inner());
     status.observation = None;
     match result {
@@ -297,7 +343,11 @@ async fn read_claude_usage(state: &AppState, generation: u64) -> Result<RawCodex
     }
 }
 
-async fn read_dsh_usage(state: &AppState, settings: &OverlaySettings, generation: u64) -> Result<RawCodexUsage, String> {
+pub(crate) async fn read_dsh_usage(
+    state: &AppState,
+    settings: &OverlaySettings,
+    generation: u64,
+) -> Result<RawCodexUsage, String> {
     let result = async {
         let connection = state.dsh.status().await;
         if !connection.connected || connection.instance_id.as_deref() != Some(settings.dsh_instance_id.as_str())
@@ -307,7 +357,9 @@ async fn read_dsh_usage(state: &AppState, settings: &OverlaySettings, generation
         state.dsh.read_usage(&settings.dsh_account_id).await
     }.await;
     let _source_commit = state.settings_patch.lock().await;
-    if state.source_generation.load(Ordering::Acquire) != generation { return Err("Usage source changed during the read".into()); }
+    if state.source_generation.load(Ordering::Acquire) != generation {
+        return Err("Usage source changed during the read".into());
+    }
     let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
     reader.observation = None;
     reader.failure = None;
@@ -315,10 +367,17 @@ async fn read_dsh_usage(state: &AppState, settings: &OverlaySettings, generation
     result
 }
 
-async fn read_claude_live(state: &AppState, now: i64) -> Result<crate::claude::shared::Snapshot, ReadFailure> {
+async fn read_claude_live(
+    state: &AppState,
+    now: i64,
+) -> Result<crate::claude::shared::Snapshot, ReadFailure> {
     use crate::claude::live::{self, LiveStep};
     use crate::claude::shared;
-    let step = state.claude_live.lock().unwrap_or_else(|p| p.into_inner()).step(std::time::Instant::now());
+    let step = state
+        .claude_live
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .step(std::time::Instant::now());
     match step {
         LiveStep::Answer(snapshot) => return Ok(snapshot),
         LiveStep::Failure(failure) => return Err(failure),
@@ -326,13 +385,20 @@ async fn read_claude_live(state: &AppState, now: i64) -> Result<crate::claude::s
     }
     let mut result = live::fetch(now).await;
     if let Err(failure) = &result {
-        let renew = state.claude_live.lock().unwrap_or_else(|p| p.into_inner())
+        let renew = state
+            .claude_live
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
             .take_renewal(std::time::Instant::now(), failure);
         if renew && live::renew_login().await {
             result = live::fetch(reader::unix_now()).await;
         }
     }
-    state.claude_live.lock().unwrap_or_else(|p| p.into_inner()).record(std::time::Instant::now(), &result);
+    state
+        .claude_live
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .record(std::time::Instant::now(), &result);
     let snapshot = result?;
     let dir = state.config_manager.runtime_dir();
     let mut stored = snapshot.clone();
@@ -346,7 +412,11 @@ async fn read_claude_live(state: &AppState, now: i64) -> Result<crate::claude::s
     Ok(snapshot)
 }
 
-pub(crate) async fn observe_read_event<S: TrayPresentationSink>(sink: &S, state: &AppState, event: ReadEvent) {
+pub(crate) async fn observe_read_event<S: TrayPresentationSink>(
+    sink: &S,
+    state: &AppState,
+    event: ReadEvent,
+) {
     match event {
         ReadEvent::Failed(error) => {
             {
@@ -361,7 +431,10 @@ pub(crate) async fn observe_read_event<S: TrayPresentationSink>(sink: &S, state:
         event => {
             let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
             match event {
-                ReadEvent::Started(attempt) => { reader.attempt = attempt; reader.phase = "initializing"; }
+                ReadEvent::Started(attempt) => {
+                    reader.attempt = attempt;
+                    reader.phase = "initializing";
+                }
                 ReadEvent::Initializing => reader.phase = "initializing",
                 ReadEvent::Quota => reader.phase = "reading",
                 ReadEvent::Retrying => reader.phase = "retrying",
@@ -379,7 +452,9 @@ fn queue_reader_history(app: &AppHandle) {
     let generation = state.source_generation.load(Ordering::Acquire);
     {
         let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
-        if reader.writer_running { return; }
+        if reader.writer_running {
+            return;
+        }
         reader.writer_running = true;
     }
     tauri::async_runtime::spawn(async move {
@@ -388,13 +463,21 @@ fn queue_reader_history(app: &AppHandle) {
             // A -> B -> A may reload A and start a second writer while A's old
             // spawn_blocking still writes the same path and temporary file.
             let _source_commit = state.settings_patch.lock().await;
-            if state.source_generation.load(Ordering::Acquire) != generation { return; }
+            if state.source_generation.load(Ordering::Acquire) != generation {
+                return;
+            }
             let (history, revision, path) = {
                 let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
-                (reader.history.clone(), reader.revision, state.config_manager.quota_history_path())
+                (
+                    reader.history.clone(),
+                    reader.revision,
+                    state.config_manager.quota_history_path(),
+                )
             };
             let saved = tokio::task::spawn_blocking(move || history.save(&path)).await;
-            if state.source_generation.load(Ordering::Acquire) != generation { return; }
+            if state.source_generation.load(Ordering::Acquire) != generation {
+                return;
+            }
             let mut reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
             if !matches!(saved, Ok(Ok(()))) || reader.revision == revision {
                 reader.writer_running = false;
@@ -404,27 +487,53 @@ fn queue_reader_history(app: &AppHandle) {
     });
 }
 
-struct RefreshCompletion<'a> { state: &'a AppState, generation: u64, completed: bool }
+struct RefreshCompletion<'a> {
+    state: &'a AppState,
+    generation: u64,
+    completed: bool,
+}
 impl Drop for RefreshCompletion<'_> {
     fn drop(&mut self) {
-        if !self.completed && self.state.source_generation.load(Ordering::Acquire) == self.generation {
+        if !self.completed
+            && self.state.source_generation.load(Ordering::Acquire) == self.generation
+        {
             let failure = ReadFailure::new(ReadStage::Refresh, FailureKind::Cancelled);
-            *self.state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()) = Some(Err(failure.to_string()));
+            *self
+                .state
+                .last_refresh_result
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(Err(failure.to_string()));
             let mut reader = self.state.reader.lock().unwrap_or_else(|p| p.into_inner());
-            reader.phase = "error"; reader.failure = Some(failure);
+            reader.phase = "error";
+            reader.failure = Some(failure);
             drop(reader);
-            self.state.auto_pause.lock().unwrap_or_else(|p| p.into_inner()).invalidate_pending();
-            self.state.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).invalidate();
+            self.state
+                .auto_pause
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .invalidate_pending();
+            self.state
+                .dsh_control
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .invalidate();
         }
     }
 }
 
-pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState>) -> Result<CodexUsage, String> {
+pub(crate) async fn refresh_usage<S: UsageSource>(
+    sink: &S,
+    state: &Arc<AppState>,
+) -> Result<CodexUsage, String> {
     let _refresh_guard = match state.refresh_guard.try_lock() {
         Ok(guard) => guard,
         Err(_) => {
             let guard = state.refresh_guard.lock().await;
-            let result = state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()).clone()
+            let result = state
+                .last_refresh_result
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
                 .unwrap_or_else(|| Err("Usage refresh completed without a result".into()));
             drop(guard);
             return result;
@@ -435,10 +544,21 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
         let _source_commit = state.settings_patch.lock().await;
         state.source_generation.load(Ordering::Acquire)
     };
-    *state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()) = None;
-    let mut completion = RefreshCompletion { state, generation, completed: false };
+    *state
+        .last_refresh_result
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = None;
+    let mut completion = RefreshCompletion {
+        state,
+        generation,
+        completed: false,
+    };
 
-    state.polling.lock().unwrap_or_else(|p| p.into_inner()).started(std::time::Instant::now());
+    state
+        .polling
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .started(std::time::Instant::now());
     state.config_manager.write_status("reading", None);
     let raw_result = sink.read_usage(state).await;
 
@@ -447,7 +567,9 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
     let _source_commit = state.settings_patch.lock().await;
     if state.source_generation.load(Ordering::Acquire) != generation {
         completion.completed = true;
-        return Err("Usage source changed during the read; discarded the previous source result".into());
+        return Err(
+            "Usage source changed during the read; discarded the previous source result".into(),
+        );
     }
     let source_settings = state.settings.lock().await.clone();
     let result = match raw_result {
@@ -491,9 +613,24 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
             }
             {
                 let settings = state.settings.lock().await;
-                let display_only = state.reader.lock().unwrap_or_else(|p| p.into_inner()).display_only();
-                state.polling.lock().unwrap_or_else(|p| p.into_inner())
-                    .completed_with_recovery(&settings, Some(&usage), std::time::Instant::now(), crate::polling::ReadRecovery { display_only, ..Default::default() });
+                let display_only = state
+                    .reader
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .display_only();
+                state
+                    .polling
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .completed_with_recovery(
+                        &settings,
+                        Some(&usage),
+                        std::time::Instant::now(),
+                        crate::polling::ReadRecovery {
+                            display_only,
+                            ..Default::default()
+                        },
+                    );
             }
             state.poll_wake.notify_one();
             state.config_manager.write_status("ok", None);
@@ -507,7 +644,12 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
             if codex {
                 crate::pause_control::schedule(state, settings, usage.clone(), account_id);
             } else if source_settings.provider == Provider::Dsh {
-                crate::dsh_control::schedule(state, source_settings.clone(), raw.clone(), generation);
+                crate::dsh_control::schedule(
+                    state,
+                    source_settings.clone(),
+                    raw.clone(),
+                    generation,
+                );
             }
             Ok(usage)
         }
@@ -518,13 +660,28 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
             }
             {
                 let settings = state.settings.lock().await;
-                let failure = state.reader.lock().unwrap_or_else(|p| p.into_inner()).failure.clone();
-                state.polling.lock().unwrap_or_else(|p| p.into_inner())
-                    .completed_with_recovery(&settings, None, std::time::Instant::now(), crate::polling::ReadRecovery {
-                        transient: failure.as_ref().is_some_and(ReadFailure::transient),
-                        retry_after_seconds: failure.as_ref().and_then(|f| f.retry_after_seconds),
-                        display_only: false,
-                    });
+                let failure = state
+                    .reader
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .failure
+                    .clone();
+                state
+                    .polling
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .completed_with_recovery(
+                        &settings,
+                        None,
+                        std::time::Instant::now(),
+                        crate::polling::ReadRecovery {
+                            transient: failure.as_ref().is_some_and(ReadFailure::transient),
+                            retry_after_seconds: failure
+                                .as_ref()
+                                .and_then(|f| f.retry_after_seconds),
+                            display_only: false,
+                        },
+                    );
             }
             state.poll_wake.notify_one();
             state.config_manager.write_status("error", Some(&error));
@@ -532,16 +689,26 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
             Err(error)
         }
     };
-    *state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()) = Some(result.clone());
+    *state
+        .last_refresh_result
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = Some(result.clone());
     completion.completed = true;
     result
 }
 
 /// Failure preserves cached usage and cancels unsent pause work from an older read.
 pub(crate) async fn process_usage_error<S: TrayPresentationSink>(sink: &S, state: &AppState) {
-    state.auto_pause.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    state
+        .auto_pause
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .invalidate_pending();
-    state.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).invalidate();
+    state
+        .dsh_control
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .invalidate();
     let settings = state.settings.lock().await;
     let mut status = state.tray_read_status.lock().await;
     *status = TrayReadStatus::Error;
@@ -560,20 +727,32 @@ pub(crate) fn overlay_geometry_changed(previous: &OverlaySettings, next: &Overla
 }
 
 #[tauri::command]
-pub async fn fetch_usage(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<UsageEnvelope, String> {
+pub async fn fetch_usage(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<UsageEnvelope, String> {
     let generation = state.source_generation.load(Ordering::Acquire);
     let usage = refresh_usage(&app, state.inner()).await?;
     let _source_commit = state.settings_patch.lock().await;
-    if state.source_generation.load(Ordering::Acquire) != generation { return Err("Usage source changed".into()); }
+    if state.source_generation.load(Ordering::Acquire) != generation {
+        return Err("Usage source changed".into());
+    }
     let settings = state.settings.lock().await;
     Ok(usage_envelope(&state, &settings, usage))
 }
 
 #[tauri::command]
-pub async fn get_last_usage(state: State<'_, Arc<AppState>>) -> Result<Option<UsageEnvelope>, String> {
+pub async fn get_last_usage(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<UsageEnvelope>, String> {
     let _source_commit = state.settings_patch.lock().await;
     let settings = state.settings.lock().await;
-    Ok(state.last_usage.lock().await.clone().map(|usage| usage_envelope(&state, &settings, usage)))
+    Ok(state
+        .last_usage
+        .lock()
+        .await
+        .clone()
+        .map(|usage| usage_envelope(&state, &settings, usage)))
 }
 
 #[tauri::command]
@@ -586,94 +765,334 @@ pub async fn get_settings(state: State<'_, Arc<AppState>>) -> Result<SettingsEnv
 }
 
 #[derive(Serialize)]
-pub struct DshBridgeInstance { pub id: String, pub label: String, pub origin: String }
+pub struct DshBridgeInstance {
+    pub id: String,
+    pub label: String,
+    pub origin: String,
+}
 
 #[tauri::command]
-pub async fn dsh_discover(state: State<'_, Arc<AppState>>) -> Result<Vec<DshBridgeInstance>, String> {
+pub async fn dsh_discover(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<DshBridgeInstance>, String> {
     let root = state.config_manager.runtime_dir().join("dsh-bridges");
-    if !root.exists() { return Ok(Vec::new()); }
-    let canonical = std::fs::canonicalize(&root).map_err(|_| "Could not read DSH bridge discovery")?;
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let canonical =
+        std::fs::canonicalize(&root).map_err(|_| "Could not read DSH bridge discovery")?;
     let entries = std::fs::read_dir(&root).map_err(|_| "Could not read DSH bridge discovery")?;
     let mut instances = Vec::new();
     for entry in entries.take(64).flatten() {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
-        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue; };
-        if !crate::pause_control::looks_like_thread_id(id) { continue; }
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !crate::pause_control::looks_like_thread_id(id) {
+            continue;
+        }
         if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink())
-            || !std::fs::canonicalize(&path).is_ok_and(|p| p.parent() == Some(canonical.as_path())) { continue; }
-        let Ok(metadata) = std::fs::metadata(&path) else { continue; };
-        if !metadata.is_file() || metadata.len() > 16384 { continue; }
-        let Ok(bytes) = std::fs::read(&path) else { continue; };
-        let Ok(record) = serde_json::from_slice::<Value>(&bytes) else { continue; };
-        if record["schemaVersion"] != 1 || record["instanceId"].as_str() != Some(id) { continue; }
-        let Some(origin) = record["origin"].as_str() else { continue; };
-        let Ok(url) = reqwest::Url::parse(origin) else { continue; };
-        if url.scheme() != "http" || url.host_str() != Some("127.0.0.1") || url.port().is_none()
-            || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() || url.path() != "/" { continue; }
-        let label = record["profileLabel"].as_str().filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)).unwrap_or("DSH companion");
-        instances.push(DshBridgeInstance { id: id.into(), label: label.into(), origin: url.origin().ascii_serialization() });
+            || !std::fs::canonicalize(&path).is_ok_and(|p| p.parent() == Some(canonical.as_path()))
+        {
+            continue;
+        }
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > 16384 {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        if record["schemaVersion"] != 1 || record["instanceId"].as_str() != Some(id) {
+            continue;
+        }
+        let Some(origin) = record["origin"].as_str() else {
+            continue;
+        };
+        let Ok(url) = reqwest::Url::parse(origin) else {
+            continue;
+        };
+        if url.scheme() != "http"
+            || url.host_str() != Some("127.0.0.1")
+            || url.port().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || url.path() != "/"
+        {
+            continue;
+        }
+        let label = record["profileLabel"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+            .unwrap_or("DSH companion");
+        instances.push(DshBridgeInstance {
+            id: id.into(),
+            label: label.into(),
+            origin: url.origin().ascii_serialization(),
+        });
     }
-    instances.sort_by(|a,b| a.label.cmp(&b.label).then(a.id.cmp(&b.id)));
+    instances.sort_by(|a, b| a.label.cmp(&b.label).then(a.id.cmp(&b.id)));
     Ok(instances)
 }
 
 #[tauri::command]
-pub async fn dsh_connection_status(state: State<'_, Arc<AppState>>) -> Result<crate::dsh::ConnectionStatus, String> {
-    Ok(state.dsh.status().await)
+pub async fn dsh_connection_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::dsh::ConnectionStatus, String> {
+    Ok(state.dsh_auto.status(&state.dsh))
 }
 
 #[tauri::command]
-pub async fn dsh_connect(bridge_id: Option<String>, connection_url: Option<String>, state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<crate::dsh::ConnectionStatus, String> {
-    if bridge_id.is_some() == connection_url.is_some() { return Err("Select exactly one DSH connection method".into()); }
+pub async fn dsh_auto_retry(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if state.settings.lock().await.provider != Provider::Dsh {
+        return Err("Select DSH before retrying its connection".into());
+    }
+    state.dsh_auto.retry(&state.dsh);
+    state
+        .dsh_control
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .invalidate();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn dsh_auto_setup(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+    crate::dsh::auto::setup(&app, state.inner(), true).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn dsh_bind_targets(
+    account_id: String,
+    session_ids: Vec<String>,
+    expected_instance_id: String,
+    expected_connection_revision: u64,
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<SettingsEnvelope, String> {
+    bind_dsh_targets(
+        &app,
+        state.inner(),
+        account_id,
+        session_ids,
+        expected_instance_id,
+        expected_connection_revision,
+    )
+    .await
+}
+
+pub(crate) async fn bind_dsh_targets<S: TrayPresentationSink>(
+    sink: &S,
+    state: &Arc<AppState>,
+    account_id: String,
+    session_ids: Vec<String>,
+    expected_instance_id: String,
+    expected_connection_revision: u64,
+) -> Result<SettingsEnvelope, String> {
+    // Serialize the UI's connection expectation with the real source patch.
     let _commit = state.settings_patch.lock().await;
-    let result = if let Some(id) = bridge_id {
-        if !crate::pause_control::looks_like_thread_id(&id) { return Err("Invalid DSH bridge identity".into()); }
-        state.dsh.connect_bridge(&state.config_manager.runtime_dir().join("dsh-bridges").join(format!("{id}.json"))).await
+    let cached = state.dsh.cached_status();
+    if !cached.connected
+        || cached.instance_id.as_deref() != Some(expected_instance_id.as_str())
+        || cached.connection_revision != expected_connection_revision
+    {
+        return Err("DSH connection changed; refresh before selecting targets".into());
+    }
+    let patch = serde_json::json!({"dshAccountId":account_id,"dshSessionIds":session_ids});
+    let changes = validate_settings_patch(&patch, false)?;
+    let status = state.dsh.status().await;
+    let mut settings = state.settings.lock().await;
+    if settings.provider != Provider::Dsh
+        || settings.dsh_instance_id != expected_instance_id
+        || !status.connected
+        || status.connection_revision != expected_connection_revision
+        || (!account_id.is_empty()
+            && !status
+                .accounts
+                .iter()
+                .any(|a| a.active && a.id == account_id))
+        || (account_id.is_empty() && !session_ids.is_empty())
+        || session_ids.iter().any(|id| {
+            !status
+                .sessions
+                .iter()
+                .any(|s| s.id == *id && s.provider == "openai-codex")
+        })
+    {
+        return Err("Select the current DSH account and existing Codex sessions".into());
+    }
+    let unique: std::collections::HashSet<_> = session_ids.iter().collect();
+    if unique.len() != session_ids.len() {
+        return Err("Duplicate DSH target binding".into());
+    }
+    let mut next = settings.clone();
+    merge_settings_patch(&mut next, &Value::Object(changes.clone()))?;
+    state.config_manager.save_settings_checked(&next)?;
+    let source_changed = !crate::config::same_source(&settings, &next);
+    *settings = next.clone();
+    drop(settings);
+    state.dsh_auto.source_changed();
+    if source_changed {
+        switch_provider(state, next.provider).await;
+    }
+    state
+        .dsh_control
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .invalidate();
+    let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
+    let envelope = SettingsEnvelope::new(state, revision, next);
+    if let Some(app) = sink.app_handle() {
+        let _ = app.emit("settings_updated", &envelope);
+    }
+    state
+        .polling
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .request_now(std::time::Instant::now());
+    state.poll_wake.notify_one();
+    crate::tray::repaint_tray(sink, state).await;
+    Ok(envelope)
+}
+
+#[tauri::command]
+pub async fn dsh_connect(
+    bridge_id: Option<String>,
+    connection_url: Option<String>,
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<crate::dsh::ConnectionStatus, String> {
+    if bridge_id.is_some() == connection_url.is_some() {
+        return Err("Select exactly one DSH connection method".into());
+    }
+    let epoch = state.dsh_auto.suspend(&state.dsh);
+    state
+        .dsh_control
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .invalidate();
+    let generation = state.source_generation.load(Ordering::Acquire);
+    let prepared = if let Some(id) = bridge_id {
+        if !crate::pause_control::looks_like_thread_id(&id) {
+            return Err("Invalid DSH bridge identity".into());
+        }
+        let directory = state.config_manager.runtime_dir().join("dsh-bridges");
+        state
+            .dsh
+            .prepare_bridge_in_directory(&directory.join(format!("{id}.json")), &directory)
+            .await?
     } else {
-        state.dsh.connect(connection_url.as_deref().unwrap_or_default()).await
+        state
+            .dsh
+            .preparation(connection_url.as_deref().unwrap_or_default())
+            .await?
     };
-    let status = match result { Ok(status) => status, Err(error) => {
-        state.dsh.disconnect().await;
-        publish_dsh_binding(&app, &state, None, None).await?;
-        return Err(error);
-    }};
-    let origin = state.dsh.origin().await;
-    publish_dsh_binding(&app, &state, origin, status.instance_id.clone()).await?;
-    Ok(status)
+    let _commit = state.settings_patch.lock().await;
+    let mut settings = state.settings.lock().await;
+    let mut installation = state.dsh.installation().await;
+    let status = prepared.status().clone();
+    let mut next = settings.clone();
+    next.dsh_base_url = status.origin.clone().unwrap_or_default();
+    next.dsh_instance_id = status.instance_id.clone().unwrap_or_default();
+    next.dsh_profile_id.clear();
+    next.dsh_account_id.clear();
+    next.dsh_session_ids.clear();
+    let source_changed = !crate::config::same_source(&settings, &next);
+    state.dsh_auto.with_operation(epoch, || {
+        if state.source_generation.load(Ordering::Acquire) != generation
+            || !installation.accepts(&prepared)
+        {
+            return Err("DSH connection changed during pairing".into());
+        }
+        state.config_manager.save_settings_checked(&next)?;
+        installation.install(prepared);
+        *settings = next.clone();
+        Ok(())
+    })?;
+    drop(installation);
+    drop(settings);
+    state
+        .dsh_control
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .reset();
+    publish_dsh_binding(&app, &state, next, source_changed).await;
+    state.dsh_auto.manual_phase(epoch, "connected-unbound");
+    Ok(state.dsh_auto.status(&state.dsh))
 }
 
 #[tauri::command]
-pub async fn dsh_disconnect(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<crate::dsh::ConnectionStatus, String> {
+pub async fn dsh_disconnect(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<crate::dsh::ConnectionStatus, String> {
+    // Revoke before waiting on any source/network lock. Old handshakes cannot
+    // install after this point and the background worker stays suspended.
+    state.dsh_auto.suspend(&state.dsh);
+    state
+        .dsh_control
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .invalidate();
     let _commit = state.settings_patch.lock().await;
-    state.dsh.disconnect().await;
-    publish_dsh_binding(&app, &state, None, None).await?;
-    Ok(state.dsh.status().await)
-}
-
-// Caller holds settings_patch. Pairing never guesses an account or target.
-async fn publish_dsh_binding(app: &AppHandle, state: &Arc<AppState>, origin: Option<String>, instance: Option<String>) -> Result<(), String> {
-    let next = {
+    let (next, changed) = {
         let mut settings = state.settings.lock().await;
         let mut next = settings.clone();
-        next.dsh_base_url = origin.unwrap_or_default(); next.dsh_instance_id = instance.unwrap_or_default();
-        next.dsh_account_id.clear(); next.dsh_session_ids.clear();
-        if let Err(error) = state.config_manager.save_settings_checked(&next) {
-            state.dsh.disconnect().await;
-            return Err(error);
+        next.dsh_base_url.clear();
+        next.dsh_instance_id.clear();
+        next.dsh_account_id.clear();
+        next.dsh_session_ids.clear();
+        let changed = !crate::config::same_source(&settings, &next);
+        if changed {
+            state.config_manager.save_settings_checked(&next)?;
+            *settings = next.clone();
         }
-        *settings = next.clone(); next
+        (next, changed)
     };
-    // An explicit re-pair is the only user action that clears the at-most-once
-    // ledger. Source/account/target switches only cancel queued work.
-    state.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).reset();
-    switch_provider(state, next.provider).await;
+    if changed {
+        publish_dsh_binding(&app, &state, next, true).await;
+    }
+    let manager = state.dsh.clone();
+    tauri::async_runtime::spawn(async move {
+        manager.clear_revoked().await;
+    });
+    Ok(state.dsh_auto.status(&state.dsh))
+}
+
+// Caller has durably saved settings and holds settings_patch. Only explicit
+// re-pair clears the at-most-once ledger, never automatic retries/disconnect.
+async fn publish_dsh_binding(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    next: OverlaySettings,
+    source_changed: bool,
+) {
+    if source_changed {
+        switch_provider(state, next.provider).await;
+    }
     let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
-    let _ = app.emit("settings_updated", SettingsEnvelope::new(state, revision, next));
-    state.polling.lock().unwrap_or_else(|p| p.into_inner()).request_now(std::time::Instant::now());
+    let _ = app.emit(
+        "settings_updated",
+        SettingsEnvelope::new(state, revision, next),
+    );
+    state
+        .polling
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .request_now(std::time::Instant::now());
     state.poll_wake.notify_one();
     crate::tray::repaint_tray(app, state).await;
-    Ok(())
 }
 
 /// The auto-pause status the settings window reads.
@@ -694,18 +1113,31 @@ pub async fn resume_chat(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<String, String> {
-    if state.settings.lock().await.provider != Provider::Codex { return Err("Resume is only supported for the local Codex source".into()); }
+    if state.settings.lock().await.provider != Provider::Codex {
+        return Err("Resume is only supported for the local Codex source".into());
+    }
     refresh_usage(&app, state.inner()).await?;
     // A newer refresh may finish while this caller is being resumed. Capture
     // matching cached values/timing under the refresh guard, then release it
     // before bridge I/O. The dispatch guard rejects subsequent observations.
     let (usage, settings, settings_revision, observation) = {
         let _refresh = state.refresh_guard.lock().await;
-        let usage = state.last_usage.lock().await.clone().ok_or_else(|| "quotaStale".to_string())?;
+        let usage = state
+            .last_usage
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| "quotaStale".to_string())?;
         let settings = state.settings.lock().await;
         let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
-        (usage, settings.clone(), state.settings_revision.load(Ordering::Acquire),
-            reader.observation.filter(|o| reader.failure.is_none() && o.action_eligible()))
+        (
+            usage,
+            settings.clone(),
+            state.settings_revision.load(Ordering::Acquire),
+            reader
+                .observation
+                .filter(|o| reader.failure.is_none() && o.action_eligible()),
+        )
     };
     resume_quota_gate(&settings, &usage, observation.is_some())?;
     let target_thread_id = {
@@ -713,13 +1145,17 @@ pub async fn resume_chat(
         if let Some(ref tid) = thread_id {
             tid.clone()
         } else {
-            let ready_tid = manager.plans().into_iter().find(|p| {
-                matches!(
-                    p.phase,
-                    crate::pause_control::resume::ResumePhase::Ready
-                        | crate::pause_control::resume::ResumePhase::NeedsReview
-                )
-            }).map(|p| p.thread_id);
+            let ready_tid = manager
+                .plans()
+                .into_iter()
+                .find(|p| {
+                    matches!(
+                        p.phase,
+                        crate::pause_control::resume::ResumePhase::Ready
+                            | crate::pause_control::resume::ResumePhase::NeedsReview
+                    )
+                })
+                .map(|p| p.thread_id);
             if let Some(tid) = ready_tid {
                 tid
             } else {
@@ -740,27 +1176,59 @@ pub async fn resume_chat(
             let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
             state.settings_revision.load(Ordering::Acquire) == settings_revision
                 && reader.failure.is_none()
-                && reader.observation.is_some_and(|o| o.action_eligible() && observation.is_some_and(|original| original.quota_started == o.quota_started))
+                && reader.observation.is_some_and(|o| {
+                    o.action_eligible()
+                        && observation
+                            .is_some_and(|original| original.quota_started == o.quota_started)
+                })
         },
     )
     .await;
-    if outcome.is_ok() { state.resume.lock().await.complete_plan_for_thread(&target_thread_id, "resumedByUser"); }
+    if outcome.is_ok() {
+        state
+            .resume
+            .lock()
+            .await
+            .complete_plan_for_thread(&target_thread_id, "resumedByUser");
+    }
     crate::pause_control::resume::update(state.inner(), None).await;
     crate::pause_control::status::publish(&app, state.inner()).await;
     outcome
 }
 
-fn resume_quota_gate(settings: &OverlaySettings, usage: &CodexUsage, fresh: bool) -> Result<(), String> {
-    if settings.provider != Provider::Codex { return Err("Resume is only supported for the local Codex source".into()); }
-    let (Some(five), Some(week)) = (usage.five_hour_remaining_percent, usage.week_remaining_percent) else { return Err("quotaStale".into()); };
-    if !fresh { return Err("quotaStale".into()); }
-    if five <= settings.auto_pause_five_hour_threshold_percent || week <= settings.auto_pause_weekly_threshold_percent { return Err("quotaStillLow".into()); }
+fn resume_quota_gate(
+    settings: &OverlaySettings,
+    usage: &CodexUsage,
+    fresh: bool,
+) -> Result<(), String> {
+    if settings.provider != Provider::Codex {
+        return Err("Resume is only supported for the local Codex source".into());
+    }
+    let (Some(five), Some(week)) = (
+        usage.five_hour_remaining_percent,
+        usage.week_remaining_percent,
+    ) else {
+        return Err("quotaStale".into());
+    };
+    if !fresh {
+        return Err("quotaStale".into());
+    }
+    if five <= settings.auto_pause_five_hour_threshold_percent
+        || week <= settings.auto_pause_weekly_threshold_percent
+    {
+        return Err("quotaStillLow".into());
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn cancel_resume_plans(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
-    if state.settings.lock().await.provider != Provider::Codex { return Err("Resume is only supported for the local Codex source".into()); }
+pub async fn cancel_resume_plans(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<(), String> {
+    if state.settings.lock().await.provider != Provider::Codex {
+        return Err("Resume is only supported for the local Codex source".into());
+    }
     state.resume.lock().await.cancel_all("cancelledByUser");
     crate::pause_control::resume::update(state.inner(), None).await;
     crate::pause_control::status::publish(&app, state.inner()).await;
@@ -777,36 +1245,80 @@ pub async fn patch_settings(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<SettingsEnvelope, String> {
+    if patch.get("dshAccountId").is_some() || patch.get("dshSessionIds").is_some() {
+        return Err("DSH target selection requires the displayed connection revision".into());
+    }
     apply_settings_patch(&app, state.inner(), patch, false).await
 }
 
-fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map<String, Value>, String> {
-    let changes = patch.as_object().ok_or("Settings patch must be an object")?;
+fn validate_settings_patch(
+    patch: &Value,
+    allow_auto_start: bool,
+) -> Result<&Map<String, Value>, String> {
+    let changes = patch
+        .as_object()
+        .ok_or("Settings patch must be an object")?;
     if changes.is_empty() {
         return Err("Settings patch is empty".into());
     }
     for (key, value) in changes {
         let valid = match key.as_str() {
             "overlayLayout" => matches!(value.as_str(), Some("grouped" | "stacks")),
-            "scalePercent" => value.as_u64().is_some_and(|n| (100..=250).contains(&n) && n % 5 == 0),
-            "backgroundTransparencyPercent" => value.as_u64().is_some_and(|n| n <= 80 && n % 5 == 0),
-            "showCredits" | "autoCheckUpdates" | "autoInstallUpdates" | "fiveHourResetNotification"
-            | "weeklyResetNotification" | "autoEdgeHide" | "mousePassthrough" | "showPercentageGrid"
-            | "showFiveHourQuota" | "showBurnRate" | "autoPauseOnLowQuota"
-            | "autoResumeAfterQuotaReset" | "includePrereleaseUpdates" | "claudeLivePolling"
+            "scalePercent" => value
+                .as_u64()
+                .is_some_and(|n| (100..=250).contains(&n) && n % 5 == 0),
+            "backgroundTransparencyPercent" => {
+                value.as_u64().is_some_and(|n| n <= 80 && n % 5 == 0)
+            }
+            "showCredits"
+            | "autoCheckUpdates"
+            | "autoInstallUpdates"
+            | "fiveHourResetNotification"
+            | "weeklyResetNotification"
+            | "autoEdgeHide"
+            | "mousePassthrough"
+            | "showPercentageGrid"
+            | "showFiveHourQuota"
+            | "showBurnRate"
+            | "autoPauseOnLowQuota"
+            | "autoResumeAfterQuotaReset"
+            | "includePrereleaseUpdates"
+            | "claudeLivePolling"
             | "showProviderLogo" => value.is_boolean(),
             "autoStart" => allow_auto_start && value.is_boolean(),
-            "autoPauseFiveHourThresholdPercent" => value.as_u64().is_some_and(|n| (1..=15).contains(&n)),
-            "autoPauseWeeklyThresholdPercent" => value.as_u64().is_some_and(|n| (1..=10).contains(&n)),
+            "autoPauseFiveHourThresholdPercent" => {
+                value.as_u64().is_some_and(|n| (1..=15).contains(&n))
+            }
+            "autoPauseWeeklyThresholdPercent" => {
+                value.as_u64().is_some_and(|n| (1..=10).contains(&n))
+            }
             "refreshIntervalSeconds" => value.as_u64().is_some_and(|n| (15..=3600).contains(&n)),
             "language" => matches!(value.as_str(), Some("auto" | "en-US" | "zh-CN" | "zh-Hant")),
             "provider" => matches!(value.as_str(), Some("codex" | "claude" | "dsh")),
-            "dshAccountId" => value.as_str().is_some_and(|s| s.is_empty() || crate::pause_control::looks_like_thread_id(s)),
-            "dshSessionIds" => value.as_array().is_some_and(|items| items.len() <= 32 && items.iter().all(|v| v.as_str().is_some_and(|id| crate::pause_control::looks_like_thread_id(id.strip_prefix("session-").unwrap_or(id))))),
+            "dshAccountId" => value
+                .as_str()
+                .is_some_and(|s| s.is_empty() || crate::pause_control::looks_like_thread_id(s)),
+            "dshSessionIds" => value.as_array().is_some_and(|items| {
+                items.len() <= 32
+                    && items.iter().all(|v| {
+                        v.as_str().is_some_and(|id| {
+                            crate::pause_control::looks_like_thread_id(
+                                id.strip_prefix("session-").unwrap_or(id),
+                            )
+                        })
+                    })
+            }),
             "dshFiveHourThresholdPercent" => value.as_u64().is_some_and(|n| n <= 15),
             "dshWeeklyThresholdPercent" => value.as_u64().is_some_and(|n| n <= 10),
-            "fiveHourSoundMode" | "weeklySoundMode" => matches!(value.as_str(), Some("windows" | "custom")),
-            "fiveHourSoundPath" | "weeklySoundPath" => value.is_null() || value.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 4096),
+            "fiveHourSoundMode" | "weeklySoundMode" => {
+                matches!(value.as_str(), Some("windows" | "custom"))
+            }
+            "fiveHourSoundPath" | "weeklySoundPath" => {
+                value.is_null()
+                    || value
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty() && s.len() <= 4096)
+            }
             _ => false,
         };
         if !valid {
@@ -814,7 +1326,8 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
         }
     }
     if changes.get("autoCheckUpdates") == Some(&Value::Bool(false))
-        && changes.get("autoInstallUpdates") == Some(&Value::Bool(true)) {
+        && changes.get("autoInstallUpdates") == Some(&Value::Bool(true))
+    {
         return Err("Automatic installation requires automatic update checks".into());
     }
     Ok(changes)
@@ -829,7 +1342,9 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
 /// `serde` drops a key that has no matching field *silently*, an assertion that goes
 /// through here is what catches a frontend key that no longer maps onto the struct.
 pub fn merge_settings_patch(settings: &mut OverlaySettings, patch: &Value) -> Result<(), String> {
-    let changes = patch.as_object().ok_or("Settings patch must be an object")?;
+    let changes = patch
+        .as_object()
+        .ok_or("Settings patch must be an object")?;
     let mut merged = serde_json::to_value(&*settings).map_err(|e| e.to_string())?;
     let fields = merged.as_object_mut().ok_or("Settings are not an object")?;
     for (key, value) in changes {
@@ -857,7 +1372,9 @@ mod settings_patch_tests {
     fn rejects_entire_patch_when_one_field_is_invalid() {
         let patch = serde_json::json!({"showCredits": false, "scalePercent": 999});
         assert!(validate_settings_patch(&patch, false).is_err());
-        assert!(validate_settings_patch(&serde_json::json!({"language": "unknown"}), false).is_err());
+        assert!(
+            validate_settings_patch(&serde_json::json!({"language": "unknown"}), false).is_err()
+        );
         assert!(validate_settings_patch(&serde_json::json!({"autoStart": false}), false).is_err());
         assert!(validate_settings_patch(&serde_json::json!({"futureField": true}), false).is_err());
     }
@@ -880,17 +1397,27 @@ mod settings_patch_tests {
         settings.auto_check_updates = false;
         settings.auto_install_updates = true;
         let enable = serde_json::json!({"autoInstallUpdates": true});
-        reconcile_update_preferences(&mut settings, validate_settings_patch(&enable, false).unwrap());
+        reconcile_update_preferences(
+            &mut settings,
+            validate_settings_patch(&enable, false).unwrap(),
+        );
         assert!(settings.auto_check_updates && settings.auto_install_updates);
 
         settings.auto_install_updates = true;
         let disable_checks = serde_json::json!({"autoCheckUpdates": false});
         settings.auto_check_updates = false;
-        reconcile_update_preferences(&mut settings, validate_settings_patch(&disable_checks, false).unwrap());
+        reconcile_update_preferences(
+            &mut settings,
+            validate_settings_patch(&disable_checks, false).unwrap(),
+        );
         assert!(!settings.auto_install_updates);
-        assert!(validate_settings_patch(&serde_json::json!({
-            "autoCheckUpdates": false, "autoInstallUpdates": true
-        }), false).is_err());
+        assert!(validate_settings_patch(
+            &serde_json::json!({
+                "autoCheckUpdates": false, "autoInstallUpdates": true
+            }),
+            false
+        )
+        .is_err());
     }
 
     /// P2-1: the closed allowlist is the toggle's only user entry point. Without the
@@ -900,11 +1427,22 @@ mod settings_patch_tests {
     fn show_percentage_grid_is_on_the_boolean_allowlist() {
         let patch = serde_json::json!({"showPercentageGrid": true});
         assert_eq!(validate_settings_patch(&patch, false).unwrap().len(), 1);
-        assert!(validate_settings_patch(&serde_json::json!({"showPercentageGrid": false}), false).is_ok());
+        assert!(
+            validate_settings_patch(&serde_json::json!({"showPercentageGrid": false}), false)
+                .is_ok()
+        );
         // The boolean branch stays strict, and unknown fields stay rejected.
-        assert!(validate_settings_patch(&serde_json::json!({"showPercentageGrid": "yes"}), false).is_err());
-        assert!(validate_settings_patch(&serde_json::json!({"showPercentageGrid": 1}), false).is_err());
-        assert!(validate_settings_patch(&serde_json::json!({"showPercentageGrid": null}), false).is_err());
+        assert!(
+            validate_settings_patch(&serde_json::json!({"showPercentageGrid": "yes"}), false)
+                .is_err()
+        );
+        assert!(
+            validate_settings_patch(&serde_json::json!({"showPercentageGrid": 1}), false).is_err()
+        );
+        assert!(
+            validate_settings_patch(&serde_json::json!({"showPercentageGrid": null}), false)
+                .is_err()
+        );
         assert!(validate_settings_patch(&serde_json::json!({"futureField": true}), false).is_err());
     }
 
@@ -931,14 +1469,23 @@ mod settings_patch_tests {
         let mut settings = state.config_manager.load_settings();
         assert!(!settings.show_percentage_grid, "the default must be off");
         merge_settings_patch(&mut settings, &patch).expect("the patch must merge");
-        assert!(settings.show_percentage_grid, "the key must map onto the field");
-        state.config_manager.save_settings_checked(&settings).expect("the write must succeed");
+        assert!(
+            settings.show_percentage_grid,
+            "the key must map onto the field"
+        );
+        state
+            .config_manager
+            .save_settings_checked(&settings)
+            .expect("the write must succeed");
 
         // Read back through a fresh manager, i.e. from the file on disk.
         let reloaded = ConfigManager::with_runtime_dir(dir.clone()).load_settings();
         assert!(reloaded.show_percentage_grid);
         let raw = std::fs::read_to_string(state.config_manager.settings_path()).unwrap();
-        assert!(raw.contains("\"showPercentageGrid\": true"), "wire key missing from {raw}");
+        assert!(
+            raw.contains("\"showPercentageGrid\": true"),
+            "wire key missing from {raw}"
+        );
 
         // The command also bumps its revision on a successful patch; the state field
         // is what a frontend assertion sees, so prove the two agree here.
@@ -951,10 +1498,22 @@ mod settings_patch_tests {
     #[test]
     fn the_update_channel_is_a_boolean_setting_that_defaults_to_stable() {
         assert!(!OverlaySettings::default().include_prerelease_updates);
-        assert!(validate_settings_patch(&serde_json::json!({"includePrereleaseUpdates": true}), false).is_ok());
-        assert!(validate_settings_patch(&serde_json::json!({"includePrereleaseUpdates": "yes"}), false).is_err());
+        assert!(validate_settings_patch(
+            &serde_json::json!({"includePrereleaseUpdates": true}),
+            false
+        )
+        .is_ok());
+        assert!(validate_settings_patch(
+            &serde_json::json!({"includePrereleaseUpdates": "yes"}),
+            false
+        )
+        .is_err());
         let mut settings = OverlaySettings::default();
-        merge_settings_patch(&mut settings, &serde_json::json!({"includePrereleaseUpdates": true})).unwrap();
+        merge_settings_patch(
+            &mut settings,
+            &serde_json::json!({"includePrereleaseUpdates": true}),
+        )
+        .unwrap();
         assert!(settings.include_prerelease_updates);
     }
 
@@ -967,7 +1526,9 @@ mod settings_patch_tests {
         assert!(!upgraded.claude_live_polling && upgraded.show_provider_logo);
         let patch = serde_json::json!({"claudeLivePolling": true, "showProviderLogo": false});
         assert_eq!(validate_settings_patch(&patch, false).unwrap().len(), 2);
-        assert!(validate_settings_patch(&serde_json::json!({"claudeLivePolling": 1}), false).is_err());
+        assert!(
+            validate_settings_patch(&serde_json::json!({"claudeLivePolling": 1}), false).is_err()
+        );
     }
 
     /// Negative control: a patch that is not an object, or that carries a key with no
@@ -980,7 +1541,11 @@ mod settings_patch_tests {
 
         // `serde` drops the unknown key silently, so the merge succeeds but the value
         // is unchanged — the reason `validate_settings_patch` has to run first.
-        merge_settings_patch(&mut settings, &serde_json::json!({"showPercentageGridTypo": true})).unwrap();
+        merge_settings_patch(
+            &mut settings,
+            &serde_json::json!({"showPercentageGridTypo": true}),
+        )
+        .unwrap();
         assert!(!settings.show_percentage_grid);
     }
 }
@@ -991,22 +1556,49 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     patch: Value,
     allow_auto_start: bool,
 ) -> Result<SettingsEnvelope, String> {
+    // Validate first, then revoke connection preparations before waiting on the
+    // source commit mutex. Provider changes can cancel a slow network handshake.
+    let changes = validate_settings_patch(&patch, allow_auto_start)?;
+    if let Some(provider) = changes.get("provider") {
+        let provider: Provider =
+            serde_json::from_value(provider.clone()).map_err(|_| "Invalid provider")?;
+        state.dsh_auto.provider_selected(&state.dsh, provider);
+        state
+            .dsh_control
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .invalidate();
+    }
     // Serialize native side effects with the matching persisted preference, even
     // when Settings and the tray submit changes at the same time.
     let _patch_guard = state.settings_patch.lock().await;
-    let changes = validate_settings_patch(&patch, allow_auto_start)?;
     if changes.contains_key("dshAccountId") || changes.contains_key("dshSessionIds") {
         let mut selected = state.settings.lock().await.clone();
         merge_settings_patch(&mut selected, &patch)?;
         let unique: std::collections::HashSet<_> = selected.dsh_session_ids.iter().collect();
-        if unique.len() != selected.dsh_session_ids.len() { return Err("Duplicate DSH target binding".into()); }
+        if unique.len() != selected.dsh_session_ids.len() {
+            return Err("Duplicate DSH target binding".into());
+        }
         if !selected.dsh_account_id.is_empty() || !selected.dsh_session_ids.is_empty() {
             let connection = state.dsh.status().await;
-            if !connection.connected || connection.instance_id.as_deref() != Some(selected.dsh_instance_id.as_str())
-                || !connection.accounts.iter().any(|a| a.active && a.id == selected.dsh_account_id) {
-                return Err("Connect DSH and explicitly select its current active subscription account".into());
+            if !connection.connected
+                || connection.instance_id.as_deref() != Some(selected.dsh_instance_id.as_str())
+                || !connection
+                    .accounts
+                    .iter()
+                    .any(|a| a.active && a.id == selected.dsh_account_id)
+            {
+                return Err(
+                    "Connect DSH and explicitly select its current active subscription account"
+                        .into(),
+                );
             }
-            if selected.dsh_session_ids.iter().any(|id| !connection.sessions.iter().any(|s| &s.id == id && s.provider == "codex")) {
+            if selected.dsh_session_ids.iter().any(|id| {
+                !connection
+                    .sessions
+                    .iter()
+                    .any(|s| &s.id == id && s.provider == "openai-codex")
+            }) {
                 return Err("Select only existing ordinary DSH Codex sessions".into());
             }
         }
@@ -1071,9 +1663,19 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         switch_provider(state, envelope.settings.provider).await;
         envelope.source_generation = state.source_generation.load(Ordering::Acquire);
     }
+    if changes.contains_key("dshAccountId") || changes.contains_key("dshSessionIds") {
+        state.dsh_auto.source_changed();
+    }
     // Settings changes revoke queued DSH control even if the data namespace is unchanged.
-    state.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).invalidate();
-    if let Err(error) = crate::claude::install::write_guard_config(state.config_manager.runtime_dir(), &envelope.settings) {
+    state
+        .dsh_control
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .invalidate();
+    if let Err(error) = crate::claude::install::write_guard_config(
+        state.config_manager.runtime_dir(),
+        &envelope.settings,
+    ) {
         eprintln!("Could not write the Claude guard preferences: {error}");
     }
 
@@ -1096,9 +1698,19 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         if changes.contains_key("claudeLivePolling") {
             *state.claude_live.lock().unwrap_or_else(|p| p.into_inner()) = Default::default();
         }
-        if provider_changed || changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota" | "claudeLivePolling"
-            | "autoPauseFiveHourThresholdPercent" | "autoPauseWeeklyThresholdPercent"
-            | "dshFiveHourThresholdPercent" | "dshWeeklyThresholdPercent")) {
+        if provider_changed
+            || changes.keys().any(|key| {
+                matches!(
+                    key.as_str(),
+                    "autoPauseOnLowQuota"
+                        | "claudeLivePolling"
+                        | "autoPauseFiveHourThresholdPercent"
+                        | "autoPauseWeeklyThresholdPercent"
+                        | "dshFiveHourThresholdPercent"
+                        | "dshWeeklyThresholdPercent"
+                )
+            })
+        {
             polling.request_now(std::time::Instant::now());
         }
     }
@@ -1106,24 +1718,21 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
 
     if let Some(app) = sink.app_handle() {
         if auto_edge_hide_changed {
-            if let Err(error) = crate::dock::auto_hide_changed(
-                app,
-                state,
-                envelope.settings.auto_edge_hide,
-            )
-            .await
+            if let Err(error) =
+                crate::dock::auto_hide_changed(app, state, envelope.settings.auto_edge_hide).await
             {
                 let rollback = {
                     let mut settings = state.settings.lock().await;
                     let mut reverted = settings.clone();
                     reverted.auto_edge_hide = previous_auto_edge_hide;
-                    let persistence_error = state
-                        .config_manager
-                        .save_settings_checked(&reverted)
-                        .err();
+                    let persistence_error =
+                        state.config_manager.save_settings_checked(&reverted).err();
                     *settings = reverted.clone();
                     let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
-                    (SettingsEnvelope::new(state, revision, reverted), persistence_error)
+                    (
+                        SettingsEnvelope::new(state, revision, reverted),
+                        persistence_error,
+                    )
                 };
                 let _ = app.emit("settings_updated", &rollback.0);
                 return Err(match rollback.1 {
@@ -1135,15 +1744,20 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
             }
         }
         if mouse_passthrough_changed {
-            if let Err(error) = set_main_mouse_passthrough(app, envelope.settings.mouse_passthrough) {
+            if let Err(error) = set_main_mouse_passthrough(app, envelope.settings.mouse_passthrough)
+            {
                 let rollback = {
                     let mut settings = state.settings.lock().await;
                     let mut reverted = settings.clone();
                     reverted.mouse_passthrough = previous_mouse_passthrough;
-                    let persistence_error = state.config_manager.save_settings_checked(&reverted).err();
+                    let persistence_error =
+                        state.config_manager.save_settings_checked(&reverted).err();
                     *settings = reverted.clone();
                     let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
-                    (SettingsEnvelope::new(state, revision, reverted), persistence_error)
+                    (
+                        SettingsEnvelope::new(state, revision, reverted),
+                        persistence_error,
+                    )
                 };
                 let _ = app.emit("settings_updated", &rollback.0);
                 return Err(match rollback.1 {
@@ -1165,9 +1779,15 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         }
     }
 
-    if changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota"
-        | "autoResumeAfterQuotaReset" | "autoPauseFiveHourThresholdPercent"
-        | "autoPauseWeeklyThresholdPercent")) {
+    if changes.keys().any(|key| {
+        matches!(
+            key.as_str(),
+            "autoPauseOnLowQuota"
+                | "autoResumeAfterQuotaReset"
+                | "autoPauseFiveHourThresholdPercent"
+                | "autoPauseWeeklyThresholdPercent"
+        )
+    }) {
         crate::pause_control::resume::update(state, None).await;
     }
     crate::tray::repaint_tray(sink, state).await;
@@ -1186,8 +1806,10 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
 
         // Broadcast updated settings to all windows
         let _ = app.emit("settings_updated", &envelope);
-        if auto_check_just_enabled || auto_install_just_enabled
-            || (update_channel_changed && new_settings.auto_check_updates) {
+        if auto_check_just_enabled
+            || auto_install_just_enabled
+            || (update_channel_changed && new_settings.auto_check_updates)
+        {
             let app_for_check = app.clone();
             let state_for_check = state.clone();
             tauri::async_runtime::spawn(async move {
@@ -1210,31 +1832,65 @@ pub(crate) async fn switch_provider(state: &Arc<AppState>, provider: Provider) {
     };
     state.config_manager.set_source(&settings);
     state.pending_reset_fetches.lock().await.cancel_all();
-    state.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).invalidate();
+    state
+        .dsh_control
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .invalidate();
     *state.burn_rate.lock().await = BurnRateTracker::load(&state.config_manager);
     *state.reset_state.lock().await = crate::notify::load_reset_state(&state.config_manager);
-    *state.resume.lock().await = crate::pause_control::resume::ResumeManager::load(&state.config_manager);
+    *state.resume.lock().await =
+        crate::pause_control::resume::ResumeManager::load(&state.config_manager);
     *state.last_usage.lock().await = None;
-    *state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()) = None;
-    *state.reader.lock().unwrap_or_else(|p| p.into_inner()) = ReaderState::load(&state.config_manager);
-    state.auto_pause.lock().unwrap_or_else(|p| p.into_inner()).invalidate_pending();
+    *state
+        .last_refresh_result
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = None;
+    *state.reader.lock().unwrap_or_else(|p| p.into_inner()) =
+        ReaderState::load(&state.config_manager);
+    state
+        .auto_pause
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .invalidate_pending();
     crate::pause_control::clear_active_periods(state);
     *state.tray_read_status.lock().await = TrayReadStatus::Pending;
 }
 
 #[tauri::command]
-pub async fn claude_connection_status(state: State<'_, Arc<AppState>>) -> Result<crate::claude::install::ClaudeConnectionStatus, String> {
+pub async fn claude_connection_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::claude::install::ClaudeConnectionStatus, String> {
     let settings_path = crate::claude::install::claude_settings_path();
     let bridge = crate::claude::install::bridge_path();
-    let mut status = crate::claude::install::status(settings_path.as_deref(), state.config_manager.runtime_dir(), bridge.as_deref());
+    let mut status = crate::claude::install::status(
+        settings_path.as_deref(),
+        state.config_manager.runtime_dir(),
+        bridge.as_deref(),
+    );
     let settings = state.settings.lock().await.clone();
     if settings.provider == Provider::Claude {
         // A failed live read falls back to the stored reading, which clears
         // the read failure; the live failure is what needs attention then.
-        let live_failure = settings.claude_live_polling
-            .then(|| state.claude_live.lock().unwrap_or_else(|p| p.into_inner()).failure.clone())
+        let live_failure = settings
+            .claude_live_polling
+            .then(|| {
+                state
+                    .claude_live
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .failure
+                    .clone()
+            })
             .flatten();
-        let failure = live_failure.or_else(|| state.reader.lock().unwrap_or_else(|p| p.into_inner()).failure.clone());
+        let failure = live_failure.or_else(|| {
+            state
+                .reader
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .failure
+                .clone()
+        });
         status.read_failure = failure.as_ref().map(|f| f.kind);
         status.read_http_status = failure.and_then(|f| f.http_status);
     }
@@ -1242,28 +1898,45 @@ pub async fn claude_connection_status(state: State<'_, Arc<AppState>>) -> Result
 }
 
 #[tauri::command]
-pub async fn claude_connect(state: State<'_, Arc<AppState>>) -> Result<crate::claude::install::ClaudeConnectionStatus, String> {
-    let settings_path = crate::claude::install::claude_settings_path().ok_or("Could not locate the Claude Code settings folder")?;
-    let bridge = crate::claude::install::bridge_path().ok_or("Could not locate the overlay executable")?;
+pub async fn claude_connect(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::claude::install::ClaudeConnectionStatus, String> {
+    let settings_path = crate::claude::install::claude_settings_path()
+        .ok_or("Could not locate the Claude Code settings folder")?;
+    let bridge =
+        crate::claude::install::bridge_path().ok_or("Could not locate the overlay executable")?;
     crate::claude::install::connect(&settings_path, state.config_manager.runtime_dir(), &bridge)?;
-    state.polling.lock().unwrap_or_else(|p| p.into_inner()).request_now(std::time::Instant::now());
+    state
+        .polling
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .request_now(std::time::Instant::now());
     state.poll_wake.notify_one();
     claude_connection_status(state).await
 }
 
 #[tauri::command]
-pub async fn claude_disconnect(state: State<'_, Arc<AppState>>) -> Result<crate::claude::install::ClaudeConnectionStatus, String> {
-    let settings_path = crate::claude::install::claude_settings_path().ok_or("Could not locate the Claude Code settings folder")?;
+pub async fn claude_disconnect(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::claude::install::ClaudeConnectionStatus, String> {
+    let settings_path = crate::claude::install::claude_settings_path()
+        .ok_or("Could not locate the Claude Code settings folder")?;
     crate::claude::install::disconnect(&settings_path, state.config_manager.runtime_dir())?;
     claude_connection_status(state).await
 }
 
 pub(crate) fn set_main_mouse_passthrough(app: &AppHandle, enabled: bool) -> Result<(), String> {
     if enabled && app.tray_by_id(crate::tray::TRAY_ID).is_none() {
-        return Err("System tray is unavailable; mouse passthrough needs a recovery control".into());
+        return Err(
+            "System tray is unavailable; mouse passthrough needs a recovery control".into(),
+        );
     }
-    let window = app.get_webview_window("main").ok_or("Main overlay window unavailable")?;
-    window.set_ignore_cursor_events(enabled).map_err(|error| error.to_string())
+    let window = app
+        .get_webview_window("main")
+        .ok_or("Main overlay window unavailable")?;
+    window
+        .set_ignore_cursor_events(enabled)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1293,7 +1966,10 @@ pub fn layout_tray_menu(
 }
 
 #[tauri::command]
-pub async fn pick_sound_file(kind: crate::notify::QuotaKind, app: AppHandle) -> Result<Option<String>, String> {
+pub async fn pick_sound_file(
+    kind: crate::notify::QuotaKind,
+    app: AppHandle,
+) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let picked = tauri::async_runtime::spawn_blocking(move || {
@@ -1304,7 +1980,9 @@ pub async fn pick_sound_file(kind: crate::notify::QuotaKind, app: AppHandle) -> 
     })
     .await
     .map_err(|error| error.to_string())?;
-    let Some(picked) = picked else { return Ok(None) };
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
     let path = picked.into_path().map_err(|error| error.to_string())?;
     #[cfg(windows)]
     {
@@ -1320,7 +1998,10 @@ pub async fn pick_sound_file(kind: crate::notify::QuotaKind, app: AppHandle) -> 
 }
 
 #[tauri::command]
-pub async fn preview_sound(kind: crate::notify::QuotaKind, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+pub async fn preview_sound(
+    kind: crate::notify::QuotaKind,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
         let settings = state.settings.lock().await;
@@ -1330,7 +2011,11 @@ pub async fn preview_sound(kind: crate::notify::QuotaKind, state: State<'_, Arc<
         }
         .ok_or_else(|| "sound_path_missing".to_string())?;
         drop(settings);
-        let audio = state.audio.get().ok_or_else(|| "sound_audio_busy".to_string())?.clone();
+        let audio = state
+            .audio
+            .get()
+            .ok_or_else(|| "sound_audio_busy".to_string())?
+            .clone();
         tauri::async_runtime::spawn_blocking(move || audio.preview(path.into(), kind))
             .await
             .map_err(|error| error.to_string())?
@@ -1383,10 +2068,23 @@ pub async fn set_autostart(
         autostart_mgr.disable().map_err(|e| e.to_string())?;
     }
 
-    if let Err(error) = apply_settings_patch(&app, state.inner(), serde_json::json!({ "autoStart": enable }), true).await {
-        let rollback = if previous { autostart_mgr.enable() } else { autostart_mgr.disable() };
+    if let Err(error) = apply_settings_patch(
+        &app,
+        state.inner(),
+        serde_json::json!({ "autoStart": enable }),
+        true,
+    )
+    .await
+    {
+        let rollback = if previous {
+            autostart_mgr.enable()
+        } else {
+            autostart_mgr.disable()
+        };
         if let Err(rollback_error) = rollback {
-            return Err(format!("{error}; autostart rollback failed: {rollback_error}"));
+            return Err(format!(
+                "{error}; autostart rollback failed: {rollback_error}"
+            ));
         }
         return Err(error);
     }
@@ -1466,7 +2164,9 @@ pub async fn show_overlay_menu(
     .map_err(|e| e.to_string())?;
 
     state.dock.begin_menu();
-    let result = window.popup_menu(&menu).map_err(|e: tauri::Error| e.to_string());
+    let result = window
+        .popup_menu(&menu)
+        .map_err(|e: tauri::Error| e.to_string());
     crate::dock::menu_changed(&app, state.inner(), false);
     result?;
     Ok(())
@@ -1515,7 +2215,10 @@ pub fn get_update_installing(state: State<'_, Arc<AppState>>) -> bool {
 
 #[tauri::command]
 pub fn get_update_ready(state: State<'_, Arc<AppState>>) -> bool {
-    state.prepared_update.lock().is_ok_and(|prepared| prepared.is_some())
+    state
+        .prepared_update
+        .lock()
+        .is_ok_and(|prepared| prepared.is_some())
 }
 
 pub(crate) async fn check_and_store_update(
@@ -1526,10 +2229,14 @@ pub(crate) async fn check_and_store_update(
 
     let _check_guard = state.update_check.lock().await;
     let include_prereleases = state.settings.lock().await.include_prerelease_updates;
-    let mut builder = app.updater_builder().target(crate::config::updater_target());
+    let mut builder = app
+        .updater_builder()
+        .target(crate::config::updater_target());
     if include_prereleases {
         let endpoint = crate::update_channel::prerelease_endpoint().await?;
-        builder = builder.endpoints(vec![endpoint]).map_err(|error| error.to_string())?;
+        builder = builder
+            .endpoints(vec![endpoint])
+            .map_err(|error| error.to_string())?;
     }
     let updater = builder.build().map_err(|error| error.to_string())?;
     let update = updater.check().await.map_err(|error| error.to_string())?;
@@ -1542,7 +2249,9 @@ pub(crate) async fn check_and_store_update(
     *state.available_update.lock().await = info.clone();
     *state.update_error.lock().await = None;
     if let Ok(mut prepared) = state.prepared_update.lock() {
-        if prepared.as_ref().map(|package| package.update.version.as_str())
+        if prepared
+            .as_ref()
+            .map(|package| package.update.version.as_str())
             != info.as_ref().map(|available| available.version.as_str())
         {
             *prepared = None;
@@ -1573,15 +2282,16 @@ pub(crate) async fn check_and_notify_auto_update(app: &AppHandle, state: &AppSta
 }
 
 #[tauri::command]
-pub async fn install_update(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+pub async fn install_update(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     attempt_install_update(&app, state.inner()).await
 }
 
 async fn attempt_install_update(app: &AppHandle, state: &AppState) -> Result<(), String> {
-    if state.update_installing.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    if state
+        .update_installing
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return Ok(());
     }
     *state.update_error.lock().await = None;
@@ -1600,11 +2310,18 @@ async fn attempt_install_update(app: &AppHandle, state: &AppState) -> Result<(),
 
 async fn install_pending_update(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let _install_guard = state.update_install.lock().await;
-    let prepared = state.prepared_update.lock().map_err(|error| error.to_string())?.take();
+    let prepared = state
+        .prepared_update
+        .lock()
+        .map_err(|error| error.to_string())?
+        .take();
     if let Some(package) = prepared {
         let result = install_verified_bytes(app, &package.update, &package.bytes, false);
         if result.is_err() {
-            *state.prepared_update.lock().map_err(|error| error.to_string())? = Some(package);
+            *state
+                .prepared_update
+                .lock()
+                .map_err(|error| error.to_string())? = Some(package);
         }
         return result;
     }
@@ -1623,10 +2340,8 @@ async fn install_pending_update(app: &AppHandle, state: &AppState) -> Result<(),
             .download_and_install(
                 move |chunk, total| {
                     downloaded += chunk as u64;
-                    let _ = progress_app.emit(
-                        "update_progress",
-                        UpdateProgress { downloaded, total },
-                    );
+                    let _ =
+                        progress_app.emit("update_progress", UpdateProgress { downloaded, total });
                 },
                 || {},
             )
@@ -1641,10 +2356,7 @@ async fn install_pending_update(app: &AppHandle, state: &AppState) -> Result<(),
         .download(
             move |chunk, total| {
                 downloaded += chunk as u64;
-                let _ = progress_app.emit(
-                    "update_progress",
-                    UpdateProgress { downloaded, total },
-                );
+                let _ = progress_app.emit("update_progress", UpdateProgress { downloaded, total });
             },
             || {},
         )
@@ -1687,13 +2399,15 @@ fn install_verified_bytes(
     drop(staged_file);
 
     let staged_helper = directory.join("CodexUsageUpdater.next.exe");
-    let mut helper_archive = archive.by_name("CodexUsageUpdater.exe")
+    let mut helper_archive = archive
+        .by_name("CodexUsageUpdater.exe")
         .map_err(|error| format!("Portable update is missing the updater helper: {error}"))?;
     if helper_archive.size() > 64 * 1024 * 1024 {
         let _ = std::fs::remove_file(&staged_exe);
         return Err("Portable update helper is too large".to_string());
     }
-    let mut helper_file = std::fs::File::create(&staged_helper).map_err(|error| error.to_string())?;
+    let mut helper_file =
+        std::fs::File::create(&staged_helper).map_err(|error| error.to_string())?;
     std::io::copy(&mut helper_archive, &mut helper_file).map_err(|error| error.to_string())?;
     drop(helper_file);
     drop(helper_archive);
@@ -1736,10 +2450,19 @@ async fn prepare_update(app: &AppHandle, state: &AppState) -> Result<(), String>
     if !state.settings.lock().await.auto_install_updates {
         return Ok(());
     }
-    let update = state.pending_update.lock().await.as_ref().cloned()
+    let update = state
+        .pending_update
+        .lock()
+        .await
+        .as_ref()
+        .cloned()
         .ok_or_else(|| "No checked update is available".to_string())?;
-    if state.prepared_update.lock().map_err(|error| error.to_string())?
-        .as_ref().is_some_and(|package| package.update.version == update.version)
+    if state
+        .prepared_update
+        .lock()
+        .map_err(|error| error.to_string())?
+        .as_ref()
+        .is_some_and(|package| package.update.version == update.version)
     {
         return Ok(());
     }
@@ -1755,11 +2478,19 @@ async fn prepare_update(app: &AppHandle, state: &AppState) -> Result<(), String>
         }
     };
     if !state.settings.lock().await.auto_install_updates
-        || state.pending_update.lock().await.as_ref().is_none_or(|pending| pending.version != update.version)
+        || state
+            .pending_update
+            .lock()
+            .await
+            .as_ref()
+            .is_none_or(|pending| pending.version != update.version)
     {
         return Ok(());
     }
-    *state.prepared_update.lock().map_err(|error| error.to_string())? = Some(PreparedUpdate { update, bytes });
+    *state
+        .prepared_update
+        .lock()
+        .map_err(|error| error.to_string())? = Some(PreparedUpdate { update, bytes });
     *state.update_error.lock().await = None;
     if let Some(info) = state.available_update.lock().await.clone() {
         let _ = app.emit("update_ready", info);
@@ -1787,7 +2518,12 @@ mod tests {
             for value in [serde_json::json!(true), serde_json::json!(false)] {
                 assert!(validate_settings_patch(&serde_json::json!({key: value}), false).is_ok());
             }
-            for value in [serde_json::json!("false"), serde_json::json!(0), Value::Null, serde_json::json!([])] {
+            for value in [
+                serde_json::json!("false"),
+                serde_json::json!(0),
+                Value::Null,
+                serde_json::json!([]),
+            ] {
                 assert!(validate_settings_patch(&serde_json::json!({key: value}), false).is_err());
             }
             let previous = OverlaySettings::default();
@@ -1838,11 +2574,20 @@ mod tests {
 #[cfg(test)]
 mod refresh_coalescing_tests {
     use super::*;
-    use std::{future::{poll_fn, Future}, task::Poll};
-    struct WaitingSource { release: tokio::sync::Notify, reads: AtomicU64, result: Result<RawCodexUsage, String> }
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
+    struct WaitingSource {
+        release: tokio::sync::Notify,
+        reads: AtomicU64,
+        result: Result<RawCodexUsage, String>,
+    }
     impl TrayPresentationSink for WaitingSource {
         fn present(&self, _: crate::tray::TrayPresentation) {}
-        fn app_handle(&self) -> Option<&AppHandle> { None }
+        fn app_handle(&self) -> Option<&AppHandle> {
+            None
+        }
     }
     impl UsageSource for WaitingSource {
         async fn read_usage(&self, _: &AppState) -> Result<RawCodexUsage, String> {
@@ -1852,19 +2597,46 @@ mod refresh_coalescing_tests {
         }
     }
     fn sample() -> RawCodexUsage {
-        RawCodexUsage { account_id: Some("test".into()), five_hour: Default::default(), weekly: Default::default(), credits_display: "—".into(), credits_balance: None, has_credits: false, fetched_at: reader::unix_now() }
+        RawCodexUsage {
+            account_id: Some("test".into()),
+            five_hour: Default::default(),
+            weekly: Default::default(),
+            credits_display: "—".into(),
+            credits_balance: None,
+            has_credits: false,
+            fetched_at: reader::unix_now(),
+        }
     }
     #[tokio::test]
     async fn concurrent_callers_share_success_or_failure_even_with_cached_usage() {
         for failed in [false, true] {
-            let dir = std::env::temp_dir().join(format!("quota-coalescing-{}-{failed}", std::process::id()));
-            let state = Arc::new(AppState::for_test(ConfigManager::with_runtime_dir(dir.clone())));
+            let dir = std::env::temp_dir()
+                .join(format!("quota-coalescing-{}-{failed}", std::process::id()));
+            let state = Arc::new(AppState::for_test(ConfigManager::with_runtime_dir(
+                dir.clone(),
+            )));
             *state.last_usage.lock().await = Some(sample().to_ui(None, None));
-            let source = WaitingSource { release: Default::default(), reads: AtomicU64::new(0), result: if failed { Err("shared failure".into()) } else { Ok(sample()) } };
+            let source = WaitingSource {
+                release: Default::default(),
+                reads: AtomicU64::new(0),
+                result: if failed {
+                    Err("shared failure".into())
+                } else {
+                    Ok(sample())
+                },
+            };
             let mut leader = Box::pin(refresh_usage(&source, &state));
-            poll_fn(|cx| { assert!(leader.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            poll_fn(|cx| {
+                assert!(leader.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
             let mut follower = Box::pin(refresh_usage(&source, &state));
-            poll_fn(|cx| { assert!(follower.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            poll_fn(|cx| {
+                assert!(follower.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
             source.release.notify_one();
             let (a, b) = tokio::join!(leader, follower);
             assert_eq!(a, b);
@@ -1876,13 +2648,27 @@ mod refresh_coalescing_tests {
     #[tokio::test]
     async fn cancelling_the_leader_does_not_return_old_cached_success_to_a_waiter() {
         let dir = std::env::temp_dir().join(format!("quota-cancel-leader-{}", std::process::id()));
-        let state = Arc::new(AppState::for_test(ConfigManager::with_runtime_dir(dir.clone())));
+        let state = Arc::new(AppState::for_test(ConfigManager::with_runtime_dir(
+            dir.clone(),
+        )));
         *state.last_usage.lock().await = Some(sample().to_ui(None, None));
-        let source = WaitingSource { release: Default::default(), reads: AtomicU64::new(0), result: Ok(sample()) };
+        let source = WaitingSource {
+            release: Default::default(),
+            reads: AtomicU64::new(0),
+            result: Ok(sample()),
+        };
         let mut leader = Box::pin(refresh_usage(&source, &state));
-        poll_fn(|cx| { assert!(leader.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+        poll_fn(|cx| {
+            assert!(leader.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
         let mut follower = Box::pin(refresh_usage(&source, &state));
-        poll_fn(|cx| { assert!(follower.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+        poll_fn(|cx| {
+            assert!(follower.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
         drop(leader);
         assert!(follower.await.unwrap_err().contains("Cancelled"));
         assert_eq!(state.reader.lock().unwrap().phase, "error");
@@ -1992,7 +2778,9 @@ mod auto_pause_tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         (
-            Arc::new(AppState::for_test(ConfigManager::with_runtime_dir(dir.clone()))),
+            Arc::new(AppState::for_test(ConfigManager::with_runtime_dir(
+                dir.clone(),
+            ))),
             dir,
         )
     }
@@ -2090,7 +2878,9 @@ mod auto_pause_tests {
             settings.language = "en-US".to_string();
         }
         let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
-        refresh_usage(&sink, &state).await.expect("the refresh must succeed");
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
         wait_for_prompts(&transport, 1).await;
         let prompts = transport.sent_prompts();
         assert_eq!(prompts, vec!["Pause"]);
@@ -2104,7 +2894,9 @@ mod auto_pause_tests {
             settings.language = "zh-Hant".to_string();
         }
         let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
-        refresh_usage(&sink, &state).await.expect("the refresh must succeed");
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
         wait_for_prompts(&transport, 1).await;
         let prompts = transport.sent_prompts();
         assert_eq!(prompts, vec!["\u{66AB}\u{505C}"]);
@@ -2117,10 +2909,15 @@ mod auto_pause_tests {
         switch_provider(&state, Provider::Claude).await;
         let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
 
-        let usage = refresh_usage(&sink, &state).await.expect("the refresh must succeed");
+        let usage = refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
         assert_eq!(usage.five_hour_remaining_percent, Some(3));
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(transport.calls().is_empty(), "no handshake and no pause request");
+        assert!(
+            transport.calls().is_empty(),
+            "no handshake and no pause request"
+        );
         assert!(dir.join("claude-burn-rate-state.json").is_file());
         assert!(!dir.join("burn-rate-state.json").exists());
 
@@ -2128,8 +2925,13 @@ mod auto_pause_tests {
         state.settings.lock().await.provider = Provider::Codex;
         switch_provider(&state, Provider::Codex).await;
         assert!(state.last_usage.lock().await.is_none());
-        assert_eq!(state.config_manager.burn_rate_state_path(), dir.join("burn-rate-state.json"));
-        refresh_usage(&sink, &state).await.expect("the refresh must succeed");
+        assert_eq!(
+            state.config_manager.burn_rate_state_path(),
+            dir.join("burn-rate-state.json")
+        );
+        refresh_usage(&sink, &state)
+            .await
+            .expect("the refresh must succeed");
         wait_for_prompts(&transport, 1).await;
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2168,11 +2970,7 @@ mod auto_pause_tests {
         assert_eq!(sent.arguments["prompt"], EXPECTED_PAUSE_MESSAGE);
 
         // A confirmed delivery is reported, not guessed.
-        let status = state
-            .auto_pause
-            .lock()
-            .unwrap()
-            .status(true);
+        let status = state.auto_pause.lock().unwrap().status(true);
         assert_eq!(status.confirmed_count, 1);
         assert!(status.last_confirmed_at.is_some());
 
@@ -2413,7 +3211,9 @@ mod auto_pause_tests {
         let calls = transport.calls();
         assert!(calls.iter().any(|call| call.tool_name == "list_threads"));
         assert!(
-            !calls.iter().any(|call| call.tool_name == "send_message_to_thread"),
+            !calls
+                .iter()
+                .any(|call| call.tool_name == "send_message_to_thread"),
             "an unconfirmed handshake must not send"
         );
         let status = state.auto_pause.lock().unwrap().status(true);
@@ -2705,10 +3505,21 @@ mod auto_pause_tests {
     fn the_auto_pause_settings_are_on_the_closed_allowlist() {
         let switch = serde_json::json!({"autoPauseOnLowQuota": true});
         assert_eq!(validate_settings_patch(&switch, false).unwrap().len(), 1);
-        assert!(validate_settings_patch(&serde_json::json!({"autoPauseOnLowQuota": false}), false).is_ok());
-        assert!(validate_settings_patch(&serde_json::json!({"autoPauseOnLowQuota": "yes"}), false).is_err());
-        assert!(validate_settings_patch(&serde_json::json!({"autoPauseOnLowQuota": 1}), false).is_err());
-        assert!(validate_settings_patch(&serde_json::json!({"autoPauseOnLowQuota": null}), false).is_err());
+        assert!(
+            validate_settings_patch(&serde_json::json!({"autoPauseOnLowQuota": false}), false)
+                .is_ok()
+        );
+        assert!(
+            validate_settings_patch(&serde_json::json!({"autoPauseOnLowQuota": "yes"}), false)
+                .is_err()
+        );
+        assert!(
+            validate_settings_patch(&serde_json::json!({"autoPauseOnLowQuota": 1}), false).is_err()
+        );
+        assert!(
+            validate_settings_patch(&serde_json::json!({"autoPauseOnLowQuota": null}), false)
+                .is_err()
+        );
 
         for value in [1u64, 5, 15] {
             let patch = serde_json::json!({ "autoPauseFiveHourThresholdPercent": value });
@@ -2775,7 +3586,10 @@ mod auto_pause_tests {
         assert_eq!(reloaded.auto_pause_weekly_threshold_percent, 4);
 
         let raw = std::fs::read_to_string(state.config_manager.settings_path()).unwrap();
-        assert!(raw.contains("\"autoPauseOnLowQuota\": true"), "wire key missing");
+        assert!(
+            raw.contains("\"autoPauseOnLowQuota\": true"),
+            "wire key missing"
+        );
         assert!(
             raw.contains("\"autoPauseFiveHourThresholdPercent\": 9"),
             "wire key missing"
@@ -2978,12 +3792,20 @@ mod auto_pause_tests {
             while state.auto_pause.lock().unwrap().running_flag() {
                 tokio::task::yield_now().await;
             }
-        }).await.expect("the pause worker must finish");
+        })
+        .await
+        .expect("the pause worker must finish");
     }
 
     #[tokio::test]
     async fn ineligible_updates_cancel_a_low_quota_batch_waiting_for_the_bridge() {
-        for change in ["recovered", "missing-account", "failed-read", "disabled", "threshold"] {
+        for change in [
+            "recovered",
+            "missing-account",
+            "failed-read",
+            "disabled",
+            "threshold",
+        ] {
             let (state, transport, dir) = armed_state(&format!("cancel-{change}")).await;
             let gate = transport.hold_handshakes();
             let low = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
@@ -2993,29 +3815,51 @@ mod auto_pause_tests {
 
             match change {
                 "recovered" => {
-                    refresh_usage(&OfflineSink::with_usage(comfortable_quota_usage(Some("acct-1"))), &state)
-                        .await.unwrap();
+                    refresh_usage(
+                        &OfflineSink::with_usage(comfortable_quota_usage(Some("acct-1"))),
+                        &state,
+                    )
+                    .await
+                    .unwrap();
                 }
                 "missing-account" => {
                     refresh_usage(&OfflineSink::with_usage(low_quota_usage(None)), &state)
-                        .await.unwrap();
+                        .await
+                        .unwrap();
                 }
                 "failed-read" => {
-                    assert!(refresh_usage(&OfflineSink::failing("offline"), &state).await.is_err());
+                    assert!(refresh_usage(&OfflineSink::failing("offline"), &state)
+                        .await
+                        .is_err());
                 }
                 "disabled" => {
-                    apply_settings_patch(&low, &state,
-                        serde_json::json!({ "autoPauseOnLowQuota": false }), false).await.unwrap();
+                    apply_settings_patch(
+                        &low,
+                        &state,
+                        serde_json::json!({ "autoPauseOnLowQuota": false }),
+                        false,
+                    )
+                    .await
+                    .unwrap();
                 }
                 "threshold" => {
-                    apply_settings_patch(&low, &state,
-                        serde_json::json!({ "autoPauseFiveHourThresholdPercent": 1 }), false).await.unwrap();
+                    apply_settings_patch(
+                        &low,
+                        &state,
+                        serde_json::json!({ "autoPauseFiveHourThresholdPercent": 1 }),
+                        false,
+                    )
+                    .await
+                    .unwrap();
                 }
                 _ => unreachable!(),
             }
             gate.notify_one();
             wait_for_pause_worker(&state).await;
-            assert!(transport.sent_prompts().is_empty(), "stale pause sent after {change}");
+            assert!(
+                transport.sent_prompts().is_empty(),
+                "stale pause sent after {change}"
+            );
             assert_eq!(state.auto_pause.lock().unwrap().pending_len(), 0);
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -3028,22 +3872,45 @@ mod auto_pause_tests {
         let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
         refresh_usage(&sink, &state).await.unwrap();
         wait_for_handshakes(&transport, 1).await;
-        observe_read_event(&sink, &state, ReadEvent::Failed(ReadFailure::new(ReadStage::Quota, FailureKind::Transport))).await;
+        observe_read_event(
+            &sink,
+            &state,
+            ReadEvent::Failed(ReadFailure::new(ReadStage::Quota, FailureKind::Transport)),
+        )
+        .await;
         observe_read_event(&sink, &state, ReadEvent::Retrying).await;
         gate.notify_one();
         wait_for_pause_worker(&state).await;
         assert!(transport.sent_prompts().is_empty());
-        assert_eq!(crate::pause_control::status::snapshot(&state).await.reason.as_deref(), Some("quotaReadRetrying"));
+        assert_eq!(
+            crate::pause_control::status::snapshot(&state)
+                .await
+                .reason
+                .as_deref(),
+            Some("quotaReadRetrying")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test(start_paused = true)]
     async fn slow_samples_keep_only_the_remaining_action_lifetime() {
         let (state, transport, dir) = armed_state("slow-action-age").await;
-        state.auto_pause.lock().unwrap().set_worker_spawner(Arc::new(|_| {}));
+        state
+            .auto_pause
+            .lock()
+            .unwrap()
+            .set_worker_spawner(Arc::new(|_| {}));
         let now = tokio::time::Instant::now();
-        state.reader.lock().unwrap().observation = Some(reader::ObservationTiming { quota_started: now - Duration::from_millis(27_474), received: now });
-        refresh_usage(&OfflineSink::with_usage(low_quota_usage(Some("acct-1"))), &state).await.unwrap();
+        state.reader.lock().unwrap().observation = Some(reader::ObservationTiming {
+            quota_started: now - Duration::from_millis(27_474),
+            received: now,
+        });
+        refresh_usage(
+            &OfflineSink::with_usage(low_quota_usage(Some("acct-1"))),
+            &state,
+        )
+        .await
+        .unwrap();
         tokio::time::advance(Duration::from_millis(2_527)).await;
         crate::pause_control::run_delivery_worker(state.clone()).await;
         assert!(transport.calls().is_empty());
@@ -3054,25 +3921,53 @@ mod auto_pause_tests {
     async fn display_only_samples_update_the_account_but_cannot_schedule_actions() {
         let (state, transport, dir) = armed_state("display-only").await;
         let now = tokio::time::Instant::now();
-        state.reader.lock().unwrap().observation = Some(reader::ObservationTiming { quota_started: now - Duration::from_secs(35), received: now });
-        let sample = refresh_usage(&OfflineSink::with_usage(low_quota_usage(Some("new-account"))), &state).await.unwrap();
+        state.reader.lock().unwrap().observation = Some(reader::ObservationTiming {
+            quota_started: now - Duration::from_secs(35),
+            received: now,
+        });
+        let sample = refresh_usage(
+            &OfflineSink::with_usage(low_quota_usage(Some("new-account"))),
+            &state,
+        )
+        .await
+        .unwrap();
         assert_eq!(sample.five_hour_remaining_percent, Some(3));
         assert!(transport.calls().is_empty());
         assert!(!state.auto_pause.lock().unwrap().running_flag());
-        assert_eq!(crate::pause_control::status::snapshot(&state).await.quota_health, "stale");
+        assert_eq!(
+            crate::pause_control::status::snapshot(&state)
+                .await
+                .quota_health,
+            "stale"
+        );
         assert_eq!(state.polling.lock().unwrap().effective_interval_seconds, 15);
-        assert_eq!(resume_quota_gate(&OverlaySettings::default(), &sample, false), Err("quotaStale".into()));
+        assert_eq!(
+            resume_quota_gate(&OverlaySettings::default(), &sample, false),
+            Err("quotaStale".into())
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
     async fn recovery_removes_an_unsent_queued_pause_before_the_worker_starts() {
         let (state, transport, dir) = armed_state("cancel-queued").await;
-        state.auto_pause.lock().unwrap().set_worker_spawner(Arc::new(|_| {}));
-        refresh_usage(&OfflineSink::with_usage(low_quota_usage(Some("acct-1"))), &state)
-            .await.unwrap();
-        refresh_usage(&OfflineSink::with_usage(comfortable_quota_usage(Some("acct-1"))), &state)
-            .await.unwrap();
+        state
+            .auto_pause
+            .lock()
+            .unwrap()
+            .set_worker_spawner(Arc::new(|_| {}));
+        refresh_usage(
+            &OfflineSink::with_usage(low_quota_usage(Some("acct-1"))),
+            &state,
+        )
+        .await
+        .unwrap();
+        refresh_usage(
+            &OfflineSink::with_usage(comfortable_quota_usage(Some("acct-1"))),
+            &state,
+        )
+        .await
+        .unwrap();
         crate::pause_control::run_delivery_worker(state.clone()).await;
         assert!(transport.sent_prompts().is_empty());
         assert_eq!(state.auto_pause.lock().unwrap().sent_len(), 0);
@@ -3084,22 +3979,38 @@ mod auto_pause_tests {
         let (state, transport, dir) = armed_state("cancel-remaining").await;
         transport.set_list_threads(crate::pause_control::ToolCallOutcome {
             success: true,
-            text: Some(serde_json::json!({ "threads": [
+            text: Some(
+                serde_json::json!({ "threads": [
                 { "id": "session-1", "kind": "codex", "status": "active" },
                 { "id": "session-2", "kind": "codex", "status": "active" }
-            ] }).to_string()),
+            ] })
+                .to_string(),
+            ),
         });
         let gate = transport.hold_sends();
         let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
         refresh_usage(&sink, &state).await.unwrap();
         wait_for_prompts(&transport, 1).await;
-        apply_settings_patch(&sink, &state,
-            serde_json::json!({ "autoPauseOnLowQuota": false }), false).await.unwrap();
+        apply_settings_patch(
+            &sink,
+            &state,
+            serde_json::json!({ "autoPauseOnLowQuota": false }),
+            false,
+        )
+        .await
+        .unwrap();
         gate.notify_one();
         wait_for_pause_worker(&state).await;
-        assert_eq!(transport.sent_prompts().len(), 1, "only the already submitted request can complete");
-        assert_eq!(state.auto_pause.lock().unwrap().sent_len(), 0,
-            "an obsolete confirmation must not restore invalidated ledger entries");
+        assert_eq!(
+            transport.sent_prompts().len(),
+            1,
+            "only the already submitted request can complete"
+        );
+        assert_eq!(
+            state.auto_pause.lock().unwrap().sent_len(),
+            0,
+            "an obsolete confirmation must not restore invalidated ledger entries"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3107,14 +4018,24 @@ mod auto_pause_tests {
     async fn a_new_low_sample_preserves_an_already_submitted_send_confirmation() {
         let (state, transport, dir) = armed_state("confirm-newer-low").await;
         let gate = transport.hold_sends();
-        refresh_usage(&OfflineSink::with_usage(low_quota_usage(Some("acct-1"))), &state)
-            .await.unwrap();
+        refresh_usage(
+            &OfflineSink::with_usage(low_quota_usage(Some("acct-1"))),
+            &state,
+        )
+        .await
+        .unwrap();
         wait_for_prompts(&transport, 1).await;
         let next = quota_usage_at(Some("acct-1"), FETCHED_AT + 1, FETCHED_AT + 3_600);
-        refresh_usage(&OfflineSink::with_usage(next), &state).await.unwrap();
+        refresh_usage(&OfflineSink::with_usage(next), &state)
+            .await
+            .unwrap();
         gate.notify_one();
         wait_for_pause_worker(&state).await;
-        assert_eq!(transport.sent_prompts().len(), 1, "the accepted send must still de-duplicate");
+        assert_eq!(
+            transport.sent_prompts().len(),
+            1,
+            "the accepted send must still de-duplicate"
+        );
         assert_eq!(state.auto_pause.lock().unwrap().sent_len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3124,20 +4045,40 @@ mod auto_pause_tests {
         let (state, transport, dir) = armed_state("fair-batches").await;
         transport.set_list_threads(crate::pause_control::ToolCallOutcome {
             success: true,
-            text: Some(serde_json::json!({ "threads": [
+            text: Some(
+                serde_json::json!({ "threads": [
                 { "id": "session-1", "kind": "codex", "status": "active" },
                 { "id": "session-2", "kind": "codex", "status": "active" }
-            ] }).to_string()),
+            ] })
+                .to_string(),
+            ),
         });
         transport.set_send_delay_ms(1000);
-        state.auto_pause.lock().unwrap().set_delivery_deadline(Duration::from_millis(50));
-        refresh_usage(&OfflineSink::with_usage(low_quota_usage(Some("acct-1"))), &state).await.unwrap();
+        state
+            .auto_pause
+            .lock()
+            .unwrap()
+            .set_delivery_deadline(Duration::from_millis(50));
+        refresh_usage(
+            &OfflineSink::with_usage(low_quota_usage(Some("acct-1"))),
+            &state,
+        )
+        .await
+        .unwrap();
         wait_for_pause_worker(&state).await;
         transport.set_send_delay_ms(0);
-        refresh_usage(&OfflineSink::with_usage(low_quota_usage(Some("acct-1"))), &state).await.unwrap();
+        refresh_usage(
+            &OfflineSink::with_usage(low_quota_usage(Some("acct-1"))),
+            &state,
+        )
+        .await
+        .unwrap();
         wait_for_pause_worker(&state).await;
-        let sends: Vec<_> = transport.calls().into_iter()
-            .filter(|call| call.tool_name == "send_message_to_thread").collect();
+        let sends: Vec<_> = transport
+            .calls()
+            .into_iter()
+            .filter(|call| call.tool_name == "send_message_to_thread")
+            .collect();
         assert_eq!(sends[0].arguments["threadId"], "session-1");
         assert_eq!(sends[1].arguments["threadId"], "session-2");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3151,7 +4092,11 @@ mod auto_pause_tests {
         validate_settings_patch(&patch, false).unwrap();
         merge_settings_patch(&mut settings, &patch).unwrap();
         assert!(settings.auto_resume_after_quota_reset);
-        assert!(validate_settings_patch(&serde_json::json!({ "autoResumeAfterQuotaReset": "true" }), false).is_err());
+        assert!(validate_settings_patch(
+            &serde_json::json!({ "autoResumeAfterQuotaReset": "true" }),
+            false
+        )
+        .is_err());
         let legacy: OverlaySettings = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(!legacy.auto_resume_after_quota_reset);
     }
@@ -3228,7 +4173,13 @@ mod shadow_refresh_tests {
     /// interval matures.
     fn burning_series(count: usize) -> Vec<Result<RawCodexUsage, String>> {
         (0..count)
-            .map(|minute| Ok(sample(1000 + minute as i64 * 60, 10.0 + minute as f64, 10.0)))
+            .map(|minute| {
+                Ok(sample(
+                    1000 + minute as i64 * 60,
+                    10.0 + minute as f64,
+                    10.0,
+                ))
+            })
             .collect()
     }
 
@@ -3247,18 +4198,13 @@ mod shadow_refresh_tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         let config = ConfigManager::with_runtime_dir(dir.clone());
-        (
-            Arc::new(AppState::for_test(config.clone())),
-            config,
-            dir,
-        )
+        (Arc::new(AppState::for_test(config.clone())), config, dir)
     }
 
     /// The persisted shadow subtree of the burn-rate state.
     fn shadow_state(config: &ConfigManager) -> serde_json::Value {
         let raw = std::fs::read_to_string(config.burn_rate_state_path()).unwrap();
-        let state: serde_json::Value =
-            serde_json::from_str(&raw).expect("the state must be JSON");
+        let state: serde_json::Value = serde_json::from_str(&raw).expect("the state must be JSON");
         state
             .get("fiveHourShadow")
             .cloned()
@@ -3341,7 +4287,10 @@ mod shadow_refresh_tests {
         // The durable state is untouched: no fabricated feedback, no erased
         // learner state, no lost interval.
         let after_raw = std::fs::read_to_string(config.burn_rate_state_path()).unwrap();
-        assert_eq!(before_raw, after_raw, "a failed read must not change the state");
+        assert_eq!(
+            before_raw, after_raw,
+            "a failed read must not change the state"
+        );
         let after = shadow_state(&config);
         assert_eq!(after["personal"], before["personal"]);
         assert_eq!(after["pending"], before["pending"]);
@@ -3433,4 +4382,3 @@ mod shadow_refresh_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
-
