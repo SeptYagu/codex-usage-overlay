@@ -13,7 +13,8 @@ window.qa = { render: async (settings, edge = null, missing = false, view = 'ove
         await i18n.changeLanguage(settings.language);
         const s = { ...DEFAULT_SETTINGS, ...settings };
         setProtectionFixture(fixture);
-        const sample = fixture === 'full' ? { ...usage, fiveHourRemainingPercent: 100, weekRemainingPercent: 100 } : usage;
+        const sample = fixture === 'full' ? { ...usage, fiveHourRemainingPercent: 100, weekRemainingPercent: 100 }
+            : fixture === 'empty' ? { ...usage, fiveHourRemainingPercent: 0, weekRemainingPercent: 0 } : usage;
         root.render(view === 'settings' ? <SettingsView settings={s} onPatchSettings={() => { }}/> : view === 'tray'
             ? <TrayMenuView settings={s} onPatchSettings={() => { }}/>
             : <OverlayView settings={s} usage={missing ? null : sample} isLoading={missing} dockState={edge ? { docked: true, expanded: false, hidden: false, edge } : undefined}/>);

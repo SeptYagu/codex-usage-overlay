@@ -1,5 +1,12 @@
 # Status
 
+## v1.6.0-preview.2 preparation — 2026-11-02
+
+- Clarified settings descriptions in English, Simplified Chinese and Traditional Chinese. The percentage-grid toggle is shown only when edge auto-hide is enabled; its saved preference survives hiding.
+- Fixed invalid empty-track background colors and scaled pill clipping. Provisional hover expansion now reserves space for the provider logo.
+- Local validation: 156 frontend tests, production build, 415 main-library + 10 helper Rust tests (7 existing ignored), 15 companion tests, companion packaging, 7 packaging regressions and 1,402 Edge rendering cases passed. General Settings checks allow intentional column scrolling and verify every control remains reachable.
+- Native WebView2, mixed-monitor hover, installed-package smoke checks and real DSH pause remain unverified for this preview. [Release notes](docs/releases/v1.6.0-preview.2.md).
+
 ## v1.5.1 release — 2026-11-01
 
 - v1.5.0's renewal did not work: live Claude reading stopped when the CLI login expired at 06:56 and stayed on that reading for six hours. `claude auth status` renews an expired login only when `CLAUDE_CODE_ENTRYPOINT` is set (as inside a Claude Code session, where the 1.5.0 check was made); started by the overlay it just reports the stored login.

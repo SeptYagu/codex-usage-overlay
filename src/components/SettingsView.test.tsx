@@ -134,7 +134,7 @@ describe('two-column settings layout', () => {
   });
 
   it('keeps overlay controls in the left column and system controls in the right', async () => {
-    const { left, right } = await renderSettings();
+    const { left, right } = await renderSettings({ autoEdgeHide: true });
 
     // Left column: appearance, size and interaction.
     within(left).getByRole('combobox', { name: 'Overlay layout' });
@@ -142,7 +142,7 @@ describe('two-column settings layout', () => {
     within(left).getByRole('slider', { name: 'Background Transparency' });
     within(left).getByRole('checkbox', { name: 'Show Credit Balance' });
     within(left).getByRole('checkbox', { name: 'Auto hide at screen edge' });
-    within(left).getByRole('checkbox', { name: 'Show Percentage Grid' });
+    within(left).getByRole('checkbox', { name: 'Show 10% grid on edge bars' });
     within(left).getByRole('checkbox', { name: 'Mouse click-through' });
 
     // Right column: refresh cadence, start-up/updates and reset alerts.
@@ -152,25 +152,53 @@ describe('two-column settings layout', () => {
     within(right).getByRole('heading', { name: 'Notifications' });
 
     // Neither half bleeds into the other.
-    expect(within(right).queryByRole('checkbox', { name: 'Show Percentage Grid' })).toBeNull();
+    expect(within(right).queryByRole('checkbox', { name: 'Show 10% grid on edge bars' })).toBeNull();
     expect(within(left).queryByRole('combobox', { name: 'Refresh Interval' })).toBeNull();
     expect(within(left).queryByRole('heading', { name: 'Notifications' })).toBeNull();
   });
 
   it('tucks the percentage-grid switch directly below the edge-hide switch', async () => {
-    const { left } = await renderSettings();
+    const { left } = await renderSettings({ autoEdgeHide: true });
     const switchLabels = Array.from(left.children).filter((child) => child.tagName === 'LABEL');
     const names = switchLabels.map((label) => label.textContent);
     const edgeHideIndex = names.indexOf('Auto hide at screen edge');
     expect(edgeHideIndex).toBeGreaterThanOrEqual(0);
-    expect(names[edgeHideIndex + 1]).toBe('Show Percentage Grid');
+    expect(names[edgeHideIndex + 1]).toBe('Show 10% grid on edge bars');
   });
 });
 
 describe('percentage grid interaction', () => {
+  it.each(['en-US', 'zh-CN', 'zh-Hant'])('explains edge bars in %s and hides the grid option until edge auto-hide is on', async (language) => {
+    await i18n.changeLanguage(language);
+    const settings = { ...DEFAULT_SETTINGS, language, showPercentageGrid: true, autoEdgeHide: false };
+    const { left, rerender, onPatchSettings } = await renderSettings(settings);
+    const label = i18n.getResource(language, 'translation', 'showPercentageGrid');
+    expect(within(left).queryByRole('checkbox', { name: label })).toBeNull();
+    expect(left.querySelector('#percentage-grid-hint')).toBeNull();
+
+    rerender(<SettingsView settings={{ ...settings, autoEdgeHide: true }} onPatchSettings={onPatchSettings} />);
+    const toggle = within(left).getByRole('checkbox', { name: label }) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    const hint = left.querySelector(`#${toggle.getAttribute('aria-describedby')}`);
+    const translatedHint = i18n.getResource(language, 'translation', 'showPercentageGridHint');
+    expect(translatedHint).toContain('10%');
+    expect(hint?.textContent).toBe(translatedHint);
+    for (const key of ['overlayLayoutHint', 'transparencyHint', 'showFiveHourQuotaHint', 'showBurnRateHint', 'autoEdgeHideHint', 'mousePassthroughHint', 'usageProviderHint', 'refreshIntervalHint']) {
+      const translation = i18n.getResource(language, 'translation', key);
+      expect(typeof translation).toBe('string');
+      expect(translation.length).toBeGreaterThan(0);
+      within(left.parentElement!).getByText(translation);
+    }
+
+    rerender(<SettingsView settings={settings} onPatchSettings={onPatchSettings} />);
+    expect(within(left).queryByRole('checkbox', { name: label })).toBeNull();
+    // Visibility changes preserve the saved grid preference without saving it again.
+    expect(onPatchSettings).not.toHaveBeenCalled();
+  });
+
   it('patches showPercentageGrid on when the switch is turned on', async () => {
-    const { left, onPatchSettings } = await renderSettings({ showPercentageGrid: false });
-    const toggle = within(left).getByRole('checkbox', { name: 'Show Percentage Grid' }) as HTMLInputElement;
+    const { left, onPatchSettings } = await renderSettings({ showPercentageGrid: false, autoEdgeHide: true });
+    const toggle = within(left).getByRole('checkbox', { name: 'Show 10% grid on edge bars' }) as HTMLInputElement;
     expect(toggle.checked).toBe(false);
 
     fireEvent.click(toggle);
@@ -181,7 +209,7 @@ describe('percentage grid interaction', () => {
 
   it('reflects an enabled grid and patches it off without touching other fields', async () => {
     const { left, onPatchSettings } = await renderSettings({ showPercentageGrid: true, autoEdgeHide: true });
-    const toggle = within(left).getByRole('checkbox', { name: 'Show Percentage Grid' }) as HTMLInputElement;
+    const toggle = within(left).getByRole('checkbox', { name: 'Show 10% grid on edge bars' }) as HTMLInputElement;
     expect(toggle.checked).toBe(true);
 
     fireEvent.click(toggle);

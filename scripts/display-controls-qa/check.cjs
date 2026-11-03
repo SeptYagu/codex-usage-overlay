@@ -40,7 +40,7 @@ const fs = require('node:fs');
                                     const settings = { language, overlayLayout, showFiveHourQuota: five, showBurnRate: burn, showCredits: credit, scalePercent: scale };
                                     await page.evaluate(({ settings, fixture }) => window.qa.render(settings, null, false, 'overlay', fixture), { settings, fixture });
                                     const metrics = await page.evaluate(() => { const e = document.querySelector('.overlay-capsule'); const r = e.getBoundingClientRect(); return { width: r.width, height: r.height, groups: document.querySelectorAll('.overlay-quota').length, dividers: document.querySelectorAll('.overlay-divider').length, rateSpans: document.querySelectorAll('.overlay-burn-rate').length, clipped: [...e.querySelectorAll('span')].some(s => { const a = s.getBoundingClientRect(); return a.right > r.right + .1 || a.bottom > r.bottom + .1; }) }; });
-                                    const baseWidth = (five ? 2 : 1) * (burn ? 140 : 120) + (credit ? 100 : 0) + (overlayLayout === 'stacks' ? 40 : 0);
+                                    const baseWidth = (five ? 2 : 1) * (burn ? 140 : 120) + (credit ? 100 : 0) + 48 + (overlayLayout === 'stacks' ? 40 : 0);
                                     const baseHeight = overlayLayout === 'stacks' ? 100 : 70;
                                     const item = { fixture, ...settings, dpr, ...metrics, baseWidth, baseHeight };
                                     results.push(item);
@@ -59,16 +59,36 @@ const fs = require('node:fs');
                     if (dpr === 1 && !missing)
                         await page.locator('.overlay-pill-host').screenshot({ path: `output/display-qa/pill-${edge}.png` });
                 }
-            await page.setViewportSize({ width: 960, height: 620 });
-            for (const language of ['en-US', 'zh-CN', 'zh-Hant']) {
-                await page.evaluate(language => window.qa.render({ language }, null, false, 'settings'), language);
-                const m = await page.evaluate(() => ({ rootScroll: document.documentElement.scrollHeight > innerHeight, columns: [...document.querySelectorAll('section')].map(e => ({ client: e.clientHeight, scroll: e.scrollHeight })), checks: document.querySelectorAll('section:first-child input[type=checkbox]').length }));
-                results.push({ language, dpr, settings: m });
-                if (m.rootScroll || m.checks !== 6 || m.columns[0].scroll > m.columns[0].client)
-                    failures.push({ language, dpr, settings: m });
-                if (dpr === 1)
-                    await page.screenshot({ path: `output/display-qa/settings-${language}.png` });
-            }
+            for (const language of ['en-US', 'zh-CN', 'zh-Hant'])
+              for (const edgeHide of [false, true])
+                for (const size of [{ width: 960, height: 620 }, { width: 760, height: 500 }]) {
+                    await page.setViewportSize(size);
+                    await page.evaluate(({ language, edgeHide }) => window.qa.render({ language, autoEdgeHide: edgeHide, showPercentageGrid: true }, null, false, 'settings'), { language, edgeHide });
+                    const m = await page.evaluate(() => {
+                        const column = document.querySelector('section');
+                        const bounds = column.getBoundingClientRect();
+                        const accessible = [...column.querySelectorAll('input, select')].every(control => {
+                            control.scrollIntoView({ block: 'nearest' });
+                            const r = control.getBoundingClientRect();
+                            return r.left >= bounds.left - 1 && r.right <= bounds.right + 1 && r.top >= bounds.top - 1 && r.bottom <= bounds.bottom + 1;
+                        });
+                        column.scrollTop = 0;
+                        const hint = document.getElementById('percentage-grid-hint');
+                        const descriptions = [...document.querySelectorAll('[aria-describedby]')].every(control =>
+                            control.getAttribute('aria-describedby').split(' ').every(id => document.getElementById(id)?.textContent.length > 0));
+                        return { rootScroll: document.documentElement.scrollHeight > innerHeight, accessible, descriptions,
+                            horizontalOverflow: column.scrollWidth > column.clientWidth,
+                            gridVisible: Boolean(hint && /10%/.test(hint.textContent)),
+                            checks: column.querySelectorAll('input[type=checkbox]').length };
+                    });
+                    results.push({ language, dpr, edgeHide, size, settings: m });
+                    if (m.rootScroll || m.checks !== (edgeHide ? 7 : 6) || !m.accessible || m.horizontalOverflow || !m.descriptions || m.gridVisible !== edgeHide)
+                        failures.push({ language, dpr, edgeHide, size, settings: m });
+                    if (dpr === 1) {
+                        if (edgeHide) await page.locator('#percentage-grid-hint').scrollIntoViewIfNeeded();
+                        await page.screenshot({ path: `output/display-qa/settings-${language}-${size.width}-${edgeHide ? 'edge' : 'free'}.png` });
+                    }
+                }
             for (const language of ['en-US', 'zh-CN', 'zh-Hant'])
               for (const fixture of ['normal', 'protection-requested', 'protection-error', 'protection-low', 'protection-retrying', 'protection-quota-error', 'protection-stale']) {
                 for (const size of [{ width: 960, height: 620 }, { width: 760, height: 500 }])

@@ -15,8 +15,8 @@ interface SettingsViewProps {
 }
 
 /**
- * The settings window is a fixed two-column layout sized to fit 960x620 without a
- * vertical scrollbar: header and footer span both columns, the left column holds the
+ * The settings window uses two independently scrolling columns at 960x620:
+ * header and footer span both columns, the left column holds the
  * overlay's appearance/size/interaction controls and the right one everything that
  * integrates with the system (refresh cadence, start-up, updates, reset alerts).
  */
@@ -75,6 +75,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <label htmlFor="overlay-layout" className="text-sm font-medium">{t('overlayLayout')}</label>
             <select
               id="overlay-layout"
+              aria-describedby="overlay-layout-hint"
               value={settings.overlayLayout}
               onChange={(e) => updateField('overlayLayout', e.target.value as OverlaySettings['overlayLayout'])}
               className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500"
@@ -83,6 +84,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <option value="stacks">{t('stacksLayout')}</option>
             </select>
           </div>
+
+          <p id="overlay-layout-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('overlayLayoutHint')}</p>
 
           {/* Scale slider */}
           <div className="space-y-1.5">
@@ -119,6 +122,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
             <input
               aria-label={t('transparency')}
+              aria-describedby="transparency-hint"
               type="range"
               min="0"
               max="80"
@@ -134,15 +138,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           </div>
 
+          <p id="transparency-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('transparencyHint')}</p>
+
           <label className={toggleRow}>
             <span className="text-sm font-medium">{t('showFiveHourQuota')}</span>
             <input
               type="checkbox"
               checked={settings.showFiveHourQuota}
+              aria-describedby="five-hour-quota-hint"
               onChange={(e) => updateField('showFiveHourQuota', e.target.checked)}
               className={checkbox}
             />
           </label>
+
+          <p id="five-hour-quota-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('showFiveHourQuotaHint')}</p>
 
           <label className={toggleRow}>
             <span className="text-sm font-medium">{t('showProviderLogo')}</span>
@@ -171,42 +180,55 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <input
               type="checkbox"
               checked={settings.showBurnRate}
+              aria-describedby="burn-rate-hint"
               onChange={(e) => updateField('showBurnRate', e.target.checked)}
               className={checkbox}
             />
           </label>
+
+          <p id="burn-rate-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('showBurnRateHint')}</p>
 
           <label className={toggleRow}>
             <span className="text-sm font-medium">{t('autoEdgeHide')}</span>
             <input
               type="checkbox"
               checked={settings.autoEdgeHide}
+              aria-describedby="edge-hide-hint"
               onChange={(e) => updateField('autoEdgeHide', e.target.checked)}
               className={checkbox}
             />
           </label>
 
-          {/* Directly below the edge-hide switch: the docked pill's percentage grid */}
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('showPercentageGrid')}</span>
-            <input
-              type="checkbox"
-              checked={settings.showPercentageGrid}
-              onChange={(e) => updateField('showPercentageGrid', e.target.checked)}
-              className={checkbox}
-            />
-          </label>
+          <p id="edge-hide-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('autoEdgeHideHint')}</p>
+
+          {/* Grid preferences apply only to the collapsed edge bars. */}
+          {settings.autoEdgeHide && (
+            <>
+              <label className={toggleRow}>
+                <span className="text-sm font-medium">{t('showPercentageGrid')}</span>
+                <input
+                  type="checkbox"
+                  checked={settings.showPercentageGrid}
+                  aria-describedby="percentage-grid-hint"
+                  onChange={(e) => updateField('showPercentageGrid', e.target.checked)}
+                  className={checkbox}
+                />
+              </label>
+              <p id="percentage-grid-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('showPercentageGridHint')}</p>
+            </>
+          )}
 
           <label className={toggleRow}>
             <span className="text-sm font-medium">{t('mousePassthrough')}</span>
             <input
               type="checkbox"
               checked={settings.mousePassthrough}
+              aria-describedby="mouse-passthrough-hint"
               onChange={(e) => updateField('mousePassthrough', e.target.checked)}
               className={checkbox}
             />
           </label>
-          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('mousePassthroughHint')}</p>
+          <p id="mouse-passthrough-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('mousePassthroughHint')}</p>
 
           <p className="px-1 text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
             {t('hint')}
@@ -219,6 +241,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <label htmlFor="usage-provider" className="text-sm font-medium">{t('usageProvider')}</label>
             <select
               id="usage-provider"
+              aria-describedby="usage-provider-hint"
               value={settings.provider}
               onChange={(e) => {
                 const provider = e.target.value as OverlaySettings['provider'];
@@ -232,6 +255,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </select>
           </div>
 
+          <p id="usage-provider-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('usageProviderHint')}</p>
+
           {claude && <ClaudeConnectionView settings={settings} onPatchSettings={onPatchSettings} />}
           {dsh && <DshConnectionView settings={settings} onPatchSettings={onPatchSettings} />}
 
@@ -239,6 +264,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <span className="text-sm font-medium">{t('refreshInterval')}</span>
             <select
               aria-label={t('refreshInterval')}
+              aria-describedby="refresh-interval-hint"
               value={settings.refreshIntervalSeconds}
               onChange={(e) => updateField('refreshIntervalSeconds', parseInt(e.target.value, 10))}
               className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono"
@@ -249,6 +275,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <option value="300">{t('min5')}</option>
             </select>
           </div>
+
+          <p id="refresh-interval-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('refreshIntervalHint')}</p>
 
           {/* Smart pause: asks the running Codex session to pause when the quota runs low,
               or, for Claude, lets the Claude Code hooks refuse new requests */}

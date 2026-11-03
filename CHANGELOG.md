@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0-preview.2] - 2026-11-02
+
+### Changed
+- Settings explain edge docking, percentage-grid behavior, layout, transparency, quota visibility, burn rate, click-through, usage sources and refresh cadence in English, Simplified Chinese and Traditional Chinese. Descriptions are associated with their controls for assistive technology.
+- The percentage-grid option is visible only while edge auto-hide is enabled. Hiding it preserves the saved preference.
+
+### Fixed
+- Empty docked quota tracks now have a visible background in both themes, and scaling above 100% no longer clips the bars or grid.
+- Provisional expanded-window sizing reserves space for the provider logo before the frontend measures the capsule.
+
 ## [1.6.0-preview.1] - 2026-11-02
 
 ### Added

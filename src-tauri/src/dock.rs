@@ -1106,7 +1106,10 @@ fn provisional_expanded_base_size(settings: &OverlaySettings) -> (f64, f64) {
     // ResizeObserver remains authoritative once the content is measured.
     let quotas = if settings.show_five_hour_quota { 2.0 } else { 1.0 };
     let quota_width = if settings.show_burn_rate { 140.0 } else { 120.0 };
-    let width = quotas * quota_width + if settings.show_credits { 100.0 } else { 0.0 };
+    // Provider marks add 43px in grouped layout and 45px in stacks (including
+    // divider/gaps). Reserve their space before the measured size arrives.
+    let logo_width = if settings.show_provider_logo { 48.0 } else { 0.0 };
+    let width = quotas * quota_width + if settings.show_credits { 100.0 } else { 0.0 } + logo_width;
     if settings.overlay_layout == crate::config::OverlayLayout::Stacks {
         (width + 40.0, 100.0)
     } else {
@@ -1641,7 +1644,9 @@ mod tests {
                 };
                 let (width, height) = provisional_expanded_base_size(&settings);
                 let stacked = layout == crate::config::OverlayLayout::Stacks;
-                assert!(width >= if stacked { stacks } else { grouped });
+                // Defaults include the provider logo: measured content grows by
+                // its 18px mark plus layout gaps and the grouped divider.
+                assert!(width >= if stacked { stacks + 45.0 } else { grouped + 43.0 });
                 assert!(height >= if stacked { 99.64 } else { 69.0 });
                 for scale_percent in [100, 250] {
                     for monitor_scale in [1.0, 1.75, 2.5] {
