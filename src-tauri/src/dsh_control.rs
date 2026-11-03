@@ -70,7 +70,8 @@ pub fn schedule(state: &Arc<AppState>, settings: OverlaySettings, raw: RawCodexU
         // No network result from a previous binding may control a new source.
         let _commit = state.settings_patch.lock().await;
         let current = state.settings.lock().await.clone();
-        let valid = state.source_generation.load(Ordering::Acquire) == generation
+        let valid = state.monitor_enabled.load(Ordering::Acquire) && state.is_current()
+            && state.source_generation.load(Ordering::Acquire) == generation
             && state.settings_revision.load(Ordering::Acquire) == revision
             && crate::config::same_source(&settings, &current)
             && !trigger_cycles(&current, &raw, crate::codex::reader::unix_now()).is_empty()
@@ -112,6 +113,33 @@ mod tests {
             weekly: QuotaSnapshot { used_percent: Some(60.0), resets_at: Some(9000), ..Default::default() },
             credits_display: "—".into(), credits_balance: None, has_credits: false, fetched_at: 1000 };
         (settings, raw)
+    }
+    #[tokio::test]
+    async fn frozen_connection_cannot_dispatch_or_consume_a_pause_attempt() {
+        let (mut settings, mut raw) = setup();
+        settings.migrate();
+        let dir = std::env::temp_dir().join(format!("overlay-dsh-freeze-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let owner = Arc::new(AppState::new(crate::config::ConfigManager::with_runtime_dir(dir.clone()), settings.clone()));
+        crate::monitor::initialize(&owner, &settings);
+        let runtime = crate::monitor::selected(&owner, Provider::Dsh);
+        let frozen = crate::commands::freeze_dsh_connection(&runtime).await;
+        raw.fetched_at = crate::codex::reader::unix_now();
+        raw.five_hour.resets_at = Some(raw.fetched_at + 3600);
+        raw.weekly.resets_at = Some(raw.fetched_at + 7200);
+        schedule(&runtime, settings.for_provider(Provider::Dsh), raw, runtime.source_generation.load(Ordering::Acquire));
+        assert!(runtime.dsh_control.lock().unwrap().running);
+        drop(frozen);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while runtime.dsh_control.lock().unwrap().running { tokio::task::yield_now().await; }
+        }).await.expect("the queued worker should cancel without transport");
+        let control = runtime.dsh_control.lock().unwrap();
+        assert!(control.attempted.is_empty());
+        assert!(!control.failed, "a canceled request must not reach the disconnected transport");
+        drop(control);
+        drop(runtime);
+        drop(owner);
+        if dir.exists() { std::fs::remove_dir_all(dir).unwrap(); }
     }
     #[test] fn queued_cancellation_does_not_consume_attempt_and_switch_preserves_dispatches() {
         let mut control = ControlState::default();

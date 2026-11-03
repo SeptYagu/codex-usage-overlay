@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0-preview.4] - 2026-11-03
+
+### Fixed
+- Freeze the previous DSH runtime before reconnecting or disconnecting its shared transport. Already dispatched requests finish before the connection changes; queued reads and unsent pause requests are canceled before the new binding becomes active.
+- Recheck source eligibility under the refresh commit gate so a read queued before monitoring was disabled cannot start afterward. Two regressions verify that canceled work neither reads/writes usage history nor consumes pause attempts.
+
 ## [1.6.0-preview.3] - 2026-11-03
 
 ### Added

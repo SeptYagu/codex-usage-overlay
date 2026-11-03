@@ -1,6 +1,6 @@
 # Multi-provider monitoring implementation
 
-Target: `v1.6.0-preview.3`. Implements the [monitoring/logo plan](2026-11-02-multi-provider-monitoring-plan.md), independent protection decision, persistent visibility request and selected-provider tray fix.
+Target: `v1.6.0-preview.4` (supersedes published preview.3). Implements the [monitoring/logo plan](2026-11-02-multi-provider-monitoring-plan.md), independent protection decision, persistent visibility request and selected-provider tray fix.
 
 ## Implementation
 
@@ -13,10 +13,12 @@ Target: `v1.6.0-preview.3`. Implements the [monitoring/logo plan](2026-11-02-mul
 - Tray updates are serialized with selection. Both icon pixels and tooltips use the displayed runtime; transient failures preserve its cached rings. Tests assert the expected pixels for Codex, Claude and DSH during switching.
 - `dock-state.json` adds a backward-compatible `hidden` field. Manual visibility changes persist immediately. The main window is created invisible and shown only after restoring state; polling continues while hidden. A missing tray reveals the overlay for recovery.
 
+- Final review after preview.3 publication found a shared-transport reconnect race. Preview.4 freezes the old DSH runtime under its action gate before changing the connection, invalidates queued work, and leaves monitoring disabled until synchronization installs the binding. Refresh eligibility is checked again after acquiring the gate and before commit. Two deterministic tests verify no queued read/history write or pause attempt escapes the freeze.
+
 ## Validation
 
 - Frontend: 161 tests; TypeScript/Vite production build.
-- Rust: 422 main-library + 10 helper tests passed, 7 existing ignored. Added production-path regressions for concurrent providers, display switching during reads, independent protection/guard files, disabled-source cancellation, history/store isolation, account rebinding/status revisions, slow-action snapshot publication, authoritative cycling, tray pixels and persisted visibility.
+- Rust: 424 main-library + 10 helper tests passed, 7 existing ignored. Added production-path regressions for concurrent providers, display switching during reads, independent protection/guard files, disabled-source cancellation, history/store isolation, account rebinding/status revisions, slow-action snapshot publication, authoritative cycling, tray pixels and persisted visibility.
 - Companion: 15 security/transport tests and package verification. Seven release-packaging regressions.
 - Browser: 634 existing display cases, 216 multi-provider interaction/settings cases and the existing 768-case percentage-grid matrix. Reports/screenshots remain under ignored `output/`.
 - Native: isolated debug identifier and debug-only `CODEX_OVERLAY_TEST_RUNTIME_DIR` kept test state separate from installed settings. Protection, notifications, updates and autostart were off. Real Codex/Claude readings and both history files advanced while Codex remained displayed. A restart with saved `hidden: true` had no visible QA window and both source status files reported success. The owned QA process was stopped after recording evidence.

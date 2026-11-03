@@ -1,5 +1,10 @@
 # Status
 
+## v1.6.0-preview.4 preparation — 2026-11-03
+
+- Preview.3 was pushed and published successfully. A final-review DSH reconnect cancellation race is fixed in this follow-up; the published tag is unchanged.
+- Reconnect/disconnect freezes the old runtime before transport replacement, and queued refreshes recheck eligibility under the source gate. Local checks pass: 161 frontend tests, production build, 424 main-library + 10 helper Rust tests (7 existing ignored). Native smoke limitations remain as documented in the [release notes](docs/releases/v1.6.0-preview.4.md).
+
 ## v1.6.0-preview.3 preparation — 2026-11-03
 
 - Multi-provider monitoring, independent protection, logo switching, persisted show/hide and selected-provider tray rendering are implemented. Schema 2 preserves histories and enables protection only for the previously selected provider on migration.

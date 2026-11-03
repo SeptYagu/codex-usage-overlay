@@ -278,6 +278,57 @@ async fn protection_preferences_are_independent_and_disabling_a_monitor_revokes_
 }
 
 #[tokio::test]
+async fn reconnect_freezes_old_context_before_transport_changes_and_cancels_queued_reads() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
+    let (owner, dir) = owner();
+    let registry = owner.monitors.get().unwrap();
+    let dsh = registry.get(Provider::Dsh);
+    let source = Source::default();
+    let generation = dsh.source_generation.load(Ordering::Acquire);
+    dsh.dsh_control.lock().unwrap().running = true;
+    // An already dispatched action owns this gate until its transport finishes.
+    let active_action = dsh.settings_patch.lock().await;
+    let mut freeze = Box::pin(crate::commands::freeze_dsh_connection(&dsh));
+    poll_fn(|cx| {
+        assert!(freeze.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(dsh.monitor_enabled.load(Ordering::Acquire));
+    // This read passed the entry check before the reconnect obtained its gate.
+    let mut queued_read = Box::pin(refresh_usage(&source, &dsh));
+    poll_fn(|cx| {
+        assert!(queued_read.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    drop(active_action);
+    let frozen = freeze.await;
+    assert!(!dsh.monitor_enabled.load(Ordering::Acquire));
+    assert!(dsh.source_generation.load(Ordering::Acquire) > generation);
+    assert!(!dsh.dsh_control.lock().unwrap().running);
+    // The transport swap completes before synchronization installs the binding.
+    drop(frozen);
+    assert!(queued_read.await.is_err());
+    assert_eq!(source.reads.load(Ordering::SeqCst), 0);
+    assert!(dsh.last_usage.lock().await.is_none());
+    assert!(!dsh.config_manager.burn_rate_state_path().exists());
+    // Even reconnecting to the same instance restores the user's preference.
+    let settings = owner.settings.lock().await.clone();
+    registry.synchronize(&owner, &settings).await;
+    assert!(dsh.monitor_enabled.load(Ordering::Acquire));
+    refresh_usage(&source, &dsh).await.unwrap();
+    assert_eq!(source.reads.load(Ordering::SeqCst), 1);
+    registry.shutdown();
+    drop(dsh);
+    drop(owner);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn account_rebinding_replaces_only_its_source_and_keeps_control_status_revisions_monotonic() {
     let (owner, dir) = owner();
     let registry = owner.monitors.get().unwrap();
@@ -285,7 +336,10 @@ async fn account_rebinding_replaces_only_its_source_and_keeps_control_status_rev
     let old = registry.get(Provider::Dsh);
     {
         let _pending_action = old.settings_patch.lock().await;
-        let snapshots = tokio::time::timeout(std::time::Duration::from_secs(2), registry.snapshots()).await.expect("a pending DSH action must not block other providers' snapshots");
+        let snapshots =
+            tokio::time::timeout(std::time::Duration::from_secs(2), registry.snapshots())
+                .await
+                .expect("a pending DSH action must not block other providers' snapshots");
         assert_eq!(snapshots.len(), 3);
     }
     old.dsh_control.lock().unwrap().accepted = 9;

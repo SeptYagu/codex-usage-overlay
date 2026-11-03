@@ -464,6 +464,9 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
 
     let generation = {
         let _source_commit = state.settings_patch.lock().await;
+        if !state.monitor_enabled.load(Ordering::Acquire) || !state.is_current() {
+            return Err("Usage source is disabled or no longer current".into());
+        }
         state.source_generation.load(Ordering::Acquire)
     };
     *state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()) = None;
@@ -476,7 +479,8 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
     // Source changes may proceed while network I/O is in flight, but no old
     // result may commit to a new namespace, train its learner or send control.
     let _source_commit = state.settings_patch.lock().await;
-    if state.source_generation.load(Ordering::Acquire) != generation {
+    if state.source_generation.load(Ordering::Acquire) != generation
+        || !state.monitor_enabled.load(Ordering::Acquire) || !state.is_current() {
         completion.completed = true;
         return Err("Usage source changed during the read; discarded the previous source result".into());
     }
@@ -669,19 +673,25 @@ pub async fn dsh_connection_status(state: State<'_, Arc<AppState>>) -> Result<cr
 #[tauri::command]
 pub async fn dsh_connect(bridge_id: Option<String>, connection_url: Option<String>, state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<crate::dsh::ConnectionStatus, String> {
     if bridge_id.is_some() == connection_url.is_some() { return Err("Select exactly one DSH connection method".into()); }
+    if bridge_id.as_deref().is_some_and(|id| !crate::pause_control::looks_like_thread_id(id)) {
+        return Err("Invalid DSH bridge identity".into());
+    }
     let _commit = state.settings_patch.lock().await;
+    let runtime = crate::monitor::selected(&state, Provider::Dsh);
+    let source_commit = freeze_dsh_connection(&runtime).await;
     let result = if let Some(id) = bridge_id {
-        if !crate::pause_control::looks_like_thread_id(&id) { return Err("Invalid DSH bridge identity".into()); }
         state.dsh.connect_bridge(&state.config_manager.runtime_dir().join("dsh-bridges").join(format!("{id}.json"))).await
     } else {
         state.dsh.connect(connection_url.as_deref().unwrap_or_default()).await
     };
     let status = match result { Ok(status) => status, Err(error) => {
         state.dsh.disconnect().await;
+        drop(source_commit);
         publish_dsh_binding(&app, &state, None, None).await?;
         return Err(error);
     }};
     let origin = state.dsh.origin().await;
+    drop(source_commit);
     publish_dsh_binding(&app, &state, origin, status.instance_id.clone()).await?;
     Ok(status)
 }
@@ -689,9 +699,25 @@ pub async fn dsh_connect(bridge_id: Option<String>, connection_url: Option<Strin
 #[tauri::command]
 pub async fn dsh_disconnect(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<crate::dsh::ConnectionStatus, String> {
     let _commit = state.settings_patch.lock().await;
+    let runtime = crate::monitor::selected(&state, Provider::Dsh);
+    let source_commit = freeze_dsh_connection(&runtime).await;
     state.dsh.disconnect().await;
+    drop(source_commit);
     publish_dsh_binding(&app, &state, None, None).await?;
     Ok(state.dsh.status().await)
+}
+
+// The shared transport must not change while an old provider action can dispatch.
+// Leave the runtime frozen after releasing the gate; synchronize restores the
+// configured monitoring preference only after the new binding is installed.
+pub(crate) async fn freeze_dsh_connection(runtime: &Arc<AppState>) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+    // Legacy single-source callers already hold this same root gate.
+    if runtime.runtime_provider.is_none() { return None; }
+    let guard = runtime.settings_patch.lock().await;
+    runtime.monitor_enabled.store(false, Ordering::Release);
+    runtime.source_generation.fetch_add(1, Ordering::AcqRel);
+    runtime.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).invalidate();
+    Some(guard)
 }
 
 // Caller holds settings_patch. Pairing never guesses an account or target.
