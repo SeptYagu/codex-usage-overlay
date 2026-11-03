@@ -10,22 +10,11 @@ use uuid::Uuid;
 const MAX_RECORD_BYTES: usize = 16 * 1024;
 pub(super) struct Record {
     pub instance_id: String,
+    pub profile_id: Option<String>,
     pub origin: Url,
     pub bearer: HeaderValue,
     pub path: PathBuf,
     pub directory: PathBuf,
-}
-
-pub(super) async fn read_record(path: &Path) -> Result<Record, String> {
-    let local = std::env::var_os("LOCALAPPDATA")
-        .ok_or("Overlay companion discovery directory is unavailable")?;
-    let directory = PathBuf::from(local)
-        .join("CodexUsageOverlay")
-        .join("dsh-bridges");
-    let directory = tokio::fs::canonicalize(directory)
-        .await
-        .map_err(|_| "No DSH overlay companion discovery directory")?;
-    read_record_in_directory(path, &directory).await
 }
 
 pub(super) async fn read_record_in_directory(
@@ -105,11 +94,27 @@ pub(super) fn parse_record(bytes: &[u8]) -> Result<Record, String> {
     if let Some(label) = value.get("profileLabel") {
         super::parser::text(label, 256)?;
     }
+    let profile_id = match value.get("profileId") {
+        None => None,
+        Some(value) => {
+            let id = value
+                .as_str()
+                .filter(|id| {
+                    id.len() == 64
+                        && id
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
+                .ok_or("Invalid DSH companion profile identity")?;
+            Some(id.to_string())
+        }
+    };
     let mut bearer = HeaderValue::from_str(&format!("Bearer {token}"))
         .map_err(|_| "Invalid DSH companion pairing header")?;
     bearer.set_sensitive(true);
     Ok(Record {
         instance_id: id.into(),
+        profile_id,
         origin,
         bearer,
         path: PathBuf::new(),
@@ -123,6 +128,34 @@ mod tests {
     use serde_json::json;
     fn record() -> Value {
         json!({"schemaVersion":1,"instanceId":"f5409f91-ec39-462d-9964-596e18e2a36c","origin":"http://127.0.0.1:12345","token":"SECRET_0123456789_0123456789_0123456789","profileLabel":"Desktop"})
+    }
+    #[test]
+    fn profile_identity_is_optional_bounded_public_hash() {
+        assert!(parse_record(&serde_json::to_vec(&record()).unwrap())
+            .unwrap()
+            .profile_id
+            .is_none());
+        let mut value = record();
+        value["profileId"] = json!("a".repeat(64));
+        assert_eq!(
+            parse_record(&serde_json::to_vec(&value).unwrap())
+                .unwrap()
+                .profile_id,
+            Some("a".repeat(64))
+        );
+        for invalid in [
+            json!("SECRET/path"),
+            json!("A".repeat(64)),
+            json!("a".repeat(63)),
+            json!(null),
+            json!(7),
+        ] {
+            value["profileId"] = invalid;
+            let error = parse_record(&serde_json::to_vec(&value).unwrap())
+                .err()
+                .unwrap();
+            assert_eq!(error, "Invalid DSH companion profile identity");
+        }
     }
     #[test]
     fn accepts_only_dedicated_loopback_discovery_without_secret_errors() {

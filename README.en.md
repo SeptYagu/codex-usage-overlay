@@ -41,15 +41,17 @@ Smart Pause requests cooperation from Codex; accepted delivery does not verify s
 
 Available enabled local Codex, Claude and DSH sources keep monitoring in the background, with separate readings and burn-rate histories. Click the overlay's provider logo to cycle Codex → Claude → DSH; only sources with an available reading and enabled monitoring are included. Switching displays cached data immediately and leaves monitoring/protection running independently.
 
-Settings separates **Displayed provider** from **Provider settings**. Select a source to configure its monitor and protection without changing the overlay. Disabling its monitor also disables its protection. On upgrade, only the previously selected source inherits an enabled protection switch; other sources start with protection off. Claude live reading remains opt-in; DSH still needs explicit pairing and account/session selection.
+Settings separates **Displayed provider** from **Provider settings**. Select a source to configure its monitor and protection without changing the overlay. Disabling its monitor also disables its protection. On upgrade, only the previously selected source inherits an enabled protection switch; other sources start with protection off. Claude live reading remains opt-in. Enabled DSH monitoring automatically connects to a supported running Desktop and reads its active subscription account; pause sessions still require explicit selection.
 
 Show/hide is remembered across restarts. A hidden overlay launches hidden while monitoring and the tray continue running. The tray icon follows the displayed source and retains its cached quota during a temporary read failure; the tooltip reports the failure. If the tray is unavailable, the overlay is shown for recovery.
 
 ## DSH subscription usage
 
-The independent **DSH** source reads the subscription plugin of an explicitly paired DSH instance, never local Codex limits. Install the companion tarball from the same release, then select the instance, account and ordinary sessions in Settings. History is isolated by instance/account. DSH thresholds are independent and default to 0% remaining.
+With DSH monitoring enabled, the overlay looks for a running DSH Desktop in the background, even while another provider is displayed. It uses Desktop's official CLI to configure its bundled companion when needed, waits for discovery and authentication, then reads the subscription plugin's active account. No manual plugin installation or pairing is required for the supported Windows default Desktop profile.
 
-Protection sends a cooperative pause message only to selected running sessions; acceptance does not prove interruption, and auto-resume is unavailable. Updating the overlay does not install or restart DSH. See the [setup and limitations guide](docs/dsh-subscription.md) and [companion protocol](integrations/dsh-bridge/README.md).
+Multiple uncertain instances are not selected arbitrarily. A profile identifier allows reconnection after DSH restarts, but protected sessions must be selected again. The overlay never restarts DSH. Disable DSH monitoring to stop background attachment; an explicit Disconnect stays disconnected until Retry. A compatibility connection-link form remains available for other configurations.
+
+History is isolated by instance/account. DSH thresholds default to 0% remaining. Protection sends a cooperative pause message only to explicitly selected ordinary running sessions; acceptance does not prove interruption, and automatic resume is unavailable. Local Codex and Claude are never used as a fallback. See the [setup and limitations guide](docs/dsh-subscription.md) and [companion protocol](integrations/dsh-bridge/README.md).
 
 ## Claude usage limits
 

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { request } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { apply, inject, MAX_BODY_BYTES, name, startBridge, validateRpc } from '../index.js';
+import { apply, deriveProfileId, inject, MAX_BODY_BYTES, name, startBridge, validateRpc } from '../index.js';
 import { restrictPath } from '../file-security.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -117,6 +117,22 @@ test('discovery is private, non-OAuth, unique per instance and owner Peer is int
   assert.equal(a.connection.state.disposed, 1);
   await a.bridge.dispose();
   assert.equal(a.connection.state.disposed, 1);
+});
+
+test('public profile identity survives bridge restarts without exposing the profile path', async (t) => {
+  const profile = path.resolve(suiteDirectory, 'private-profile-location');
+  const a = await fixture(t, { profileDirectory: profile });
+  const b = await fixture(t, { profileDirectory: path.join(profile, '.') });
+  const c = await fixture(t, { profileDirectory: path.resolve(suiteDirectory, 'other-profile') });
+  assert.match(a.record.profileId, /^[a-f0-9]{64}$/);
+  assert.equal(a.record.profileId, b.record.profileId);
+  assert.notEqual(a.record.profileId, c.record.profileId);
+  assert.notEqual(a.record.instanceId, b.record.instanceId);
+  assert.notEqual(a.record.token, b.record.token);
+  assert.equal(JSON.stringify(a.record).includes(profile), false);
+  assert.equal(deriveProfileId(undefined), undefined);
+  assert.throws(() => deriveProfileId('relative-profile'), /Invalid DSH profile location/);
+  if (process.platform === 'win32') assert.equal(deriveProfileId(profile.toUpperCase()), a.record.profileId);
 });
 
 test('only exact local authority and dedicated Bearer without Origin are admitted', async (t) => {

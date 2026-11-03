@@ -1,3 +1,5 @@
+#[cfg(windows)]
+mod audio;
 mod claude;
 mod codex;
 mod commands;
@@ -11,8 +13,6 @@ mod polling;
 mod monitor;
 mod tray;
 mod update_channel;
-#[cfg(windows)]
-mod audio;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,7 +55,9 @@ pub fn run() {
                     );
                     let _ = window.hide();
                 }
-                tauri::WindowEvent::CloseRequested { api, .. } if window.label() == tray::TRAY_MENU_WINDOW_LABEL => {
+                tauri::WindowEvent::CloseRequested { api, .. }
+                    if window.label() == tray::TRAY_MENU_WINDOW_LABEL =>
+                {
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -74,18 +76,18 @@ pub fn run() {
                         window.is_minimized().unwrap_or(false),
                     );
                 }
-                tauri::WindowEvent::Focused(focused) if window.label() == tray::TRAY_MENU_WINDOW_LABEL => {
+                tauri::WindowEvent::Focused(focused)
+                    if window.label() == tray::TRAY_MENU_WINDOW_LABEL =>
+                {
                     struct LiveFocusOps<'a>(&'a tauri::Window);
                     impl<'a> TrayMenuFocusWindowOps for LiveFocusOps<'a> {
                         fn hide(&mut self) {
                             let _ = self.0.hide();
                         }
                     }
-                    apply_tray_menu_focus_event(
-                        &mut LiveFocusOps(window),
-                        *focused,
-                        || tray::on_tray_menu_blur(window.app_handle()),
-                    );
+                    apply_tray_menu_focus_event(&mut LiveFocusOps(window), *focused, || {
+                        tray::on_tray_menu_blur(window.app_handle())
+                    });
                 }
                 tauri::WindowEvent::ScaleFactorChanged { .. } if window.label() == "main" => {
                     let app = window.app_handle().clone();
@@ -129,6 +131,9 @@ pub fn run() {
             commands::dsh_connection_status,
             commands::dsh_connect,
             commands::dsh_disconnect,
+            commands::dsh_auto_retry,
+            commands::dsh_auto_setup,
+            commands::dsh_bind_targets,
             commands::get_auto_pause_status,
             commands::cancel_resume_plans,
             commands::resume_chat,
@@ -172,7 +177,9 @@ pub fn run() {
 
             #[cfg(windows)]
             match audio::spawn_worker(app.handle().clone()) {
-                Ok(audio) => { let _ = app_state_clone.audio.set(audio); }
+                Ok(audio) => {
+                    let _ = app_state_clone.audio.set(audio);
+                }
                 Err(error) => eprintln!("Could not start audio worker: {error}"),
             }
 
@@ -198,13 +205,18 @@ pub fn run() {
                 }
             }
             if initial_settings.mouse_passthrough {
-                let restored = tray_ready
-                    && commands::set_main_mouse_passthrough(app.handle(), true).is_ok();
+                let restored =
+                    tray_ready && commands::set_main_mouse_passthrough(app.handle(), true).is_ok();
                 if !restored {
-                    eprintln!("Saved mouse passthrough was not restored; keeping the overlay interactive");
+                    eprintln!(
+                        "Saved mouse passthrough was not restored; keeping the overlay interactive"
+                    );
                     let mut safe_settings = initial_settings.clone();
                     safe_settings.mouse_passthrough = false;
-                    if let Err(error) = app_state_clone.config_manager.save_settings_checked(&safe_settings) {
+                    if let Err(error) = app_state_clone
+                        .config_manager
+                        .save_settings_checked(&safe_settings)
+                    {
                         eprintln!("Could not persist the safe mouse passthrough fallback: {error}");
                     }
                     if let Ok(mut settings) = app_state_clone.settings.try_lock() {
@@ -221,7 +233,9 @@ pub fn run() {
             app.listen("window_drag_ended", move |_| {
                 let state = drag_state.clone();
                 let app = drag_app.clone();
-                tauri::async_runtime::spawn(async move { dock::drag_ended(&app, &state).await; });
+                tauri::async_runtime::spawn(async move {
+                    dock::drag_ended(&app, &state).await;
+                });
             });
             let menu_state = app_state_clone.clone();
             app.listen("overlay_menu_opened", move |_| menu_state.dock.begin_menu());
@@ -232,6 +246,7 @@ pub fn run() {
             });
 
             monitor::start(app.handle(), &app_state_clone);
+            dsh::auto::start(app.handle().clone(), app_state_clone.clone());
             let status_handle = app.handle().clone();
             let status_state = app_state_clone.clone();
             tauri::async_runtime::spawn(async move {
@@ -311,7 +326,10 @@ pub fn run() {
                 }
                 if let Some(registry) = app.state::<Arc<AppState>>().monitors.get() { registry.shutdown(); }
                 commands::shutdown_audio(app);
-                commands::install_prepared_update_on_exit(app, app.state::<Arc<AppState>>().inner());
+                commands::install_prepared_update_on_exit(
+                    app,
+                    app.state::<Arc<AppState>>().inner(),
+                );
             }
         });
 }
@@ -953,7 +971,9 @@ mod tests {
     #[test]
     fn tray_menu_focus_event_hides_only_when_blur_evaluator_approves() {
         // When focused becomes true, never hide.
-        assert!(!handle_tray_menu_focus_event(true, || panic!("should not be called")));
+        assert!(!handle_tray_menu_focus_event(true, || panic!(
+            "should not be called"
+        )));
 
         // When focused becomes false, respect the blur evaluator.
         assert!(!handle_tray_menu_focus_event(false, || false));
@@ -964,7 +984,9 @@ mod tests {
     fn apply_tray_menu_focus_event_hides_only_when_approved() {
         struct MockFocusOps(usize);
         impl TrayMenuFocusWindowOps for MockFocusOps {
-            fn hide(&mut self) { self.0 += 1; }
+            fn hide(&mut self) {
+                self.0 += 1;
+            }
         }
 
         // Focused(true): never hide

@@ -22,6 +22,7 @@ mod dsh_tests;
 pub struct AppServices {
     pub tray_gate: StdMutex<()>,
     pub dsh: crate::dsh::Manager,
+    pub dsh_auto: crate::dsh::auto::Controller,
     pub dock: crate::dock::DockManager,
     pub last_valid_settings_geometry: StdMutex<Option<crate::config::SettingsWindowGeometry>>,
     pub tray_menu_focus: StdMutex<crate::tray::TrayMenuFocusState>,
@@ -82,6 +83,7 @@ impl AppState {
         let services = Arc::new(AppServices {
             tray_gate: StdMutex::new(()),
             dsh: Default::default(),
+            dsh_auto: Default::default(),
             dock: crate::dock::DockManager::new(config_manager.clone()),
             last_valid_settings_geometry: StdMutex::new(None),
             tray_menu_focus: StdMutex::new(crate::tray::TrayMenuFocusState::default()),
@@ -161,7 +163,7 @@ pub struct SettingsEnvelope {
 }
 
 impl SettingsEnvelope {
-    fn new(state: &AppState, revision: u64, settings: OverlaySettings) -> Self {
+    pub(crate) fn new(state: &AppState, revision: u64, settings: OverlaySettings) -> Self {
         Self { source_key: crate::config::source_key(&settings),
             source_generation: state.monitors.get().map(|registry| registry.get(settings.provider).source_generation.load(Ordering::Acquire))
                 .unwrap_or_else(|| state.source_generation.load(Ordering::Acquire)),
@@ -326,7 +328,7 @@ async fn read_claude_usage(state: &AppState, generation: u64) -> Result<RawCodex
     }
 }
 
-async fn read_dsh_usage(state: &AppState, settings: &OverlaySettings, generation: u64) -> Result<RawCodexUsage, String> {
+pub(crate) async fn read_dsh_usage(state: &AppState, settings: &OverlaySettings, generation: u64) -> Result<RawCodexUsage, String> {
     let result = async {
         let connection = state.dsh.status().await;
         if !connection.connected || connection.instance_id.as_deref() != Some(settings.dsh_instance_id.as_str())
@@ -666,45 +668,263 @@ pub async fn dsh_discover(state: State<'_, Arc<AppState>>) -> Result<Vec<DshBrid
 }
 
 #[tauri::command]
-pub async fn dsh_connection_status(state: State<'_, Arc<AppState>>) -> Result<crate::dsh::ConnectionStatus, String> {
-    Ok(state.dsh.status().await)
+pub async fn dsh_connection_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::dsh::ConnectionStatus, String> {
+    Ok(state.dsh_auto.status(&state.dsh))
 }
 
 #[tauri::command]
-pub async fn dsh_connect(bridge_id: Option<String>, connection_url: Option<String>, state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<crate::dsh::ConnectionStatus, String> {
-    if bridge_id.is_some() == connection_url.is_some() { return Err("Select exactly one DSH connection method".into()); }
-    if bridge_id.as_deref().is_some_and(|id| !crate::pause_control::looks_like_thread_id(id)) {
-        return Err("Invalid DSH bridge identity".into());
+pub async fn dsh_auto_retry(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let _commit = state.settings_patch.lock().await;
+    let settings = state.settings.lock().await.clone();
+    if !dsh_monitor_enabled(&state, &settings) { return Err("Enable DSH monitoring before retrying".into()); }
+    let runtime = crate::monitor::selected(state.inner(), Provider::Dsh);
+    let frozen = freeze_dsh_connection(&runtime).await;
+    state.dsh_auto.retry(&state.dsh);
+    runtime
+        .dsh_control
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .invalidate();
+    drop(frozen);
+    synchronize_dsh_runtime(state.inner(), &settings).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn dsh_auto_setup(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+    crate::dsh::auto::setup(&app, state.inner(), true).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn dsh_bind_targets(
+    account_id: String,
+    session_ids: Vec<String>,
+    expected_instance_id: String,
+    expected_connection_revision: u64,
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<SettingsEnvelope, String> {
+    bind_dsh_targets(
+        &app,
+        state.inner(),
+        account_id,
+        session_ids,
+        expected_instance_id,
+        expected_connection_revision,
+    )
+    .await
+}
+
+pub(crate) async fn bind_dsh_targets<S: TrayPresentationSink>(
+    sink: &S,
+    state: &Arc<AppState>,
+    account_id: String,
+    session_ids: Vec<String>,
+    expected_instance_id: String,
+    expected_connection_revision: u64,
+) -> Result<SettingsEnvelope, String> {
+    // Serialize the UI's connection expectation with the real source patch.
+    let _commit = state.settings_patch.lock().await;
+    let cached = state.dsh.cached_status();
+    if !cached.connected
+        || cached.instance_id.as_deref() != Some(expected_instance_id.as_str())
+        || cached.connection_revision != expected_connection_revision
+    {
+        return Err("DSH connection changed; refresh before selecting targets".into());
     }
-    let _commit = state.settings_patch.lock().await;
-    let runtime = crate::monitor::selected(&state, Provider::Dsh);
-    let source_commit = freeze_dsh_connection(&runtime).await;
-    let result = if let Some(id) = bridge_id {
-        state.dsh.connect_bridge(&state.config_manager.runtime_dir().join("dsh-bridges").join(format!("{id}.json"))).await
-    } else {
-        state.dsh.connect(connection_url.as_deref().unwrap_or_default()).await
-    };
-    let status = match result { Ok(status) => status, Err(error) => {
-        state.dsh.disconnect().await;
-        drop(source_commit);
-        publish_dsh_binding(&app, &state, None, None).await?;
-        return Err(error);
-    }};
-    let origin = state.dsh.origin().await;
-    drop(source_commit);
-    publish_dsh_binding(&app, &state, origin, status.instance_id.clone()).await?;
-    Ok(status)
+    let patch = serde_json::json!({"dshAccountId":account_id,"dshSessionIds":session_ids});
+    let changes = validate_settings_patch(&patch, false)?;
+    let status = state.dsh.status().await;
+    let mut settings = state.settings.lock().await;
+    if !dsh_monitor_enabled(state, &settings)
+        || settings.dsh_instance_id != expected_instance_id
+        || !status.connected
+        || status.connection_revision != expected_connection_revision
+        || (!account_id.is_empty()
+            && !status
+                .accounts
+                .iter()
+                .any(|a| a.active && a.id == account_id))
+        || (account_id.is_empty() && !session_ids.is_empty())
+        || session_ids.iter().any(|id| {
+            !status
+                .sessions
+                .iter()
+                .any(|s| s.id == *id && s.provider == "openai-codex")
+        })
+    {
+        return Err("Select the current DSH account and existing Codex sessions".into());
+    }
+    let unique: std::collections::HashSet<_> = session_ids.iter().collect();
+    if unique.len() != session_ids.len() {
+        return Err("Duplicate DSH target binding".into());
+    }
+    let mut next = settings.clone();
+    merge_settings_patch(&mut next, &Value::Object(changes.clone()))?;
+    state.config_manager.save_settings_checked(&next)?;
+    let source_changed = !crate::config::same_source(&settings.for_provider(Provider::Dsh), &next.for_provider(Provider::Dsh));
+    *settings = next.clone();
+    drop(settings);
+    state.dsh_auto.source_changed();
+    if source_changed { synchronize_dsh_runtime(state, &next).await; }
+    let runtime = crate::monitor::selected(state, Provider::Dsh);
+    runtime.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).invalidate();
+    let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
+    let envelope = SettingsEnvelope::new(state, revision, next);
+    if let Some(app) = sink.app_handle() {
+        let _ = app.emit("settings_updated", &envelope);
+    }
+    state
+        .polling
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .request_now(std::time::Instant::now());
+    state.poll_wake.notify_one();
+    crate::tray::repaint_tray(sink, state).await;
+    Ok(envelope)
 }
 
 #[tauri::command]
-pub async fn dsh_disconnect(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<crate::dsh::ConnectionStatus, String> {
+pub async fn dsh_connect(
+    bridge_id: Option<String>,
+    connection_url: Option<String>,
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<crate::dsh::ConnectionStatus, String> {
+    if bridge_id.is_some() == connection_url.is_some() {
+        return Err("Select exactly one DSH connection method".into());
+    }
+    if bridge_id.as_deref().is_some_and(|id| !crate::pause_control::looks_like_thread_id(id)) { return Err("Invalid DSH bridge identity".into()); }
+    let epoch = state.dsh_auto.suspend(&state.dsh);
+    let runtime = crate::monitor::selected(state.inner(), Provider::Dsh);
+    runtime
+        .dsh_control
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .invalidate();
+    let generation = runtime.source_generation.load(Ordering::Acquire);
+    let prepared = if let Some(id) = bridge_id {
+        if !crate::pause_control::looks_like_thread_id(&id) {
+            return Err("Invalid DSH bridge identity".into());
+        }
+        let directory = state.config_manager.runtime_dir().join("dsh-bridges");
+        state
+            .dsh
+            .prepare_bridge_in_directory(&directory.join(format!("{id}.json")), &directory)
+            .await?
+    } else {
+        state
+            .dsh
+            .preparation(connection_url.as_deref().unwrap_or_default())
+            .await?
+    };
     let _commit = state.settings_patch.lock().await;
-    let runtime = crate::monitor::selected(&state, Provider::Dsh);
-    let source_commit = freeze_dsh_connection(&runtime).await;
-    state.dsh.disconnect().await;
+    let source_commit = if runtime.runtime_provider.is_some() { Some(runtime.settings_patch.lock().await) } else { None };
+    let mut settings = state.settings.lock().await;
+    let mut installation = state.dsh.installation().await;
+    let status = prepared.status().clone();
+    let mut next = settings.clone();
+    next.dsh_base_url = status.origin.clone().unwrap_or_default();
+    next.dsh_instance_id = status.instance_id.clone().unwrap_or_default();
+    next.dsh_profile_id.clear();
+    next.dsh_account_id.clear();
+    next.dsh_session_ids.clear();
+    state.dsh_auto.with_operation(epoch, || {
+        if runtime.source_generation.load(Ordering::Acquire) != generation || !runtime.is_current()
+            || !installation.accepts(&prepared)
+        {
+            return Err("DSH connection changed during pairing".into());
+        }
+        state.config_manager.save_settings_checked(&next)?;
+        invalidate_dsh_runtime(&runtime);
+        installation.install(prepared);
+        *settings = next.clone();
+        Ok(())
+    })?;
+    drop(installation);
+    drop(settings);
+    runtime.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).reset();
     drop(source_commit);
-    publish_dsh_binding(&app, &state, None, None).await?;
-    Ok(state.dsh.status().await)
+    publish_dsh_binding(&app, &state, next).await;
+    state.dsh_auto.manual_phase(epoch, "connected-unbound");
+    Ok(state.dsh_auto.status(&state.dsh))
+}
+
+#[tauri::command]
+pub async fn dsh_disconnect(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<crate::dsh::ConnectionStatus, String> {
+    disconnect_dsh(&app, state.inner()).await
+}
+
+pub(crate) async fn disconnect_dsh<S: TrayPresentationSink>(sink: &S, state: &Arc<AppState>) -> Result<crate::dsh::ConnectionStatus, String> {
+    // Revoke before waiting on any source/network lock. Old handshakes cannot
+    // install after this point and the background worker stays suspended.
+    state.dsh_auto.suspend(&state.dsh);
+    let _commit = state.settings_patch.lock().await;
+    let runtime = crate::monitor::selected(state, Provider::Dsh);
+    let frozen = freeze_dsh_connection(&runtime).await;
+    let next = {
+        let mut settings = state.settings.lock().await;
+        let mut next = settings.clone();
+        next.dsh_base_url.clear();
+        next.dsh_instance_id.clear();
+        next.dsh_account_id.clear();
+        next.dsh_session_ids.clear();
+        let changed = !crate::config::same_source(&settings.for_provider(Provider::Dsh), &next.for_provider(Provider::Dsh));
+        if changed {
+            state.config_manager.save_settings_checked(&next)?;
+            *settings = next.clone();
+        }
+        next
+    };
+    drop(frozen);
+    publish_dsh_binding(sink, state, next).await;
+    let manager = state.dsh.clone();
+    tauri::async_runtime::spawn(async move {
+        manager.clear_revoked().await;
+    });
+    Ok(state.dsh_auto.status(&state.dsh))
+}
+
+// Caller has durably saved settings and holds settings_patch. Only explicit
+// re-pair clears the at-most-once ledger, never automatic retries/disconnect.
+async fn publish_dsh_binding<S: TrayPresentationSink>(
+    sink: &S,
+    state: &Arc<AppState>,
+    next: OverlaySettings,
+) {
+    synchronize_dsh_runtime(state, &next).await;
+    let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
+    if let Some(app) = sink.app_handle() {
+        let _ = app.emit("settings_updated", SettingsEnvelope::new(state, revision, next));
+    }
+    crate::tray::repaint_tray(sink, state).await;
+}
+
+pub(crate) fn dsh_monitor_enabled(state: &AppState, settings: &OverlaySettings) -> bool {
+    if state.monitors.get().is_some() { settings.preference(Provider::Dsh).monitor_enabled }
+    else { settings.provider == Provider::Dsh }
+}
+
+pub(crate) fn invalidate_dsh_runtime(runtime: &AppState) {
+    if runtime.runtime_provider.is_some() {
+        runtime.monitor_enabled.store(false, Ordering::Release);
+        runtime.source_generation.fetch_add(1, Ordering::AcqRel);
+    }
+    runtime.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).invalidate();
+}
+
+pub(crate) async fn synchronize_dsh_runtime(state: &Arc<AppState>, settings: &OverlaySettings) {
+    if let Some(registry) = state.monitors.get() { registry.synchronize(state, settings).await; }
+    else { switch_provider(state, settings.provider).await; }
+    let runtime = crate::monitor::selected(state, Provider::Dsh);
+    runtime.polling.lock().unwrap_or_else(|p| p.into_inner()).request_now(std::time::Instant::now());
+    runtime.poll_wake.notify_one();
 }
 
 // The shared transport must not change while an old provider action can dispatch.
@@ -714,38 +934,10 @@ pub(crate) async fn freeze_dsh_connection(runtime: &Arc<AppState>) -> Option<tok
     // Legacy single-source callers already hold this same root gate.
     if runtime.runtime_provider.is_none() { return None; }
     let guard = runtime.settings_patch.lock().await;
-    runtime.monitor_enabled.store(false, Ordering::Release);
-    runtime.source_generation.fetch_add(1, Ordering::AcqRel);
-    runtime.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).invalidate();
+    invalidate_dsh_runtime(runtime);
     Some(guard)
 }
 
-// Caller holds settings_patch. Pairing never guesses an account or target.
-async fn publish_dsh_binding(app: &AppHandle, state: &Arc<AppState>, origin: Option<String>, instance: Option<String>) -> Result<(), String> {
-    let next = {
-        let mut settings = state.settings.lock().await;
-        let mut next = settings.clone();
-        next.dsh_base_url = origin.unwrap_or_default(); next.dsh_instance_id = instance.unwrap_or_default();
-        next.dsh_account_id.clear(); next.dsh_session_ids.clear();
-        if let Err(error) = state.config_manager.save_settings_checked(&next) {
-            state.dsh.disconnect().await;
-            return Err(error);
-        }
-        *settings = next.clone(); next
-    };
-    // An explicit re-pair is the only user action that clears the at-most-once
-    // ledger. Source/account/target switches only cancel queued work.
-    let dsh_runtime = crate::monitor::selected(state, Provider::Dsh);
-    dsh_runtime.dsh_control.lock().unwrap_or_else(|p| p.into_inner()).reset();
-    if let Some(registry) = state.monitors.get() { registry.synchronize(state, &next).await; }
-    else { switch_provider(state, next.provider).await; }
-    let revision = state.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
-    let _ = app.emit("settings_updated", SettingsEnvelope::new(state, revision, next));
-    state.polling.lock().unwrap_or_else(|p| p.into_inner()).request_now(std::time::Instant::now());
-    state.poll_wake.notify_one();
-    crate::tray::repaint_tray(app, state).await;
-    Ok(())
-}
 
 /// The auto-pause status the settings window reads.
 ///
@@ -1091,6 +1283,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     // Serialize native side effects with the matching persisted preference, even
     // when Settings and the tray submit changes at the same time.
     let _patch_guard = state.settings_patch.lock().await;
+    let previous_dsh_enabled = dsh_monitor_enabled(state, &*state.settings.lock().await);
     let patch = if patch == serde_json::json!({"cycleProvider": true}) {
         let current = state.settings.lock().await.provider;
         let next = state.monitors.get().and_then(|r| r.next(current)).ok_or("No other monitored provider is available")?;
@@ -1098,6 +1291,9 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     } else { patch };
     let changes = validate_settings_patch(&patch, allow_auto_start)?;
     if changes.contains_key("dshAccountId") || changes.contains_key("dshSessionIds") {
+        if state.monitors.get().is_some() {
+            return Err("Use the current DSH connection revision to bind protection targets".into());
+        }
         let mut selected = state.settings.lock().await.clone();
         merge_settings_patch(&mut selected, &patch)?;
         let unique: std::collections::HashSet<_> = selected.dsh_session_ids.iter().collect();
@@ -1108,7 +1304,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
                 || !connection.accounts.iter().any(|a| a.active && a.id == selected.dsh_account_id) {
                 return Err("Connect DSH and explicitly select its current active subscription account".into());
             }
-            if selected.dsh_session_ids.iter().any(|id| !connection.sessions.iter().any(|s| &s.id == id && s.provider == "codex")) {
+            if selected.dsh_session_ids.iter().any(|id| !connection.sessions.iter().any(|s| &s.id == id && s.provider == "openai-codex")) {
                 return Err("Select only existing ordinary DSH Codex sessions".into());
             }
         }
@@ -1183,11 +1379,16 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         }
     }
 
+    let next_dsh_enabled = dsh_monitor_enabled(state, &envelope.settings);
+    if previous_dsh_enabled != next_dsh_enabled {
+        state.dsh_auto.provider_selected(&state.dsh, if next_dsh_enabled { Provider::Dsh } else { Provider::Codex });
+    }
     if let Some(registry) = state.monitors.get() {
         registry.synchronize(state, &envelope.settings).await;
         envelope.source_generation = registry.get(envelope.settings.provider).source_generation.load(Ordering::Acquire);
     } else {
     if provider_changed {
+        state.dsh_auto.provider_selected(&state.dsh, envelope.settings.provider);
         switch_provider(state, envelope.settings.provider).await;
         envelope.source_generation = state.source_generation.load(Ordering::Acquire);
     }

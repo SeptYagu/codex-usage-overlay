@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
-import { DshBridgeInstance, DshConnectionStatus, OverlaySettings } from '../types';
+import { DshConnectionStatus, OverlaySettings, SettingsEnvelope } from '../types';
 
 interface DshConnectionViewProps {
   settings: OverlaySettings;
   onPatchSettings: (patch: Partial<OverlaySettings>, debounce?: boolean) => void;
 }
+
+type Action = 'retry' | 'setup' | 'manual' | 'disconnect' | 'bind';
 
 // Show only a public origin even if a malformed/older backend sends a full URL.
 function publicOrigin(value: string): string {
@@ -16,164 +18,239 @@ function publicOrigin(value: string): string {
   } catch { return ''; }
 }
 
-export function DshConnectionView({ settings, onPatchSettings }: DshConnectionViewProps) {
+const phaseLabels: Record<string, string> = {
+  inactive: 'dshNotConnected',
+  discovering: 'dshAutoSearching',
+  connecting: 'dshAutoSearching',
+  'setting-up': 'dshAutoSettingUp',
+  'restart-required': 'dshAutoWaitingReload',
+  ambiguous: 'dshAutoAmbiguous',
+  suspended: 'dshAutoSuspended',
+  error: 'dshAutoFailed',
+};
+
+export function DshConnectionView({ settings }: DshConnectionViewProps) {
   const { t } = useTranslation();
   const [connectionUrl, setConnectionUrl] = useState('');
+  const [advanced, setAdvanced] = useState(false);
   const [status, setStatus] = useState<DshConnectionStatus | null>(null);
-  const [bridges, setBridges] = useState<DshBridgeInstance[]>([]);
-  const [bridgeId, setBridgeId] = useState('');
-  const [discovering, setDiscovering] = useState(false);
-  const [discoveryFailed, setDiscoveryFailed] = useState(false);
-  const discoveryRequest = useRef(0);
-  const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [busy, setBusy] = useState<Action | null>(null);
+  const [failed, setFailed] = useState<'connection' | 'binding' | null>(null);
+  const [invalidBinding, setInvalidBinding] = useState<string | null>(null);
+  const bindingSignature = JSON.stringify([settings.dshInstanceId, settings.dshAccountId, settings.dshSessionIds]);
+  const currentBinding = useRef(bindingSignature);
+  currentBinding.current = bindingSignature;
+  const connectionEpoch = useRef<string | null>(null);
+  const liveStatus = useRef<DshConnectionStatus | null>(null);
+  const lifecycle = useRef(0);
+  const operation = useRef(0);
   const request = useRef(0);
-  const mounted = useRef(false);
+  const accepted = useRef({ revision: -1, request: -1 });
   const actionInFlight = useRef(false);
 
+  const acceptStatus = useCallback((next: DshConnectionStatus, epoch: number, action: number, token: number) => {
+    if (epoch !== lifecycle.current || action !== operation.current) return;
+    // Status is a cache projection. Never resurrect an earlier source/phase from
+    // a slow response, including a newer request carrying an older revision.
+    if (!next || !Number.isSafeInteger(next.autoRevision)
+      || next.autoRevision < accepted.current.revision
+      || (next.autoRevision === accepted.current.revision && token < accepted.current.request)) return;
+    accepted.current = { revision: next.autoRevision, request: token };
+    const nextEpoch = next.connected ? JSON.stringify([next.instanceId, next.connectionRevision]) : null;
+    if (!next.connected || (connectionEpoch.current !== null && connectionEpoch.current !== nextEpoch)) {
+      // A settings broadcast can trail the new status. Old selected IDs must
+      // not look authorized in a reconnected instance, even if IDs are reused.
+      setInvalidBinding(currentBinding.current);
+    }
+    connectionEpoch.current = nextEpoch;
+    liveStatus.current = next;
+    setStatus(next);
+    setFailed(current => current === 'binding' ? current : null);
+  }, []);
+
   const refresh = useCallback(async () => {
-    if (actionInFlight.current) return;
+    const epoch = lifecycle.current;
+    const action = operation.current;
     const token = ++request.current;
     try {
       const next = await invoke<DshConnectionStatus>('dsh_connection_status');
-      if (mounted.current && token === request.current) {
-        setStatus(next);
-        setFailed(false);
-      }
+      acceptStatus(next, epoch, action, token);
     } catch {
-      if (mounted.current && token === request.current) { setStatus(null); setFailed(true); }
-    }
-  }, []);
-
-  const discover = useCallback(async () => {
-    const token = ++discoveryRequest.current;
-    setDiscovering(true);
-    setDiscoveryFailed(false);
-    try {
-      const next = await invoke<DshBridgeInstance[]>('dsh_discover');
-      if (mounted.current && token === discoveryRequest.current) {
-        const instances = next ?? [];
-        setBridges(instances);
-        setBridgeId(current => instances.some(instance => instance.id === current) ? current : '');
+      if (epoch === lifecycle.current && action === operation.current
+        && token === request.current && token >= accepted.current.request) {
+        liveStatus.current = null;
+        setStatus(null);
+        setFailed('connection');
       }
-    } catch {
-      if (mounted.current && token === discoveryRequest.current) {
-        setBridges([]);
-        setBridgeId('');
-        setDiscoveryFailed(true);
-      }
-    } finally {
-      if (mounted.current && token === discoveryRequest.current) setDiscovering(false);
     }
-  }, []);
+  }, [acceptStatus]);
 
   useEffect(() => {
-    mounted.current = true;
+    lifecycle.current++;
+    // The Rust singleton owns discovery, setup and reconnecting. Mount only
+    // reads its cache; opening settings must never start a second worker.
     void refresh();
-    void discover();
-    const timer = setInterval(() => { void refresh(); }, 10_000);
-    return () => { mounted.current = false; request.current++; discoveryRequest.current++; clearInterval(timer); };
-  }, [refresh, discover]);
-
-  const run = async (mode: 'bridge' | 'manual' | 'disconnect') => {
-    const connect = mode !== 'disconnect';
-    if ((mode === 'bridge' && !bridgeId) || (mode === 'manual' && !connectionUrl.trim())) return;
-    if (actionInFlight.current) return;
-    actionInFlight.current = true;
-    const token = ++request.current;
-    setBusy(true);
-    setFailed(false);
-    try {
-      // Pairing links are ephemeral secrets: not settings, logs, storage or URLs.
-      const next = connect
-        ? await invoke<DshConnectionStatus>('dsh_connect', mode === 'bridge' ? { bridgeId } : { connectionUrl: connectionUrl.trim() })
-        : await invoke<DshConnectionStatus>('dsh_disconnect');
-      if (mounted.current && token === request.current) {
-        setStatus(next);
-        setConnectionUrl('');
-        setFailed(connect && !next?.connected);
-      }
-    } catch {
-      // Backend errors can include the submitted URL. Never display or log them.
-      if (mounted.current && token === request.current) { setStatus(null); setFailed(true); }
-    } finally {
+    const timer = setInterval(() => { void refresh(); }, 3_000);
+    return () => {
+      lifecycle.current++;
+      operation.current++;
       actionInFlight.current = false;
-      if (mounted.current) setBusy(false);
+      clearInterval(timer);
+    };
+  }, [refresh]);
+
+  const run = async (mode: Exclude<Action, 'bind'>) => {
+    if (actionInFlight.current || (mode === 'manual' && !connectionUrl.trim())) return;
+    actionInFlight.current = true;
+    const epoch = lifecycle.current;
+    const action = ++operation.current;
+    const token = ++request.current;
+    liveStatus.current = null;
+    setStatus(null);
+    setBusy(mode);
+    setFailed(null);
+    try {
+      if (mode === 'retry' || mode === 'setup') {
+        // No arguments: these commands idempotently wake the native worker.
+        await invoke<void>(mode === 'retry' ? 'dsh_auto_retry' : 'dsh_auto_setup');
+      } else {
+        // Pairing links remain ephemeral, never settings, logs or storage.
+        const next = await invoke<DshConnectionStatus>(mode === 'manual' ? 'dsh_connect' : 'dsh_disconnect',
+          mode === 'manual' ? { connectionUrl: connectionUrl.trim() } : undefined);
+        acceptStatus(next, epoch, action, token);
+      }
+      if (epoch !== lifecycle.current || action !== operation.current) return;
+      setConnectionUrl('');
+      await refresh();
+    } catch {
+      // Even native error messages can contain the submitted link. Do not show
+      // raw error/autoMessage text, tokens, paths or backend diagnostics.
+      if (epoch === lifecycle.current && action === operation.current) {
+        liveStatus.current = null;
+        setStatus(null);
+        setFailed('connection');
+      }
+    } finally {
+      if (epoch === lifecycle.current && action === operation.current) {
+        actionInFlight.current = false;
+        setBusy(null);
+      }
     }
   };
 
   const connected = !!status?.connected;
+  const bindingMatches = connected && !!status?.instanceId && settings.dshInstanceId === status.instanceId;
+  const accountId = bindingMatches ? settings.dshAccountId : '';
+  const selectedSessions = bindingMatches && accountId && invalidBinding !== bindingSignature ? settings.dshSessionIds : [];
   const accounts = status?.accounts ?? [];
-  const sessions = (status?.sessions ?? []).filter(session => session.provider === 'codex');
-  const missingSessions = settings.dshSessionIds.filter(id => !sessions.some(session => session.id === id));
-  const origin = publicOrigin(settings.dshBaseUrl);
-  const selectSession = (id: string, selected: boolean) => {
-    onPatchSettings({ dshSessionIds: selected
-      ? [...new Set([...settings.dshSessionIds, id])]
-      : settings.dshSessionIds.filter(existing => existing !== id) });
+  const sessions = (status?.sessions ?? []).filter(session => session.provider === 'openai-codex');
+  const missingSessions = selectedSessions.filter(id => !sessions.some(session => session.id === id));
+  const origin = publicOrigin(status?.origin ?? '');
+  const canBind = connected && !!status?.instanceId && Number.isSafeInteger(status.connectionRevision)
+    && status.connectionRevision >= 0 && ['ready', 'connected-unbound'].includes(status.autoPhase)
+    && !status.error && !busy && failed !== 'connection';
+
+  const bind = async (nextAccount: string, sessionIds: string[]) => {
+    const snapshot = status;
+    if (!canBind || !snapshot || liveStatus.current !== snapshot || actionInFlight.current) return;
+    actionInFlight.current = true;
+    const epoch = lifecycle.current;
+    const action = ++operation.current;
+    setBusy('bind');
+    setFailed(null);
+    try {
+      // Never replay IDs through patch_settings: only this command atomically
+      // checks the displayed connection epoch. App consumes settings_updated.
+      await invoke<SettingsEnvelope>('dsh_bind_targets', {
+        accountId: nextAccount,
+        sessionIds,
+        expectedInstanceId: snapshot.instanceId,
+        expectedConnectionRevision: snapshot.connectionRevision,
+      });
+      if (epoch === lifecycle.current && action === operation.current
+        && liveStatus.current?.instanceId === snapshot.instanceId
+        && liveStatus.current.connectionRevision === snapshot.connectionRevision) {
+        // A deliberate rebind of exactly the same IDs is valid only after the
+        // guarded native command confirms it, never because settings lagged.
+        const confirmed = JSON.stringify([snapshot.instanceId, nextAccount, sessionIds]);
+        setInvalidBinding(current => current === confirmed ? null : current);
+      }
+    } catch {
+      if (epoch === lifecycle.current && action === operation.current) setFailed('binding');
+    } finally {
+      if (epoch === lifecycle.current && action === operation.current) {
+        actionInFlight.current = false;
+        setBusy(null);
+        // Refresh even on rejection: the source/account may have changed.
+        void refresh();
+      }
+    }
   };
 
+  const connectionFailed = failed === 'connection' || !!status?.error || status?.autoPhase === 'error';
+  const label = connectionFailed ? 'dshAutoFailed' : connected
+    ? selectedSessions.length ? 'dshConnectedBound' : 'dshConnectedReadOnly'
+    : phaseLabels[status?.autoPhase ?? ''] ?? 'dshAutoSearching';
+
   return <section role="group" aria-label={t('dshConnection')} className="space-y-2 rounded-lg border border-slate-200 dark:border-slate-700 p-2.5">
-    <div className="flex items-center justify-between gap-2">
-      <h3 className="text-sm font-semibold">{t('dshConnection')}</h3>
-      <span role="status" className="text-xs">{t(connected ? 'dshConnected' : 'dshNotConnected')}</span>
-    </div>
+    <h3 className="text-sm font-semibold">{t('dshConnection')}</h3>
+    <p role="status" className="text-xs">{t(label)}</p>
+    <p className="text-xs text-slate-500 dark:text-slate-400">{t('dshAutoHint')}</p>
+    {status?.autoPhase === 'restart-required' && <p className="text-xs text-amber-700 dark:text-amber-300">{t('dshRestartHint')}</p>}
+    {(!connected || connectionFailed) && <div className="flex flex-wrap gap-2">
+      <button type="button" disabled={!!busy} onClick={() => { void run('retry'); }} className="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs disabled:opacity-50">{t(busy === 'retry' ? 'dshWorking' : 'dshRetry')}</button>
+      <button type="button" disabled={!!busy} onClick={() => { void run('setup'); }} className="rounded-md bg-cyan-600 px-2 py-1 text-xs text-white disabled:opacity-50">{t(busy === 'setup' ? 'dshWorking' : 'dshAutoSetup')}</button>
+    </div>}
+    {connectionFailed && <p role="alert" className="text-xs text-amber-700 dark:text-amber-300">{t('dshConnectionFailed')}</p>}
+    {failed === 'binding' && <p role="alert" className="text-xs text-amber-700 dark:text-amber-300">{t('dshBindingFailed')}</p>}
     {origin && <p className="text-xs break-all text-slate-500 dark:text-slate-400">{origin}</p>}
-    {status?.instanceId && <p className="text-xs break-all text-slate-500 dark:text-slate-400">{status.instanceId}</p>}
-    <p className="text-xs text-slate-500 dark:text-slate-400">{t('dshBridgeHint')}</p>
-    <label htmlFor="dsh-bridge" className="block text-xs font-medium">{t('dshBridgeInstance')}</label>
-    <select id="dsh-bridge" value={bridgeId} disabled={busy || discovering} onChange={event => setBridgeId(event.target.value)}
-      className="w-full rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs disabled:opacity-50">
-      <option value="">{t('dshChooseInstance')}</option>
-      {bridges.map(bridge => <option key={bridge.id} value={bridge.id}>{bridge.label || bridge.id} · {publicOrigin(bridge.origin)}</option>)}
-    </select>
-    {!discovering && !bridges.length && <p className="text-xs">{t('dshNoBridges')}</p>}
-    {discoveryFailed && <p role="alert" className="text-xs text-amber-700 dark:text-amber-300">{t('dshDiscoveryFailed')}</p>}
-    <div className="flex gap-2">
-      <button type="button" disabled={busy || discovering} onClick={() => { void discover(); }} className="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs disabled:opacity-50">{t(discovering ? 'dshWorking' : 'dshDetect')}</button>
-      <button type="button" disabled={busy || discovering || !bridgeId} onClick={() => { void run('bridge'); }} className="rounded-md bg-cyan-600 px-2 py-1 text-xs text-white disabled:opacity-50">{t('dshConnect')}</button>
-      {connected && <button type="button" disabled={busy} onClick={() => { void run('disconnect'); }} className="px-1 text-xs underline">{t('dshDisconnect')}</button>}
-      <button type="button" disabled={busy} onClick={() => { void refresh(); }} className="px-1 text-xs underline">{t('dshRefresh')}</button>
-    </div>
-    <details className="space-y-1.5 text-xs">
-    <summary className="cursor-pointer">{t('dshManualConnection')}</summary>
-    <form onSubmit={event => { event.preventDefault(); void run('manual'); }} className="space-y-1.5">
-      <label htmlFor="dsh-connection-url" className="block text-xs font-medium">{t('dshConnectionUrl')}</label>
-      <input id="dsh-connection-url" type="password" value={connectionUrl} autoComplete="off" spellCheck={false}
-        autoCapitalize="none" disabled={busy} onChange={event => setConnectionUrl(event.target.value)}
-        className="w-full rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs select-text" />
-      <p className="text-xs text-slate-500 dark:text-slate-400">{t('dshConnectionHint')}</p>
-      <div className="flex gap-2">
-        <button type="submit" disabled={busy || !connectionUrl.trim()}
-          className="rounded-md bg-cyan-600 px-2.5 py-1 text-xs text-white disabled:opacity-50">{t(busy ? 'dshWorking' : 'dshConnectManual')}</button>
-      </div>
-    </form>
-    </details>
-    {(failed || status?.error) && <p role="alert" className="text-xs text-amber-700 dark:text-amber-300">{t('dshConnectionFailed')}</p>}
     <label htmlFor="dsh-account" className="block text-xs font-medium">{t('dshAccount')}</label>
-    <select id="dsh-account" value={settings.dshAccountId} disabled={busy || !connected}
-      onChange={event => onPatchSettings({ dshAccountId: event.target.value, dshSessionIds: [] })}
+    <select id="dsh-account" value={accountId} disabled={!canBind}
+      onChange={event => { void bind(event.target.value, []); }}
       className="w-full rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs disabled:opacity-50">
       <option value="">{t('dshChooseAccount')}</option>
-      {settings.dshAccountId && !accounts.some(account => account.id === settings.dshAccountId)
-        && <option value={settings.dshAccountId}>{t('dshUnavailableAccount')}</option>}
+      {accountId && !accounts.some(account => account.id === accountId)
+        && <option value={accountId}>{t('dshUnavailableAccount')}</option>}
       {accounts.map(account => <option key={account.id} value={account.id}>
         {account.label || account.id}{account.active ? ` · ${t('dshAccountActive')}` : ''}
       </option>)}
     </select>
-    <fieldset disabled={busy || !connected || !settings.dshAccountId} className="space-y-1 text-xs disabled:opacity-50">
+    <fieldset disabled={!canBind || !accountId} className="space-y-1 text-xs disabled:opacity-50">
       <legend className="font-medium">{t('dshSessions')}</legend>
       {sessions.map(session => <label key={session.id} className="flex items-center gap-2 py-0.5">
-        <input type="checkbox" checked={settings.dshSessionIds.includes(session.id)}
-          onChange={event => selectSession(session.id, event.target.checked)} className="accent-cyan-500" />
+        <input type="checkbox" checked={selectedSessions.includes(session.id)}
+          onChange={event => { void bind(accountId, event.target.checked
+            ? [...new Set([...selectedSessions, session.id])]
+            : selectedSessions.filter(id => id !== session.id)); }} className="accent-cyan-500" />
         <span className="break-words">{session.title || session.id} · {t(session.busy ? 'dshSessionBusy' : 'dshSessionIdle')}</span>
       </label>)}
       {missingSessions.map(id => <label key={id} className="flex items-center gap-2 py-0.5">
-        <input type="checkbox" checked onChange={() => selectSession(id, false)} className="accent-cyan-500" />
+        <input type="checkbox" checked onChange={() => { void bind(accountId, selectedSessions.filter(existing => existing !== id)); }} className="accent-cyan-500" />
         <span>{t('dshUnavailableSession', { id })}</span>
       </label>)}
       {!sessions.length && <p>{t('dshNoSessions')}</p>}
     </fieldset>
     <p className="text-xs text-slate-500 dark:text-slate-400">{t('dshBindingHint')}</p>
+    <details onToggle={event => {
+      setAdvanced(event.currentTarget.open);
+      if (!event.currentTarget.open) setConnectionUrl('');
+    }} className="space-y-1.5 text-xs">
+      <summary className="cursor-pointer">{t('dshManualConnection')}</summary>
+      {advanced && <>
+        <form onSubmit={event => { event.preventDefault(); void run('manual'); }} className="space-y-1.5">
+          <label htmlFor="dsh-connection-url" className="block text-xs font-medium">{t('dshConnectionUrl')}</label>
+          <input id="dsh-connection-url" type="password" value={connectionUrl} autoComplete="off" spellCheck={false}
+            autoCapitalize="none" disabled={!!busy} onChange={event => setConnectionUrl(event.target.value)}
+            className="w-full rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs select-text" />
+          <p className="text-xs text-slate-500 dark:text-slate-400">{t('dshConnectionHint')}</p>
+          <button type="submit" disabled={!!busy || !connectionUrl.trim()}
+            className="rounded-md bg-cyan-600 px-2.5 py-1 text-xs text-white disabled:opacity-50">{t(busy === 'manual' ? 'dshWorking' : 'dshConnectManual')}</button>
+        </form>
+        <div className="flex gap-2">
+          {connected && <button type="button" disabled={!!busy} onClick={() => { void run('disconnect'); }} className="px-1 text-xs underline">{t('dshDisconnect')}</button>}
+          <button type="button" disabled={!!busy} onClick={() => { void refresh(); }} className="px-1 text-xs underline">{t('dshRefresh')}</button>
+        </div>
+      </>}
+    </details>
   </section>;
 }

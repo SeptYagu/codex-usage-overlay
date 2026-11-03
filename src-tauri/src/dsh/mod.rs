@@ -1,21 +1,24 @@
 //! Native, memory-only connection to the public DSH gateway.
 //!
-//! Pair only with the full launch `/connect?token=…` link supplied by the user.
-//! No private DSH authentication files, ChatGPT OAuth, local `.codex` files, or
-//! Codex named pipes are read. The cookie is kept only for the lifetime of its
-//! paired Mux WebSocket. Manual launch-link pairing must be repeated after an
-//! application/DSH restart. An optional companion instead publishes its own
-//! dedicated discovery record; it never exposes a DSH or ChatGPT credential.
-//! Only the public origin and connection ID are exposed to settings/frontend.
-//! Quota reads require the explicitly selected *active* account. Status-before
+//! Automatic attachment uses a dedicated companion discovery record and the
+//! official Desktop CLI for bootstrap; manual launch-link pairing remains a
+//! compatibility option. No private DSH authentication files, ChatGPT OAuth,
+//! local `.codex` files, or Codex named pipes are read. Manual pairing cookies
+//! last only as long as their Mux WebSocket. Companion bearer credentials stay
+//! native/in memory and are never persisted in overlay settings or sent to UI.
+//! Public profile identity selects a reconnect; instance/account identify data.
+//! Automatic attachment reads the plugin's active account but authorizes no
+//! pause sessions. Quota reads require the selected *active* account. Status-before
 //! and status-after are consistency checks, not an atomic host snapshot. The
 //! public session API cannot prove a running turn's Codex account: target binding
 //! is the user's declaration, verified only against the current active account
 //! and the running session's last-used provider. A session may finish between
 //! list and steer; the public host API can then cold-start it. This is a
 //! cooperative pause message, never a hard gate or confirmed execution stop.
+pub(crate) mod auto;
 mod bridge;
 mod parser;
+pub(crate) mod setup;
 mod url;
 
 use crate::codex::RawCodexUsage;
@@ -29,8 +32,8 @@ use serde_json::{json, Value};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex as StdMutex,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -59,14 +62,20 @@ pub struct Session {
     pub provider: String,
     pub busy: bool,
 }
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionStatus {
     pub connected: bool,
     pub instance_id: Option<String>,
+    pub origin: Option<String>,
+    pub active_account_id: Option<String>,
+    pub connection_revision: u64,
     pub accounts: Vec<Account>,
     pub sessions: Vec<Session>,
     pub error: Option<String>,
+    pub auto_phase: String,
+    pub auto_message: Option<String>,
+    pub auto_revision: u64,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +98,54 @@ pub struct PauseResult {
 #[derive(Clone, Default)]
 pub struct Manager {
     inner: Arc<Mutex<State>>,
+    epoch: Arc<AtomicU64>,
+    revision: Arc<AtomicU64>,
+    live: Arc<StdMutex<Option<Arc<AtomicBool>>>>,
+    cached: Arc<StdMutex<ConnectionStatus>>,
+}
+
+/// A successful handshake which has not changed the active source or connection.
+/// Dropping a cancelled/obsolete preparation also drops its private credentials.
+pub(crate) struct PreparedConnection {
+    connection: Connection,
+    status: ConnectionStatus,
+    epoch: u64,
+}
+impl PreparedConnection {
+    pub(crate) fn status(&self) -> &ConnectionStatus {
+        &self.status
+    }
+}
+
+/// Acquired before the caller's short, synchronous cancellation/commit gate.
+/// No discovery, HTTP request or filesystem await is performed while held.
+pub(crate) struct Installation<'a> {
+    manager: &'a Manager,
+    state: tokio::sync::MutexGuard<'a, State>,
+}
+impl Installation<'_> {
+    pub(crate) fn accepts(&self, prepared: &PreparedConnection) -> bool {
+        self.manager.epoch.load(Ordering::Acquire) == prepared.epoch
+            && prepared.connection.alive.load(Ordering::Acquire)
+    }
+    pub(crate) fn install(&mut self, prepared: PreparedConnection) -> ConnectionStatus {
+        // The owner must keep its cancellation gate through accepts/save/install.
+        self.manager.epoch.fetch_add(1, Ordering::AcqRel);
+        let revision = self.manager.revision.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut status = prepared.status;
+        status.connection_revision = revision;
+        *self.manager.live.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(prepared.connection.alive.clone());
+        self.state.connection = Some(prepared.connection);
+        self.state.last_usage_ms.clear();
+        self.state.error = None;
+        *self
+            .manager
+            .cached
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = status.clone();
+        status
+    }
 }
 #[derive(Default)]
 struct State {
@@ -130,44 +187,113 @@ fn now_ms() -> i64 {
 }
 
 impl Manager {
-    pub async fn connect(&self, connection_url: &str) -> Result<ConnectionStatus, String> {
-        let pairing = url::pairing_url(connection_url)?;
-        let mut state = self.inner.lock().await;
-        // The same lock protects all swaps and reads. An old worker can update
-        // only its own alive flag, never a newer connection's state.
-        state.connection.take();
-        state.last_usage_ms.clear();
-        state.error = None;
-        let result = timeout(Duration::from_secs(15), establish(pairing))
-            .await
-            .map_err(|_| "DSH pairing timed out".to_owned())
-            .and_then(|result| result);
-        match result {
-            Ok(connection) => state.connection = Some(connection),
-            Err(error) => {
-                state.error = Some(error.clone());
-                return Err(error);
-            }
+    pub(crate) fn revoke(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        let live = self.live.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if live.is_some_and(|alive| alive.swap(false, Ordering::AcqRel)) {
+            self.revision.fetch_add(1, Ordering::AcqRel);
         }
-        Ok(status_locked(&mut state).await)
+        *self.cached.lock().unwrap_or_else(|p| p.into_inner()) = ConnectionStatus {
+            connection_revision: self.revision.load(Ordering::Acquire),
+            ..Default::default()
+        };
     }
 
-    /// Pair through a discovery record published by the optional companion.
-    /// This is its dedicated token, never DSH's launch/OAuth/signing secret.
-    pub async fn connect_bridge(
+    pub(crate) async fn preparation(
         &self,
-        discovery_path: &std::path::Path,
-    ) -> Result<ConnectionStatus, String> {
-        let mut state = self.inner.lock().await;
-        let record = bridge::read_record(discovery_path).await?;
-        install_bridge(&mut state, record).await
+        connection_url: &str,
+    ) -> Result<PreparedConnection, String> {
+        let epoch = self.epoch.load(Ordering::Acquire);
+        let pairing = url::pairing_url(connection_url)?;
+        let connection = timeout(Duration::from_secs(15), establish(pairing))
+            .await
+            .map_err(|_| "DSH pairing timed out".to_owned())??;
+        let status = connection_status(&connection).await;
+        if !status.connected {
+            return Err("DSH connection closed during pairing".into());
+        }
+        Ok(PreparedConnection {
+            connection,
+            status,
+            epoch,
+        })
     }
 
+    pub(crate) async fn prepare_bridge_in_directory(
+        &self,
+        path: &std::path::Path,
+        directory: &std::path::Path,
+    ) -> Result<PreparedConnection, String> {
+        let epoch = self.epoch.load(Ordering::Acquire);
+        let record = bridge::read_record_in_directory(path, directory).await?;
+        let connection = bridge_connection(record)?;
+        let status = connection_status(&connection).await;
+        if !status.connected {
+            return Err("DSH companion is not available".into());
+        }
+        Ok(PreparedConnection {
+            connection,
+            status,
+            epoch,
+        })
+    }
+
+    pub(crate) async fn installation(&self) -> Installation<'_> {
+        Installation {
+            manager: self,
+            state: self.inner.lock().await,
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn connect(&self, connection_url: &str) -> Result<ConnectionStatus, String> {
+        self.revoke();
+        let prepared = self.preparation(connection_url).await?;
+        let mut installation = self.installation().await;
+        if !installation.accepts(&prepared) {
+            return Err("DSH pairing was cancelled".into());
+        }
+        Ok(installation.install(prepared))
+    }
+
+    #[cfg(test)]
     pub async fn disconnect(&self) {
+        self.revoke();
+        self.clear_revoked().await;
+    }
+
+    pub(crate) async fn clear_revoked(&self) {
         let mut state = self.inner.lock().await;
-        state.connection.take();
-        state.last_usage_ms.clear();
-        state.error = None;
+        if state
+            .connection
+            .as_ref()
+            .is_some_and(|c| !c.alive.load(Ordering::Acquire))
+        {
+            state.connection.take();
+            state.last_usage_ms.clear();
+            state.error = None;
+        }
+    }
+
+    pub(crate) fn cached_status(&self) -> ConnectionStatus {
+        let mut status = self
+            .cached
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let alive = self
+            .live
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_some_and(|alive| alive.load(Ordering::Acquire));
+        if !alive {
+            status.connected = false;
+            status.accounts.clear();
+            status.sessions.clear();
+            status.active_account_id = None;
+        }
+        status
     }
 
     /// Only the origin is exposed; never return the connect URL or cookie.
@@ -182,7 +308,10 @@ impl Manager {
 
     pub async fn status(&self) -> ConnectionStatus {
         let mut state = self.inner.lock().await;
-        status_locked(&mut state).await
+        let mut status = status_locked(&mut state).await;
+        status.connection_revision = self.revision.load(Ordering::Acquire);
+        *self.cached.lock().unwrap_or_else(|p| p.into_inner()) = status.clone();
+        status
     }
 
     pub async fn read_usage(&self, account_id: &str) -> Result<RawCodexUsage, String> {
@@ -251,14 +380,8 @@ impl Manager {
     }
 }
 
-async fn install_bridge(
-    state: &mut State,
-    record: bridge::Record,
-) -> Result<ConnectionStatus, String> {
-    state.connection.take();
-    state.last_usage_ms.clear();
-    state.error = None;
-    state.connection = Some(Connection {
+fn bridge_connection(record: bridge::Record) -> Result<Connection, String> {
+    Ok(Connection {
         client: http_client()?,
         origin: record.origin,
         instance_id: record.instance_id,
@@ -269,7 +392,18 @@ async fn install_bridge(
         },
         alive: Arc::new(AtomicBool::new(true)),
         worker: None,
-    });
+    })
+}
+
+#[cfg(test)]
+async fn install_bridge(
+    state: &mut State,
+    record: bridge::Record,
+) -> Result<ConnectionStatus, String> {
+    state.connection.take();
+    state.last_usage_ms.clear();
+    state.error = None;
+    state.connection = Some(bridge_connection(record)?);
     let status = status_locked(state).await;
     if !status.connected {
         state.connection.take();
@@ -300,9 +434,14 @@ async fn status_locked(state: &mut State) -> ConnectionStatus {
             ..Default::default()
         };
     };
+    connection_status(connection).await
+}
+
+async fn connection_status(connection: &Connection) -> ConnectionStatus {
     let mut result = ConnectionStatus {
-        connected: true,
+        connected: connection.alive.load(Ordering::Acquire),
         instance_id: Some(connection.instance_id.clone()),
+        origin: Some(connection.origin.origin().ascii_serialization()),
         ..Default::default()
     };
     match connection
@@ -330,6 +469,11 @@ async fn status_locked(state: &mut State) -> ConnectionStatus {
         result.accounts.clear();
         result.sessions.clear();
     }
+    result.active_account_id = result
+        .accounts
+        .iter()
+        .find(|a| a.active)
+        .map(|a| a.id.clone());
     result
 }
 

@@ -1,5 +1,8 @@
 //! Offline loopback protocol fixtures, not evidence of a real DSH session.
 use super::*;
+const AUTO_ACCOUNT: &str = "51e9468d-0841-448a-9145-0d46e6319422";
+const AUTO_ACCOUNT_B: &str = "501509df-7561-441d-a98e-7a5c92680c93";
+const AUTO_SESSION: &str = "session-f5409f91-ec39-462d-9964-596e18e2a36c";
 use std::sync::atomic::AtomicUsize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -18,6 +21,7 @@ enum Behavior {
     CrossOrigin,
     DeniedWebSocket,
     Bridge,
+    AutoBridge,
 }
 struct Fixture {
     behavior: Behavior,
@@ -27,6 +31,10 @@ struct Fixture {
     requests: Mutex<Vec<Value>>,
     close_ws: Notify,
     ws_closed: Notify,
+    hold_status: AtomicBool,
+    status_started: Notify,
+    status_release: Notify,
+    sessions_read: Notify,
 }
 struct Server {
     origin: String,
@@ -50,6 +58,10 @@ impl Server {
             requests: Mutex::new(Vec::new()),
             close_ws: Notify::new(),
             ws_closed: Notify::new(),
+            hold_status: AtomicBool::new(false),
+            status_started: Notify::new(),
+            status_release: Notify::new(),
+            sessions_read: Notify::new(),
         });
         let shared = fixture.clone();
         let task = tokio::spawn(async move {
@@ -125,7 +137,7 @@ async fn respond(stream: &mut TcpStream, status: &str, extra: &str, body: &str) 
         "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: {}\r\n{extra}\r\n{body}",
         body.len()
     );
-    stream.write_all(response.as_bytes()).await.unwrap();
+    let _ = stream.write_all(response.as_bytes()).await;
 }
 async fn handle(mut stream: TcpStream, state: Arc<Fixture>) {
     let (path, headers, body) = request(&mut stream).await;
@@ -150,7 +162,7 @@ async fn handle(mut stream: TcpStream, state: Arc<Fixture>) {
         .iter()
         .find(|(key, _)| key == "cookie")
         .map(|(_, value)| value.as_str());
-    if state.behavior == Behavior::Bridge {
+    if matches!(state.behavior, Behavior::Bridge | Behavior::AutoBridge) {
         assert!(cookie.is_none());
         assert_eq!(
             headers
@@ -194,7 +206,9 @@ async fn handle(mut stream: TcpStream, state: Arc<Fixture>) {
         state.ws_closed.notify_one();
         return;
     }
-    if state.behavior != Behavior::Bridge && !state.ws_alive.load(Ordering::Acquire) {
+    if !matches!(state.behavior, Behavior::Bridge | Behavior::AutoBridge)
+        && !state.ws_alive.load(Ordering::Acquire)
+    {
         respond(&mut stream, "401 Unauthorized", "", "").await;
         return;
     }
@@ -204,8 +218,17 @@ async fn handle(mut stream: TcpStream, state: Arc<Fixture>) {
     assert!(Uuid::parse_str(body["rpcId"].as_str().unwrap()).is_ok());
     let value = match method {
         "codex-subscription/status" => {
+            if state.hold_status.swap(false, Ordering::AcqRel) {
+                state.status_started.notify_one();
+                state.status_release.notified().await;
+            }
             let active_b = state.active_b.load(Ordering::Acquire);
-            json!({"authenticated":true,"provider":"openai-codex","accounts":[{"id":"a","label":"A","active":!active_b},{"id":"b","label":"B","active":active_b}]})
+            let (a, b) = if state.behavior == Behavior::AutoBridge {
+                (AUTO_ACCOUNT, AUTO_ACCOUNT_B)
+            } else {
+                ("a", "b")
+            };
+            json!({"authenticated":true,"provider":"openai-codex","accounts":[{"id":a,"label":"A","active":!active_b},{"id":b,"label":"B","active":active_b}]})
         }
         "codex-subscription/usage/accounts" => {
             assert_eq!(body["payload"], json!({"force":true}));
@@ -218,7 +241,12 @@ async fn handle(mut stream: TcpStream, state: Arc<Fixture>) {
             if state.behavior == Behavior::SwitchAccount {
                 state.active_b.store(true, Ordering::Release);
             }
-            json!({"accounts":[{"id":"a","usage":{"fetchedAt":fetched,"rateLimits":[{"id":"codex","windows":[{"windowSeconds":18000,"usedPercent":90,"remainingPercent":10,"resetsAt":fetched/1000+10000},{"windowSeconds":604800,"usedPercent":60,"remainingPercent":40,"resetsAt":fetched/1000+600000}]}]}},{"id":"b","error":"Fixture account not signed in"}]})
+            let (a, b) = if state.behavior == Behavior::AutoBridge {
+                (AUTO_ACCOUNT, AUTO_ACCOUNT_B)
+            } else {
+                ("a", "b")
+            };
+            json!({"accounts":[{"id":a,"usage":{"fetchedAt":fetched,"rateLimits":[{"id":"codex","windows":[{"windowSeconds":18000,"usedPercent":90,"remainingPercent":10,"resetsAt":fetched/1000+10000},{"windowSeconds":604800,"usedPercent":60,"remainingPercent":40,"resetsAt":fetched/1000+600000}]}]}},{"id":b,"error":"Fixture account not signed in"}]})
         }
         "session/list" => {
             assert_eq!(body["payload"], json!({"args":{"request":{}}}));
@@ -245,6 +273,9 @@ async fn handle(mut stream: TcpStream, state: Arc<Fixture>) {
     let response =
         json!({"type":"server-response","rpcId":rpc_id,"result":{"ok":true,"value":value}})
             .to_string();
+    if method == "session/list" {
+        state.sessions_read.notify_one();
+    }
     state.requests.lock().await.push(body);
     respond(
         &mut stream,
@@ -464,4 +495,521 @@ async fn redirect_and_websocket_rejection_do_not_expose_secret_or_fallback() {
         assert!(!manager.status().await.connected);
         assert!(server.fixture.requests.lock().await.is_empty());
     }
+}
+
+// These exercise the native startup entry directly: no Settings webview, no
+// real DSH, no installation, no local Codex files or named-pipe transport.
+struct NoWindow;
+impl crate::tray::TrayPresentationSink for NoWindow {
+    fn present(&self, _: crate::tray::TrayPresentation) {}
+    fn app_handle(&self) -> Option<&tauri::AppHandle> {
+        None
+    }
+}
+impl crate::commands::UsageSource for NoWindow {
+    async fn read_usage(&self, state: &crate::commands::AppState) -> Result<RawCodexUsage, String> {
+        let generation = state.source_generation.load(Ordering::Acquire);
+        let settings = state.settings.lock().await.clone();
+        crate::commands::read_dsh_usage(state, &settings, generation).await
+    }
+}
+struct AutoRuntime {
+    directory: std::path::PathBuf,
+    state: Arc<crate::commands::AppState>,
+    record: std::path::PathBuf,
+    id: String,
+}
+impl Drop for AutoRuntime {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+impl AutoRuntime {
+    async fn new(server: &Server) -> Self {
+        let directory =
+            std::env::temp_dir().join(format!("overlay-auto-fixture-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(directory.join("dsh-bridges")).unwrap();
+        let manager = crate::config::ConfigManager::with_runtime_dir(directory.clone());
+        let settings = crate::config::OverlaySettings {
+            provider: crate::config::Provider::Dsh,
+            auto_pause_on_low_quota: true,
+            auto_pause_five_hour_threshold_percent: 100,
+            auto_pause_weekly_threshold_percent: 100,
+            ..Default::default()
+        };
+        manager.save_settings_checked(&settings).unwrap();
+        let id = Uuid::new_v4().to_string();
+        let record = directory.join("dsh-bridges").join(format!("{id}.json"));
+        tokio::fs::write(
+            &record,
+            json!({"schemaVersion":1,"instanceId":id,"origin":server.origin,
+            "token":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "updatedAt":now_ms(),"profileId":"a".repeat(64)})
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        Self {
+            directory,
+            state: Arc::new(crate::commands::AppState::for_test(manager)),
+            record,
+            id,
+        }
+    }
+}
+async fn assert_no_pause(server: &Server) {
+    assert!(!server
+        .fixture
+        .requests
+        .lock()
+        .await
+        .iter()
+        .any(|request| request["method"] == "session/prompt"));
+}
+
+async fn enable_provider_monitors(runtime: &AutoRuntime) {
+    let mut settings = runtime.state.settings.lock().await;
+    settings.migrate();
+    settings.provider = crate::config::Provider::Codex;
+    settings.mirror_display_preferences();
+    runtime.state.config_manager.save_settings_checked(&settings).unwrap();
+    crate::monitor::initialize(&runtime.state, &settings);
+}
+
+#[tokio::test]
+async fn automatic_dsh_connects_and_binds_in_background_without_resetting_other_providers() {
+    use crate::config::Provider;
+    let server = Server::start(Behavior::AutoBridge).await;
+    let runtime = AutoRuntime::new(&server).await;
+    enable_provider_monitors(&runtime).await;
+    let registry = runtime.state.monitors.get().unwrap();
+    let codex = registry.get(Provider::Codex);
+    let claude = registry.get(Provider::Claude);
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    let settings = runtime.state.settings.lock().await.clone();
+    assert_eq!(settings.provider, Provider::Codex);
+    assert_eq!(settings.dsh_account_id, AUTO_ACCOUNT);
+    assert!(Arc::ptr_eq(&codex, &registry.get(Provider::Codex)));
+    assert!(Arc::ptr_eq(&claude, &registry.get(Provider::Claude)));
+    let dsh = registry.get(Provider::Dsh);
+    let usage = crate::commands::refresh_usage(&NoWindow, &dsh).await.unwrap();
+    assert!(usage.five_hour_remaining_percent.is_some());
+    assert!(codex.last_usage.lock().await.is_none());
+    assert!(dsh.config_manager.burn_rate_state_path().is_file());
+    let status = runtime.state.dsh.cached_status();
+    crate::commands::bind_dsh_targets(&NoWindow, &runtime.state, AUTO_ACCOUNT.into(),
+        vec![AUTO_SESSION.into()], status.instance_id.clone().unwrap(), status.connection_revision).await.unwrap();
+    let generation = registry.get(Provider::Dsh).source_generation.load(Ordering::Acquire);
+    crate::commands::apply_settings_patch(&NoWindow, &runtime.state, json!({"provider":"claude"}), false).await.unwrap();
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    assert_eq!(runtime.state.settings.lock().await.provider, Provider::Claude);
+    assert_eq!(runtime.state.settings.lock().await.dsh_session_ids, [AUTO_SESSION]);
+    assert_eq!(runtime.state.dsh.cached_status().connection_revision, status.connection_revision);
+    assert_eq!(registry.get(Provider::Dsh).source_generation.load(Ordering::Acquire), generation);
+    crate::commands::apply_settings_patch(&NoWindow, &runtime.state,
+        json!({"providerPreferences":{"dsh":{"monitorEnabled":false}}}), false).await.unwrap();
+    let requests = server.fixture.requests.lock().await.len();
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    assert_eq!(server.fixture.requests.lock().await.len(), requests);
+    assert!(!runtime.state.dsh.cached_status().connected);
+    assert!(crate::commands::refresh_usage(&NoWindow, &registry.get(Provider::Dsh)).await.is_err());
+    crate::commands::apply_settings_patch(&NoWindow, &runtime.state,
+        json!({"providerPreferences":{"dsh":{"monitorEnabled":true}}}), false).await.unwrap();
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    assert!(runtime.state.dsh.cached_status().connected);
+    assert!(runtime.state.settings.lock().await.dsh_session_ids.is_empty());
+    assert_eq!(runtime.state.settings.lock().await.provider, Provider::Claude);
+    assert_no_pause(&server).await;
+    assert!(crate::commands::apply_settings_patch(&NoWindow, &runtime.state,
+        json!({"dshAccountId":AUTO_ACCOUNT,"dshSessionIds":[AUTO_SESSION]}), false).await.is_err(),
+        "a generic patch must not bypass the guarded connection revision");
+    assert!(runtime.state.settings.lock().await.dsh_session_ids.is_empty());
+}
+
+#[tokio::test]
+async fn disabling_background_dsh_cancels_an_automatic_handshake_before_installation() {
+    let server = Server::start(Behavior::AutoBridge).await;
+    let runtime = AutoRuntime::new(&server).await;
+    enable_provider_monitors(&runtime).await;
+    server.fixture.hold_status.store(true, Ordering::Release);
+    let state = runtime.state.clone();
+    let attempt = tokio::spawn(async move { auto::reconcile(&NoWindow, &state, false).await; });
+    timeout(Duration::from_secs(2), server.fixture.status_started.notified()).await.unwrap();
+    crate::commands::apply_settings_patch(&NoWindow, &runtime.state,
+        json!({"providerPreferences":{"dsh":{"monitorEnabled":false}}}), false).await.unwrap();
+    timeout(Duration::from_secs(2), attempt).await.unwrap().unwrap();
+    server.fixture.status_release.notify_one();
+    assert!(!runtime.state.dsh.cached_status().connected);
+    assert!(runtime.state.settings.lock().await.dsh_instance_id.is_empty());
+    assert_eq!(runtime.state.settings.lock().await.provider, crate::config::Provider::Codex);
+    assert_no_pause(&server).await;
+}
+
+#[tokio::test]
+async fn native_disconnect_clears_background_dsh_binding_and_stays_suspended() {
+    use crate::config::Provider;
+    let server = Server::start(Behavior::AutoBridge).await;
+    let runtime = AutoRuntime::new(&server).await;
+    enable_provider_monitors(&runtime).await;
+    let registry = runtime.state.monitors.get().unwrap();
+    let codex = registry.get(Provider::Codex);
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    let status = runtime.state.dsh.cached_status();
+    crate::commands::bind_dsh_targets(&NoWindow, &runtime.state, AUTO_ACCOUNT.into(),
+        vec![AUTO_SESSION.into()], status.instance_id.unwrap(), status.connection_revision).await.unwrap();
+    let disconnected = crate::commands::disconnect_dsh(&NoWindow, &runtime.state).await.unwrap();
+    assert!(!disconnected.connected);
+    assert_eq!(disconnected.auto_phase, "suspended");
+    let settings = runtime.state.config_manager.load_settings();
+    assert_eq!(settings.provider, Provider::Codex);
+    assert!(settings.dsh_instance_id.is_empty());
+    assert!(settings.dsh_account_id.is_empty());
+    assert!(settings.dsh_session_ids.is_empty());
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    assert!(!runtime.state.dsh.cached_status().connected);
+    assert!(Arc::ptr_eq(&codex, &registry.get(Provider::Codex)));
+    assert!(registry.get(Provider::Dsh).monitor_enabled.load(Ordering::Acquire));
+    assert_no_pause(&server).await;
+}
+
+#[tokio::test]
+async fn native_startup_discovers_without_settings_and_is_read_only_and_idempotent() {
+    let server = Server::start(Behavior::AutoBridge).await;
+    let runtime = AutoRuntime::new(&server).await;
+    let local = Arc::new(crate::pause_control::testing::ScriptedTransport::new());
+    runtime
+        .state
+        .auto_pause
+        .lock()
+        .unwrap()
+        .set_transport(local.clone());
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    let settings = runtime.state.settings.lock().await.clone();
+    assert_eq!(settings.dsh_account_id, AUTO_ACCOUNT);
+    assert_eq!(settings.dsh_instance_id, runtime.id);
+    assert_eq!(settings.dsh_profile_id, "a".repeat(64));
+    assert!(settings.dsh_session_ids.is_empty());
+    assert!(settings.auto_pause_on_low_quota);
+    assert_eq!(
+        runtime.state.dsh_auto.status(&runtime.state.dsh).auto_phase,
+        "ready"
+    );
+    let revision = runtime.state.settings_revision.load(Ordering::Acquire);
+    let generation = runtime.state.source_generation.load(Ordering::Acquire);
+    let connection_revision = runtime.state.dsh.cached_status().connection_revision;
+    let disk = tokio::fs::read(runtime.directory.join("settings.json"))
+        .await
+        .unwrap();
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    assert_eq!(
+        runtime.state.settings_revision.load(Ordering::Acquire),
+        revision
+    );
+    assert_eq!(
+        runtime.state.source_generation.load(Ordering::Acquire),
+        generation
+    );
+    assert_eq!(
+        runtime.state.dsh.cached_status().connection_revision,
+        connection_revision
+    );
+    assert_eq!(
+        tokio::fs::read(runtime.directory.join("settings.json"))
+            .await
+            .unwrap(),
+        disk
+    );
+    let usage = crate::commands::refresh_usage(&NoWindow, &runtime.state)
+        .await
+        .unwrap();
+    assert!(
+        usage.five_hour_remaining_percent.unwrap()
+            <= settings.auto_pause_five_hour_threshold_percent
+    );
+    assert_no_pause(&server).await;
+    assert!(local.calls().is_empty());
+    let text = String::from_utf8(disk).unwrap();
+    assert!(!text.contains("0123456789abcdef"));
+    assert!(!text.contains("token"));
+}
+
+#[tokio::test]
+async fn late_automatic_handshake_cannot_commit_after_native_disconnect_and_retry_is_explicit() {
+    let server = Server::start(Behavior::AutoBridge).await;
+    let runtime = AutoRuntime::new(&server).await;
+    server.fixture.hold_status.store(true, Ordering::Release);
+    let state = runtime.state.clone();
+    let attempt = tokio::spawn(async move {
+        auto::reconcile(&NoWindow, &state, false).await;
+    });
+    timeout(
+        Duration::from_secs(2),
+        server.fixture.status_started.notified(),
+    )
+    .await
+    .unwrap();
+    runtime.state.dsh_auto.suspend(&runtime.state.dsh);
+    timeout(Duration::from_secs(2), attempt)
+        .await
+        .unwrap()
+        .unwrap();
+    server.fixture.status_release.notify_one();
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    assert!(!runtime.state.dsh.cached_status().connected);
+    assert!(runtime.state.settings.lock().await.dsh_base_url.is_empty());
+    assert_eq!(runtime.state.source_generation.load(Ordering::Acquire), 0);
+    runtime.state.dsh_auto.retry(&runtime.state.dsh);
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    assert!(runtime.state.dsh.cached_status().connected);
+    assert!(runtime
+        .state
+        .settings
+        .lock()
+        .await
+        .dsh_session_ids
+        .is_empty());
+    assert_no_pause(&server).await;
+}
+
+#[tokio::test]
+async fn prepared_connection_waiting_for_commit_cannot_override_provider_change() {
+    let server = Server::start(Behavior::AutoBridge).await;
+    let runtime = AutoRuntime::new(&server).await;
+    let gate = runtime.state.settings_patch.lock().await;
+    let state = runtime.state.clone();
+    let attempt = tokio::spawn(async move {
+        auto::reconcile(&NoWindow, &state, false).await;
+    });
+    timeout(
+        Duration::from_secs(2),
+        server.fixture.sessions_read.notified(),
+    )
+    .await
+    .unwrap();
+    runtime
+        .state
+        .dsh_auto
+        .provider_selected(&runtime.state.dsh, crate::config::Provider::Codex);
+    drop(gate);
+    timeout(Duration::from_secs(2), attempt)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(runtime
+        .state
+        .settings
+        .lock()
+        .await
+        .dsh_instance_id
+        .is_empty());
+    assert_eq!(runtime.state.settings_revision.load(Ordering::Acquire), 0);
+    assert_eq!(runtime.state.source_generation.load(Ordering::Acquire), 0);
+    assert!(!runtime.state.dsh.cached_status().connected);
+    assert_no_pause(&server).await;
+}
+
+#[tokio::test]
+async fn automatic_reconnect_and_active_account_change_clear_targets_without_resetting_source_every_scan(
+) {
+    let server = Server::start(Behavior::AutoBridge).await;
+    let runtime = AutoRuntime::new(&server).await;
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    let status = runtime.state.dsh.cached_status();
+    crate::commands::bind_dsh_targets(
+        &NoWindow,
+        &runtime.state,
+        AUTO_ACCOUNT.into(),
+        vec![AUTO_SESSION.into()],
+        status.instance_id.clone().unwrap(),
+        status.connection_revision,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        runtime.state.settings.lock().await.dsh_session_ids,
+        [AUTO_SESSION]
+    );
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    assert_eq!(
+        runtime.state.settings.lock().await.dsh_session_ids,
+        [AUTO_SESSION]
+    );
+    server.fixture.active_b.store(true, Ordering::Release);
+    let generation = runtime.state.source_generation.load(Ordering::Acquire);
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    let settings = runtime.state.settings.lock().await.clone();
+    assert_eq!(settings.dsh_account_id, AUTO_ACCOUNT_B);
+    assert!(settings.dsh_session_ids.is_empty());
+    assert_eq!(
+        runtime.state.source_generation.load(Ordering::Acquire),
+        generation + 1
+    );
+    assert!(crate::commands::bind_dsh_targets(
+        &NoWindow,
+        &runtime.state,
+        AUTO_ACCOUNT.into(),
+        vec![AUTO_SESSION.into()],
+        status.instance_id.clone().unwrap(),
+        status.connection_revision
+    )
+    .await
+    .is_err());
+    runtime.state.dsh_auto.retry(&runtime.state.dsh);
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    assert!(runtime
+        .state
+        .settings
+        .lock()
+        .await
+        .dsh_session_ids
+        .is_empty());
+    assert!(crate::commands::bind_dsh_targets(
+        &NoWindow,
+        &runtime.state,
+        AUTO_ACCOUNT_B.into(),
+        vec![AUTO_SESSION.into()],
+        status.instance_id.unwrap(),
+        status.connection_revision
+    )
+    .await
+    .is_err());
+    assert_no_pause(&server).await;
+}
+
+#[tokio::test]
+async fn multiple_companions_are_ambiguous_and_discovery_never_changes_other_provider() {
+    let server = Server::start(Behavior::AutoBridge).await;
+    let runtime = AutoRuntime::new(&server).await;
+    let id2 = Uuid::new_v4().to_string();
+    let mut record: Value =
+        serde_json::from_slice(&tokio::fs::read(&runtime.record).await.unwrap()).unwrap();
+    record["instanceId"] = json!(id2);
+    record["profileId"] = json!("b".repeat(64));
+    tokio::fs::write(
+        runtime
+            .directory
+            .join("dsh-bridges")
+            .join(format!("{id2}.json")),
+        record.to_string(),
+    )
+    .await
+    .unwrap();
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    assert_eq!(
+        runtime.state.dsh_auto.status(&runtime.state.dsh).auto_phase,
+        "ambiguous"
+    );
+    assert!(runtime
+        .state
+        .settings
+        .lock()
+        .await
+        .dsh_account_id
+        .is_empty());
+    let read_only_requests = server.fixture.requests.lock().await.len();
+    assert!(read_only_requests > 0);
+    assert_no_pause(&server).await;
+    runtime.state.settings.lock().await.provider = crate::config::Provider::Codex;
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    assert_eq!(
+        server.fixture.requests.lock().await.len(),
+        read_only_requests
+    );
+}
+
+#[tokio::test]
+async fn actual_quota_read_is_discarded_when_provider_changes_during_rpc() {
+    let server = Server::start(Behavior::AutoBridge).await;
+    let runtime = AutoRuntime::new(&server).await;
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    let local = Arc::new(crate::pause_control::testing::ScriptedTransport::new());
+    runtime
+        .state
+        .auto_pause
+        .lock()
+        .unwrap()
+        .set_transport(local.clone());
+    server.fixture.hold_status.store(true, Ordering::Release);
+    let state = runtime.state.clone();
+    let reading =
+        tokio::spawn(async move { crate::commands::refresh_usage(&NoWindow, &state).await });
+    timeout(
+        Duration::from_secs(2),
+        server.fixture.status_started.notified(),
+    )
+    .await
+    .unwrap();
+    crate::commands::apply_settings_patch(
+        &NoWindow,
+        &runtime.state,
+        json!({"provider":"codex"}),
+        false,
+    )
+    .await
+    .unwrap();
+    server.fixture.status_release.notify_one();
+    let error = timeout(Duration::from_secs(2), reading)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(error.contains("source changed"));
+    assert!(runtime.state.last_usage.lock().await.is_none());
+    assert_no_pause(&server).await;
+    assert!(local.calls().is_empty());
+}
+
+#[tokio::test]
+async fn restarted_companion_selects_the_same_profile_but_never_inherits_target_authorization() {
+    let server = Server::start(Behavior::AutoBridge).await;
+    let runtime = AutoRuntime::new(&server).await;
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    let old = runtime.state.dsh.cached_status();
+    crate::commands::bind_dsh_targets(
+        &NoWindow,
+        &runtime.state,
+        AUTO_ACCOUNT.into(),
+        vec![AUTO_SESSION.into()],
+        old.instance_id.clone().unwrap(),
+        old.connection_revision,
+    )
+    .await
+    .unwrap();
+    let mut record: Value =
+        serde_json::from_slice(&tokio::fs::read(&runtime.record).await.unwrap()).unwrap();
+    let new_id = Uuid::new_v4().to_string();
+    record["instanceId"] = json!(new_id);
+    let new_path = runtime
+        .directory
+        .join("dsh-bridges")
+        .join(format!("{new_id}.json"));
+    tokio::fs::write(new_path, record.to_string())
+        .await
+        .unwrap();
+    // A crashed Host may leave a same-profile discovery file behind. Keep that
+    // file, but point it at a closed listener so only the replacement is live.
+    let stopped = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stopped_origin = format!("http://{}", stopped.local_addr().unwrap());
+    drop(stopped);
+    record["instanceId"] = json!(runtime.id);
+    record["origin"] = json!(stopped_origin);
+    tokio::fs::write(&runtime.record, record.to_string())
+        .await
+        .unwrap();
+    auto::reconcile(&NoWindow, &runtime.state, false).await;
+    let settings = runtime.state.settings.lock().await.clone();
+    assert_eq!(settings.dsh_instance_id, new_id);
+    assert_eq!(settings.dsh_profile_id, "a".repeat(64));
+    assert!(settings.dsh_session_ids.is_empty());
+    assert!(crate::commands::bind_dsh_targets(
+        &NoWindow,
+        &runtime.state,
+        AUTO_ACCOUNT.into(),
+        vec![AUTO_SESSION.into()],
+        old.instance_id.unwrap(),
+        old.connection_revision
+    )
+    .await
+    .is_err());
+    assert_no_pause(&server).await;
 }
