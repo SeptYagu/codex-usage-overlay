@@ -1,5 +1,11 @@
 # Status
 
+## Independent provider settings columns — 2026-11-06 (PLAN ONLY)
+
+- [Implementation plan](docs/handoff/2026-11-06-independent-provider-settings-columns-plan.md) specifies a collapsible common area and fixed Codex/Claude/DSH columns, with a 1320×800 default and responsive wrapping.
+- Extends provider preferences with independent refresh intervals, reset notification switches and sounds; defines schema 3 migration, compatibility mirrors, explicit provider-bound saves and playback identity so concurrent columns do not share errors or preview state.
+- Links the Codex customization plan and resolves their UI/schema assumptions for joint implementation. Documentation only; production code, version, user settings, histories and running applications are unchanged. No release, installation, messages or schedules.
+
 ## Codex customization implementation plan — 2026-11-06 (PLAN ONLY)
 
 - [Implementation plan](docs/handoff/2026-11-06-codex-custom-pause-continuation-estimator-plan.md) specifies independent 5H/Weekly pause messages, an explicitly applied scheduled-continuation preset and classic/weighted/experimental personalized 5H estimation on baseline `ef98b6d` (v1.6.0).
