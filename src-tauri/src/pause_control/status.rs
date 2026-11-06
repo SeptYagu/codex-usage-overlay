@@ -390,10 +390,10 @@ fn derive_summary(
             if status
                 .targets
                 .iter()
-                .any(|t| t.active && t.phase == "failed")
+                .any(|t| t.active && matches!(t.phase.as_str(), "failed" | "unknown"))
             {
                 status.summary = "needsAttention".into();
-                status.reason = Some("deliveryFailed".into());
+                status.reason = Some(if status.targets.iter().any(|t|t.active && t.phase=="unknown"){"submissionUnknown"}else{"deliveryFailed"}.into());
             } else if running
                 || status
                     .targets

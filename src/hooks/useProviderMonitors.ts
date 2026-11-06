@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { usageIsOlder } from '../usageSource';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { MonitorSnapshot, Provider } from '../types';
@@ -8,7 +9,9 @@ export function mergeMonitorSnapshot(current: Partial<Record<Provider, MonitorSn
     || !Number.isSafeInteger(next.sourceGeneration)) return current;
   const old = current[next.provider];
   if (old && (next.sourceGeneration < old.sourceGeneration || next.revision <= old.revision)) return current;
-  return { ...current, [next.provider]: next };
+  const safe = old?.usage && next.usage && next.sourceKey===old.sourceKey && next.sourceGeneration===old.sourceGeneration && usageIsOlder(next.usage,old.usage)
+    ? {...next,usage:old.usage} : next;
+  return { ...current, [next.provider]: safe };
 }
 
 export function useProviderMonitors() {

@@ -21,6 +21,16 @@ pub enum SoundMode {
     Windows,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all="lowercase")]
+pub enum FiveHourBurnRateAlgorithm { #[default] Legacy, Weighted, Personalized }
+fn recover_algorithm<'de,D:serde::Deserializer<'de>>(d:D)->Result<FiveHourBurnRateAlgorithm,D::Error>{
+    Ok(serde_json::from_value(serde_json::Value::deserialize(d)?).unwrap_or_default())
+}
+fn recover_message<'de,D:serde::Deserializer<'de>>(d:D)->Result<String,D::Error>{
+    let v=serde_json::Value::deserialize(d)?;Ok(v.as_str().filter(|s|crate::pause_message::valid_message(s)).unwrap_or("").into())
+}
+
 /// Whose limits the overlay reads. One provider is active at a time.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -127,6 +137,12 @@ pub fn same_source(left: &OverlaySettings, right: &OverlaySettings) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlaySettings {
+    #[serde(default, deserialize_with="recover_algorithm")]
+    pub five_hour_burn_rate_algorithm: FiveHourBurnRateAlgorithm,
+    #[serde(default, deserialize_with="recover_message")]
+    pub auto_pause_five_hour_message: String,
+    #[serde(default, deserialize_with="recover_message")]
+    pub auto_pause_weekly_message: String,
     #[serde(default)]
     pub schema_version: u32,
     #[serde(default)]
@@ -248,6 +264,9 @@ fn default_auto_pause_weekly_threshold() -> u32 {
 impl Default for OverlaySettings {
     fn default() -> Self {
         Self {
+            five_hour_burn_rate_algorithm: FiveHourBurnRateAlgorithm::Legacy,
+            auto_pause_five_hour_message: crate::pause_message::default_pause("auto"),
+            auto_pause_weekly_message: crate::pause_message::default_pause("auto"),
             schema_version: 3, provider_preferences: Default::default(),
             provider: Provider::default(),
             dsh_base_url: String::new(),
@@ -291,6 +310,8 @@ impl Default for OverlaySettings {
 impl OverlaySettings {
     pub fn migrate(&mut self) {
         if self.schema_version > 3 { return; }
+        if !crate::pause_message::valid_message(&self.auto_pause_five_hour_message) { self.auto_pause_five_hour_message=crate::pause_message::default_pause(&self.language); }
+        if !crate::pause_message::valid_message(&self.auto_pause_weekly_message) { self.auto_pause_weekly_message=crate::pause_message::default_pause(&self.language); }
         let empty_preferences = self.provider_preferences.is_empty();
         if self.schema_version < 2 || self.provider_preferences.is_empty() {
             for provider in Provider::ALL {
@@ -360,6 +381,10 @@ impl OverlaySettings {
         let mut scoped = self.clone();
         let preference = self.preference(provider);
         scoped.provider = provider;
+        if provider != Provider::Codex {
+            scoped.five_hour_burn_rate_algorithm=FiveHourBurnRateAlgorithm::Legacy;
+            scoped.auto_pause_five_hour_message=String::new();scoped.auto_pause_weekly_message=String::new();
+        }
         scoped.refresh_interval_seconds = preference.refresh_interval_seconds;
         scoped.five_hour_reset_notification = preference.five_hour_reset_notification;
         scoped.weekly_reset_notification = preference.weekly_reset_notification;
@@ -447,6 +472,9 @@ impl ConfigManager {
         Self { runtime_dir: self.runtime_dir.clone(), namespace: Arc::default(), bound_namespace: Some(key) }
     }
 
+    pub fn is_local_codex(&self) -> bool {
+        self.bound_namespace.clone().unwrap_or_else(||self.namespace.lock().unwrap_or_else(|p|p.into_inner()).clone()).is_empty()
+    }
     pub fn runtime_dir(&self) -> &Path {
         &self.runtime_dir
     }

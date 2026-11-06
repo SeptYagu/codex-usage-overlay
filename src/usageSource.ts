@@ -36,3 +36,10 @@ export function usageMatchesSource(usage: CodexUsage, scope: UsageSourceScope | 
   }
   return scope.allowLegacy && usage.sourceKey === undefined && usage.sourceGeneration === undefined;
 }
+
+export function usageIsOlder(next: CodexUsage, current: CodexUsage): boolean {
+  if (next.sourceKey === current.sourceKey && next.sourceGeneration === current.sourceGeneration
+      && next.presentationRevision !== undefined && current.presentationRevision !== undefined
+      && next.presentationRevision !== current.presentationRevision) return next.presentationRevision < current.presentationRevision;
+  return next.fetchedAt < current.fetchedAt;
+}

@@ -421,3 +421,15 @@ describe('locale selection', () => {
     expect(matchSupportedLocale('en-US')).toBe('en-US');
   });
 });
+
+it('rolls back failed optimistic edits even when reloading settings also fails',async()=>{
+  let reads=0;tauri.invoke.mockImplementation(async(command:string)=>{
+    if(command==='get_settings'){if(reads++>0)throw new Error('reload failed');return {revision:0,settings:serverSettings};}
+    if(command==='patch_settings')throw new Error('disk failed');
+    return null;
+  });
+  render(<App/>);const checkbox=await screen.findByRole('checkbox',{name:'Show Credit Balance'}) as HTMLInputElement;
+  expect(checkbox.checked).toBe(false);fireEvent.click(checkbox);
+  await waitFor(()=>expect(checkbox.checked).toBe(false));
+  expect(await screen.findByRole('alert')).toBeTruthy();
+});

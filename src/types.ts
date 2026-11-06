@@ -1,4 +1,11 @@
+export type FiveHourBurnRateAlgorithm = 'legacy' | 'weighted' | 'personalized';
 export interface CodexUsage {
+  presentationRevision?: number;
+  settingsRevision?: number;
+  requestedAlgorithm?: FiveHourBurnRateAlgorithm | null;
+  effectiveAlgorithm?: FiveHourBurnRateAlgorithm | null;
+  fallbackReason?: string | null;
+  personalLearningStatus?: string | null;
   fiveHourRemainingPercent: number | null;
   fiveHourBurnRatePerHour: number | null;
   weekRemainingPercent: number | null;
@@ -47,6 +54,9 @@ export interface MonitorSnapshot {
 }
 
 export interface OverlaySettings {
+  autoPauseFiveHourMessage?: string;
+  autoPauseWeeklyMessage?: string;
+  fiveHourBurnRateAlgorithm?: FiveHourBurnRateAlgorithm;
   schemaVersion?: number;
   providerPreferences?: Partial<Record<Provider, ProviderPreference>>;
   provider: Provider;

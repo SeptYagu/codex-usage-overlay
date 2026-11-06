@@ -66,6 +66,7 @@ fn runtime(
         Ordering::Release,
     );
     state.source_generation.store(generation, Ordering::Release);
+    state.applied_settings_revision.store(owner.settings_revision.load(Ordering::Acquire),Ordering::Release);
     Arc::new(state)
 }
 
@@ -100,7 +101,8 @@ impl Registry {
             }
             let binding_changed =
                 crate::config::source_key(&old) != crate::config::source_key(&next);
-            let urgent = old.refresh_interval_seconds != next.refresh_interval_seconds || binding_changed
+            let message_changed = provider == Provider::Codex && (old.auto_pause_five_hour_message != next.auto_pause_five_hour_message || old.auto_pause_weekly_message != next.auto_pause_weekly_message);
+            let urgent = message_changed || old.refresh_interval_seconds != next.refresh_interval_seconds || binding_changed
                 || previous.monitor_enabled.load(Ordering::Acquire) != enabled
                 || old.claude_live_polling != next.claude_live_polling
                 || old.auto_pause_on_low_quota != next.auto_pause_on_low_quota
@@ -148,7 +150,8 @@ impl Registry {
                 *previous.settings.lock().await = next.clone();
                 previous.monitor_enabled.store(enabled, Ordering::Release);
                 previous.settings_revision.fetch_add(1, Ordering::AcqRel);
-                if read_changed
+                previous.applied_settings_revision.store(owner.settings_revision.load(Ordering::Acquire), Ordering::Release);
+                if message_changed || read_changed
                     || old.auto_pause_on_low_quota != next.auto_pause_on_low_quota
                     || old.dsh_session_ids != next.dsh_session_ids
                     || old.auto_pause_five_hour_threshold_percent
@@ -170,11 +173,7 @@ impl Registry {
                 {
                     crate::pause_control::probe_bridge_status(&previous);
                 }
-                previous
-                    .polling
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .recalculate(&next, std::time::Instant::now());
+                if urgent {previous.polling.lock().unwrap_or_else(|p|p.into_inner()).recalculate(&next,std::time::Instant::now());}
             }
             // Wake the old worker even when its runtime was replaced.
             if urgent {
@@ -184,7 +183,7 @@ impl Registry {
                     .unwrap_or_else(|p| p.into_inner())
                     .request_now(std::time::Instant::now());
             }
-            previous.poll_wake.notify_one();
+            if urgent {previous.poll_wake.notify_one();}
         }
         let claude = settings.for_provider(Provider::Claude);
         if let Err(error) =
@@ -263,7 +262,7 @@ impl Registry {
                 available,
                 health: health.into(),
                 error: error.or(last_error),
-                usage: usage.map(|usage| UsageEnvelope { usage, source_key: key, source_generation: generation }),
+                usage: usage.map(|usage| crate::commands::usage_envelope(&state,&settings,usage)),
             });
         }
         output

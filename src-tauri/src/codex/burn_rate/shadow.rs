@@ -85,6 +85,10 @@ pub struct ShadowEvidenceEvent {
     /// The personalized rate at the origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_shadow_rate: Option<f64>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub origin_affine_rate_per_hour: Option<f64>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub affine_predicted_delta: Option<f64>,
     /// The published prediction of the interval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_predicted_delta: Option<f64>,
@@ -183,6 +187,7 @@ impl ShadowEvidenceEvent {
             origin_published_rate: None,
             origin_fixed_rate: None,
             origin_shadow_rate: None,
+            origin_affine_rate_per_hour: None, affine_predicted_delta: None,
             published_predicted_delta: None,
             fixed_predicted_delta: None,
             shadow_predicted_delta: None,
@@ -235,6 +240,8 @@ pub fn matured_event(
         origin_published_rate: pending.origin_published_rate_per_hour,
         origin_fixed_rate: Some(pending.origin_fixed_rate_per_hour),
         origin_shadow_rate: pending.origin_shadow_rate_per_hour,
+        origin_affine_rate_per_hour: pending.origin_affine_rate_per_hour,
+        affine_predicted_delta: pending.origin_affine_rate_per_hour.map(|rate|(rate * matured.elapsed_seconds as f64/3600.).clamp(0.,100.-pending.origin_used_percent)),
         published_predicted_delta: matured.published_predicted_delta,
         fixed_predicted_delta: Some(matured.fixed_predicted_delta),
         shadow_predicted_delta: matured.shadow_predicted_delta,
@@ -315,6 +322,8 @@ pub struct FiveHourShadowState {
     pub weighted: WeightedShadowState,
     /// The personal calibration learner.
     pub personal: PersonalCalibrationState,
+    #[serde(default,deserialize_with="super::affine::recover")]
+    pub affine: super::affine::AffineCalibration,
     /// The pending five-minute interval.
     pub pending: Option<PendingPersonalForecast>,
 }
@@ -328,6 +337,7 @@ impl Default for FiveHourShadowState {
             audit_outbox: None,
             weighted: WeightedShadowState::default(),
             personal: PersonalCalibrationState::default(),
+            affine: super::affine::AffineCalibration::default(),
             pending: None,
         }
     }
@@ -346,6 +356,7 @@ impl FiveHourShadowState {
         self.algorithm_version = SHADOW_ALGORITHM_VERSION;
         self.weighted = WeightedShadowState::default();
         self.personal = PersonalCalibrationState::default();
+        self.affine = super::affine::AffineCalibration::default();
         self.pending = None;
         true
     }
@@ -359,6 +370,7 @@ impl FiveHourShadowState {
         let before = self.clone();
         self.weighted.normalize(quota);
         self.personal.normalize();
+        if !self.affine.valid(quota.last_observed_at) {self.affine=super::affine::AffineCalibration::default();}
         // A restored interval is only kept when every field it carries still
         // describes a real observation of the current segment. An interval
         // that was invalidated during a busy audit outbox survives this

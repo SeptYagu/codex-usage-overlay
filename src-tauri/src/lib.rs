@@ -9,6 +9,8 @@ mod dsh;
 mod dsh_control;
 mod notify;
 mod pause_control;
+mod pause_message;
+mod presentation;
 mod polling;
 mod monitor;
 mod tray;
@@ -125,6 +127,7 @@ pub fn run() {
             commands::fetch_usage,
             commands::get_last_usage,
             commands::get_settings,
+            pause_message::get_pause_templates,
             monitor::get_monitor_snapshots,
             monitor::cycle_display_provider,
             commands::dsh_discover,

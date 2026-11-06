@@ -225,6 +225,8 @@ pub struct PendingPersonalForecast {
     pub origin_effective_factor: f64,
     /// The personalized rate at the origin.
     pub origin_shadow_rate_per_hour: Option<f64>,
+    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="super::affine::recover_rate")]
+    pub origin_affine_rate_per_hour: Option<f64>,
     /// The evidence at the origin.
     pub origin_evidence: f64,
     /// The informative update count at the origin.
@@ -460,6 +462,7 @@ mod tests {
             origin_trust: 0.0,
             origin_effective_factor: 1.0,
             origin_shadow_rate_per_hour: Some(fixed_rate),
+            origin_affine_rate_per_hour: None,
             origin_evidence: 0.0,
             origin_informative_updates: 0,
             last_valid_at: origin_at,

@@ -1,3 +1,4 @@
+mod affine;
 use serde::{Deserialize, Serialize};
 use std::fs;
 
@@ -235,6 +236,7 @@ pub struct BurnRateTracker {
     evidence_lines: usize,
     /// The last shadow diagnostic. It never reaches the frontend.
     shadow_estimate: FiveHourShadowEstimate,
+    affine_enabled: bool,
 }
 
 impl BurnRateTracker {
@@ -249,6 +251,7 @@ impl BurnRateTracker {
             state_dirty: false,
             evidence_lines,
             shadow_estimate: FiveHourShadowEstimate::default(),
+            affine_enabled: config.is_local_codex(),
         };
         // A retained audit event is flushed before any new feedback is
         // processed, so a crash between the learner update and the log append
@@ -273,7 +276,17 @@ impl BurnRateTracker {
             state_dirty: false,
             evidence_lines: 0,
             shadow_estimate: FiveHourShadowEstimate::default(),
+            affine_enabled: true,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_snapshot(&self)->serde_json::Value {serde_json::to_value(&self.state).unwrap()}
+    pub fn candidates(&self, estimate: &BurnRateEstimate) -> crate::presentation::Candidates {
+        let learning=if self.state_dirty || self.state.five_hour_shadow.audit_outbox.is_some(){"persistencePaused"}
+            else if self.state.five_hour_shadow.affine.n==0.{"accumulating"}else{"active"};
+        crate::presentation::Candidates{legacy:estimate.five_hour_per_hour,weighted:self.shadow_estimate.fixed_weighted_per_hour,
+            personalized:self.shadow_estimate.fixed_weighted_per_hour.and_then(|rate|self.state.five_hour_shadow.affine.rate(rate)),learning}
     }
 
     pub fn save(&mut self, config: &ConfigManager) -> Result<(), String> {
@@ -410,6 +423,7 @@ impl BurnRateTracker {
         // No personal calibration and no audit identity may cross accounts.
         self.state.five_hour_shadow.weighted = WeightedShadowState::default();
         self.state.five_hour_shadow.personal = PersonalCalibrationState::default();
+        self.state.five_hour_shadow.affine = affine::AffineCalibration::default();
         self.state.five_hour_shadow.pending = None;
         self.state.five_hour_shadow.account_generation =
             self.state.five_hour_shadow.account_generation.saturating_add(1);
@@ -542,6 +556,7 @@ impl BurnRateTracker {
                         }
                         PendingOutcome::Matured(matured) => {
                             let learner_before = self.state.five_hour_shadow.personal.clone();
+                            if self.affine_enabled {self.state.five_hour_shadow.affine.learn(pending.origin_fixed_rate_per_hour, &matured, observed_at);}
                             self.state.five_hour_shadow.personal.apply_outcome(
                                 matured.confidence,
                                 matured.predicted_delta,
@@ -669,7 +684,7 @@ impl BurnRateTracker {
             && acceptance.accepted
             && self.state.five_hour_shadow.pending.is_none()
         {
-            if let Some(pending) = build_pending(
+            if let Some(mut pending) = build_pending(
                 observed_at,
                 used,
                 resets_at,
@@ -679,6 +694,7 @@ impl BurnRateTracker {
                 learner,
                 after.segment_id,
             ) {
+                pending.origin_affine_rate_per_hour = self.affine_enabled.then(||fixed_rate.and_then(|rate|self.state.five_hour_shadow.affine.rate(rate))).flatten();
                 self.state.five_hour_shadow.pending = Some(pending);
                 changed = true;
             }
@@ -750,6 +766,7 @@ fn build_pending(
         origin_trust: learner.trust,
         origin_effective_factor: learner.effective_factor,
         origin_shadow_rate_per_hour: personalized,
+        origin_affine_rate_per_hour: None,
         origin_evidence: learner.evidence,
         origin_informative_updates: learner.informative_updates,
         last_valid_at: origin_at,

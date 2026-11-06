@@ -34,3 +34,11 @@ describe('usage source isolation', () => {
     expect(usageSourceScope({ ...legacy, sourceKey: 'incomplete' }, DEFAULT_SETTINGS, null).allowLegacy).toBe(false);
   });
 });
+
+import {usageIsOlder} from './usageSource';
+it('orders same-sample algorithm projections by presentation revision rather than timestamp',()=>{
+ const current={sourceKey:'codex',sourceGeneration:1,presentationRevision:10,fetchedAt:1000} as Parameters<typeof usageIsOlder>[0];
+ expect(usageIsOlder({...current,presentationRevision:9},current)).toBe(true);
+ expect(usageIsOlder({...current,presentationRevision:11},current)).toBe(false);
+ expect(usageIsOlder({...current,presentationRevision:10,fetchedAt:999},current)).toBe(true);
+});

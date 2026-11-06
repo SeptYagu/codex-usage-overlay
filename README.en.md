@@ -64,6 +64,14 @@ Choose **Claude** under **Provider settings** to configure its connection and pr
 - The capsule starts with the active provider's logo (OpenAI for Codex, Claude for Claude); **Show provider logo** hides it. The marks come from Simple Icons (Claude, CC0) and LobeHub Icons (OpenAI, MIT) and are trademarks of their owners. Credits are not shown for Claude. Burn rate and reset state are kept in separate `claude-` prefixed files, so Claude samples never mix with the Codex history.
 - The helper writes `claude-rate-limits.json` and `claude-guard-state.json`, and the overlay writes `claude-guard.json` and `claude-bridge.json`, all in the runtime directory above. Disconnect before uninstalling; otherwise Claude Code keeps calling the removed helper.
 
+## New main-branch features (not released yet)
+
+The Codex column has separate 5-hour and Weekly pause messages, saved on blur with a 2,000 UTF-16-unit limit. Weekly takes precedence. Confirmed or uncertain submissions are not automatically repeated for the same account/chat/quota cycle; editing text does not reset this ledger.
+
+Explicitly applying the continuation preset inserts `{resume_at}` as the server reset time plus 120 seconds, including date, seconds, offset and zone. The receiving chat creates and verifies its own task, whose saved prompt requires self-pausing before continuing. The overlay does not create tasks directly, acceptance proves neither stopping nor scheduling, and disabling protection does not cancel existing tasks. Invalid time or zone falls back to plain pause.
+
+Codex 5H burn-rate display offers Classic (default), Weighted and experimental Personalized estimation, with reported fallback. Changing it only reprojects a cached successful sample: no extra reads, training, notification or protection actions. Weekly remains unchanged. Cold personalization starts at Weighted and is not a promise of better future accuracy.
+
 ## Development
 
 Install Node.js 22 and a current stable Rust toolchain, plus the Windows Tauri build prerequisites.

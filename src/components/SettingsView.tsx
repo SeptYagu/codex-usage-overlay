@@ -6,6 +6,7 @@ import { providerPreference, settingsForProvider } from '../providerSettings';
 import { useProviderMonitors } from '../hooks/useProviderMonitors';
 import { APP_VERSION } from '../version';
 import { useTranslation } from 'react-i18next';
+import { CodexOptions } from './CodexOptions';
 import { SoundPicker } from './SoundPicker';
 import { ProtectionStatusView } from './ProtectionStatus';
 import { ClaudeConnectionView } from './ClaudeConnection';
@@ -13,10 +14,11 @@ import { DshConnectionView } from './DshConnection';
 
 interface SettingsViewProps {
   settings: OverlaySettings;
+  saveErrors?: string[];
   onPatchSettings: (patch: SettingsPatch, debounce?: boolean) => void;
 }
 
-export const SettingsView = ({ settings, onPatchSettings }: SettingsViewProps) => {
+export const SettingsView = ({ settings, onPatchSettings, saveErrors = [] }: SettingsViewProps) => {
   const { t } = useTranslation();
   const monitors = useProviderMonitors();
   const [isInstalled, setIsInstalled] = useState(false);
@@ -44,6 +46,7 @@ export const SettingsView = ({ settings, onPatchSettings }: SettingsViewProps) =
         <SettingsPanel {...shared} configurationProvider={provider} />
       </section>)}
     </main>
+    {saveErrors.length>0 && <div role="alert" className="text-xs text-rose-600 shrink-0">{saveErrors.join(' · ')}</div>}
     <footer className="shrink-0 text-center text-xs text-slate-400">{t('feedback')} <span className="select-text">septwind@agent.qq.com</span></footer>
   </div>;
 };
@@ -415,6 +418,8 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
             {!claude && <ProtectionStatusView settings={settings} onPatchSettings={onPatchSettings} />}
           </div>
 
+          {configurationProvider === 'codex' && <CodexOptions settings={settings} usage={monitors.codex?.usage}
+            disabled={autoPauseDisabled} onPatchSettings={onPatchSettings} />}
           <section aria-labelledby={`${configurationProvider}-reset-notifications-title`} className="space-y-2.5">
             <h3 id={`${configurationProvider}-reset-notifications-title`} className="text-sm font-semibold">{t('notificationSection')}</h3>
             {([

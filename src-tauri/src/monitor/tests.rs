@@ -25,6 +25,7 @@ fn owner() -> (Arc<AppState>, std::path::PathBuf) {
 
 #[derive(Default)]
 struct Source {
+    usage_events:StdMutex<Vec<crate::commands::UsageEnvelope>>,
     frames: StdMutex<Vec<Frame>>,
     reads: AtomicUsize,
 }
@@ -34,6 +35,7 @@ struct Frame {
     pixels: Vec<u8>,
 }
 impl TrayPresentationSink for Source {
+    fn publish_usage(&self,usage:crate::commands::UsageEnvelope){self.usage_events.lock().unwrap().push(usage);}
     fn present(&self, frame: TrayPresentation) {
         self.frames.lock().unwrap().push(Frame {
             tooltip: frame.tooltip,
@@ -536,4 +538,28 @@ async fn provider_preference_patch_is_persisted_and_only_reconfigures_its_runtim
     assert_eq!(owner.config_manager.load_settings().for_provider(Provider::Claude).refresh_interval_seconds,120);
     assert!(owner.config_manager.load_settings().for_provider(Provider::Codex).weekly_reset_notification);
     registry.shutdown();drop(codex);drop(claude);drop(dsh);drop(owner);std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn algorithm_selection_reprojects_cache_without_reading_training_or_clearing_an_error() {
+    use crate::config::FiveHourBurnRateAlgorithm as Algorithm;
+    let (owner,dir)=owner();let registry=owner.monitors.get().unwrap();let codex=registry.get(Provider::Codex);let source=Source::default();
+    refresh_usage(&source,&codex).await.unwrap();
+    crate::commands::process_usage_error(&source,&codex).await;
+    let memory=codex.burn_rate.lock().await.test_snapshot();
+    let file=std::fs::read(codex.config_manager.burn_rate_state_path()).unwrap();
+    let fetched=codex.last_usage.lock().await.as_ref().unwrap().fetched_at;
+    let revision=codex.presentation.lock().unwrap().metadata.presentation_revision;
+    let count=source.usage_events.lock().unwrap().len();
+    crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"fiveHourBurnRateAlgorithm":"weighted"}),false).await.unwrap();
+    assert_eq!(source.reads.load(Ordering::SeqCst),1);
+    assert_eq!(codex.burn_rate.lock().await.test_snapshot(),memory);
+    assert_eq!(std::fs::read(codex.config_manager.burn_rate_state_path()).unwrap(),file);
+    assert_eq!(codex.last_usage.lock().await.as_ref().unwrap().fetched_at,fetched);
+    assert!(matches!(*codex.tray_read_status.lock().await,crate::tray::TrayReadStatus::Error));
+    let events=source.usage_events.lock().unwrap();assert_eq!(events.len(),count+1);
+    let event=events.last().unwrap();assert_eq!(event.presentation.presentation_revision,revision+1);
+    assert_eq!(event.presentation.requested_algorithm,Some(Algorithm::Weighted));
+    assert_eq!(event.presentation.settings_revision,owner.settings_revision.load(Ordering::Acquire));drop(events);
+    registry.shutdown();drop(codex);drop(owner);std::fs::remove_dir_all(dir).unwrap();
 }

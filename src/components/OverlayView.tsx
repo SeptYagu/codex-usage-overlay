@@ -1,3 +1,4 @@
+import { burnRatePresentation } from '../burnRatePresentation';
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -305,7 +306,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
               </div>
               <div className="overlay-meta-row">
                 <span className="overlay-countdown">{quota.countdown}</span>
-                {settings.showBurnRate && <span className="overlay-burn-rate">{quota.burnRate}</span>}
+                {settings.showBurnRate && <span className="overlay-burn-rate" title={settings.provider === 'codex' && quota.key === 'five' ? burnRatePresentation(usage,t) : undefined}>{quota.burnRate}</span>}
               </div>
             </div>
           </React.Fragment>

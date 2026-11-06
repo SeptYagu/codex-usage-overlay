@@ -9,7 +9,7 @@ import { CodexUsage, DockStateInfo, OverlaySettings, SettingsEnvelope, DEFAULT_S
 import { OverlayView } from './components/OverlayView';
 import { SettingsView } from './components/SettingsView';
 import { TrayMenuView } from './components/TrayMenuView';
-import { sourceBinding, UsageSourceScope, usageMatchesSource, usageSourceScope } from './usageSource';
+import { sourceBinding, UsageSourceScope, usageMatchesSource, usageSourceScope, usageIsOlder } from './usageSource';
 import { useProviderMonitors } from './hooks/useProviderMonitors';
 import { mergeSettingsPatch, mergePendingPatches, settingsForProvider } from './providerSettings';
 
@@ -18,6 +18,8 @@ export const App: React.FC = () => {
   const [windowLabel] = useState<string>(() => getCurrentWindow().label);
   const [settings, setSettings] = useState<OverlaySettings>(DEFAULT_SETTINGS);
   const [settingsLoadState, setSettingsLoadState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [saveErrors,setSaveErrors]=useState<Record<string,string>>({});
+  const confirmedSettings=useRef<SettingsEnvelope|null>(null);
   const settingsRevision = useRef(-1);
   const settingsLoadToken = useRef(0);
   const pendingPatches = useRef<SettingsPatch[]>([]);
@@ -37,6 +39,7 @@ export const App: React.FC = () => {
   const applySavedSettings = useCallback((envelope: SettingsEnvelope) => {
     if (envelope.revision < settingsRevision.current) return;
     settingsRevision.current = envelope.revision;
+    confirmedSettings.current=envelope;
     const serverSettings = { ...DEFAULT_SETTINGS, ...envelope.settings };
     const merged = [...pendingPatches.current, sliderPatch.current].reduce<OverlaySettings>(mergeSettingsPatch, serverSettings);
     // An optimistic source change has no authoritative identity until its save
@@ -50,7 +53,7 @@ export const App: React.FC = () => {
       const pending = pendingUsage.current;
       if (pending && usageMatchesSource(pending, scope)) {
         pendingUsage.current = null;
-        return retained && retained.fetchedAt > pending.fetchedAt ? retained : pending;
+        return retained && usageIsOlder(pending, retained) ? retained : pending;
       }
       return retained;
     });
@@ -100,7 +103,7 @@ export const App: React.FC = () => {
       setUsage((current) => {
         if (!usageMatchesSource(next, sourceScope.current)) return current;
         return current && usageMatchesSource(current, sourceScope.current)
-          && current.fetchedAt > next.fetchedAt ? current : next;
+          && usageIsOlder(next, current) ? current : next;
       });
       setIsLoading(false);
     };
@@ -182,9 +185,16 @@ export const App: React.FC = () => {
         const envelope = await invoke<SettingsEnvelope>('patch_settings', { patch });
         pendingPatches.current = pendingPatches.current.filter((item) => item !== patch);
         applySavedSettings(envelope);
+        const targets=Object.keys(patch.providerPreferences??{});
+        if(!targets.length)targets.push(patch.autoPauseFiveHourMessage!==undefined||patch.autoPauseWeeklyMessage!==undefined||patch.fiveHourBurnRateAlgorithm!==undefined?'codex':'common');
+        setSaveErrors(current=>{const next={...current};for(const target of targets)delete next[target];return next;});
       } catch (err) {
         pendingPatches.current = pendingPatches.current.filter((item) => item !== patch);
         console.error('Save settings error:', err);
+        const targets=Object.keys(patch.providerPreferences??{});
+        if(!targets.length)targets.push(patch.autoPauseFiveHourMessage!==undefined||patch.autoPauseWeeklyMessage!==undefined||patch.fiveHourBurnRateAlgorithm!==undefined?'codex':'common');
+        setSaveErrors(current=>({...current,...Object.fromEntries(targets.map(target=>[target,i18n.t('settingsSaveFailed',{target:target==='common'?i18n.t('commonSettings'):target})]))}));
+        if(confirmedSettings.current)applySavedSettings(confirmedSettings.current);
         try {
           applySavedSettings(await invoke<SettingsEnvelope>('get_settings'));
         } catch (reloadError) {
@@ -244,6 +254,7 @@ export const App: React.FC = () => {
       <SettingsView
         settings={settings}
         onPatchSettings={handlePatchSettings}
+        saveErrors={Object.values(saveErrors)}
       />
     );
   }

@@ -162,8 +162,8 @@ pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Ar
         }
         settings.clone()
     };
+    sink.publish_usage(crate::commands::usage_envelope(state, &settings, usage.clone()));
     if let Some(app) = sink.app_handle() {
-        let _ = app.emit("usage_updated", crate::commands::usage_envelope(state, &settings, usage.clone()));
         if state.is_displayed() {
             let owner = state.owner.get().and_then(|w| w.upgrade()).unwrap_or_else(|| state.clone());
             crate::dock::keep_docked_in_work_area(app, &owner).await;

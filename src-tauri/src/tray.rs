@@ -34,6 +34,9 @@ pub struct TrayPresentation {
 pub trait TrayPresentationSink {
     fn present(&self, presentation: TrayPresentation);
     fn app_handle(&self) -> Option<&AppHandle>;
+    fn publish_usage(&self, usage:crate::commands::UsageEnvelope) {
+        if let Some(app)=self.app_handle(){let _=app.emit("usage_updated",usage);}
+    }
 }
 
 /// The last time the tray icon was registered again, see `present`.

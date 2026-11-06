@@ -64,6 +64,8 @@ pub struct AppState {
     pub settings_patch: Mutex<()>,
     pub config_manager: ConfigManager,
     pub last_usage: Mutex<Option<CodexUsage>>,
+    pub presentation: StdMutex<crate::presentation::Cache>,
+    pub applied_settings_revision: AtomicU64,
     pub claude_live: StdMutex<crate::claude::live::LiveState>,
     pub tray_read_status: Mutex<TrayReadStatus>,
     pub settings: Mutex<OverlaySettings>,
@@ -124,6 +126,8 @@ impl AppState {
             settings_patch: Mutex::new(()),
             config_manager: config_manager.clone(),
             last_usage: Mutex::new(None),
+            presentation: StdMutex::new(Default::default()),
+            applied_settings_revision: AtomicU64::new(0),
             claude_live: StdMutex::new(Default::default()),
             tray_read_status: Mutex::new(TrayReadStatus::Pending),
             settings: Mutex::new(settings),
@@ -178,11 +182,14 @@ pub struct UsageEnvelope {
     pub usage: CodexUsage,
     pub source_key: String,
     pub source_generation: u64,
+    #[serde(flatten)]
+    pub presentation: crate::presentation::Metadata,
 }
 
 pub(crate) fn usage_envelope(state: &AppState, settings: &OverlaySettings, usage: CodexUsage) -> UsageEnvelope {
-    UsageEnvelope { usage, source_key: crate::config::source_key(settings),
-        source_generation: state.source_generation.load(Ordering::Acquire) }
+    let cache=state.presentation.lock().unwrap_or_else(|p|p.into_inner());
+    UsageEnvelope { usage: cache.current.clone().unwrap_or(usage), source_key: crate::config::source_key(settings),
+        source_generation: state.source_generation.load(Ordering::Acquire), presentation:cache.metadata.clone() }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -517,9 +524,17 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
                         eprintln!("Could not persist burn-rate state: {error}");
                     }
                 }
-                estimate
+                let candidates=tracker.candidates(&estimate);
+                (estimate,candidates)
             };
-            let usage = raw.to_ui(estimate.five_hour_per_hour, estimate.weekly_per_hour);
+            let (estimate,candidates)=estimate;
+            let mut usage = raw.to_ui(estimate.five_hour_per_hour, estimate.weekly_per_hour);
+            if source_settings.provider==Provider::Codex {
+                let settings=state.settings.lock().await;
+                let mut cache=state.presentation.lock().unwrap_or_else(|p|p.into_inner());
+                cache.source=Some(crate::presentation::Sample{usage:usage.clone(),candidates});
+                usage=cache.project(settings.five_hour_burn_rate_algorithm,state.applied_settings_revision.load(Ordering::Acquire),settings.refresh_interval_seconds>90).expect("sample was just stored");
+            }
             // Smart Pause and resume act on Codex sessions only; the Claude
             // guard runs inside Claude Code's hooks instead.
             let codex = state.settings.lock().await.provider == Provider::Codex;
@@ -1060,6 +1075,8 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
     }
     for (key, value) in changes {
         let valid = match key.as_str() {
+            "autoPauseFiveHourMessage" | "autoPauseWeeklyMessage" => value.as_str().is_some_and(crate::pause_message::valid_message),
+            "fiveHourBurnRateAlgorithm" => matches!(value.as_str(),Some("legacy"|"weighted"|"personalized")),
             "overlayLayout" => matches!(value.as_str(), Some("grouped" | "stacks")),
             "scalePercent" => value.as_u64().is_some_and(|n| (100..=250).contains(&n) && n % 5 == 0),
             "backgroundTransparencyPercent" => value.as_u64().is_some_and(|n| n <= 80 && n % 5 == 0),
@@ -1401,6 +1418,11 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     }
     if let Some(registry) = state.monitors.get() {
         registry.synchronize(state, &envelope.settings).await;
+        if changes.contains_key("fiveHourBurnRateAlgorithm") {
+            let codex=registry.get(Provider::Codex);
+            let _commit=codex.settings_patch.lock().await;
+            crate::presentation::reproject_locked(sink,&codex).await;
+        }
         envelope.source_generation = registry.get(envelope.settings.provider).source_generation.load(Ordering::Acquire);
     } else {
     if provider_changed {
@@ -2426,12 +2448,34 @@ mod auto_pause_tests {
     const EXPECTED_PAUSE_MESSAGE: &str = "\u{6682}\u{505C}";
 
     #[tokio::test]
+    async fn custom_weekly_message_wins_and_editing_does_not_clear_cycle_dedup() {
+        let (state,transport,_dir)=armed_state("custom-weekly").await;
+        {let mut settings=state.settings.lock().await;settings.auto_pause_five_hour_message="FIVE CUSTOM".into();settings.auto_pause_weekly_message="WEEKLY CUSTOM".into();}
+        let mut raw=low_quota_usage(Some("acct-1"));raw.weekly.used_percent=Some(100.);
+        let sink=OfflineSink::with_usage(raw);refresh_usage(&sink,&state).await.unwrap();wait_for_prompts(&transport,1).await;
+        assert_eq!(transport.sent_prompts(),vec!["WEEKLY CUSTOM"]);
+        state.settings.lock().await.auto_pause_weekly_message="EDITED".into();
+        refresh_usage(&sink,&state).await.unwrap();wait_for_pause_worker(&state).await;
+        assert_eq!(transport.sent_prompts(),vec!["WEEKLY CUSTOM"]);
+    }
+    #[tokio::test]
+    async fn fixed_custom_five_hour_text_survives_interface_language_changes() {
+        let (state,transport,_dir)=armed_state("custom-fixed").await;
+        {let mut settings=state.settings.lock().await;settings.language="en-US".into();settings.auto_pause_five_hour_message="保留我的固定文字".into();}
+        let sink=OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
+        refresh_usage(&sink,&state).await.unwrap();wait_for_prompts(&transport,1).await;
+        assert_eq!(transport.sent_prompts(),vec!["保留我的固定文字"]);
+    }
+
+
+    #[tokio::test]
     async fn pause_message_uses_english_when_selected() {
         let (state, transport, _dir) = armed_state("wiring-locale-en").await;
         {
             let mut settings = state.settings.lock().await;
             settings.language = "en-US".to_string();
         }
+        {let mut settings=state.settings.lock().await;settings.auto_pause_five_hour_message="Pause".into();settings.auto_pause_weekly_message="Pause".into();}
         let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
         refresh_usage(&sink, &state).await.expect("the refresh must succeed");
         wait_for_prompts(&transport, 1).await;
@@ -2446,6 +2490,7 @@ mod auto_pause_tests {
             let mut settings = state.settings.lock().await;
             settings.language = "zh-Hant".to_string();
         }
+        {let mut settings=state.settings.lock().await;settings.auto_pause_five_hour_message="暫停".into();settings.auto_pause_weekly_message="暫停".into();}
         let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
         refresh_usage(&sink, &state).await.expect("the refresh must succeed");
         wait_for_prompts(&transport, 1).await;
@@ -2890,10 +2935,9 @@ mod auto_pause_tests {
     }
 
     /// A session that leaves the active list and comes back starts a new
-    /// active period, so it may be prompted again even though the quota
-    /// cycle never changed.
+    /// active period; confirmed quota-cycle messages must nevertheless stay deduplicated.
     #[tokio::test]
-    async fn a_session_that_returns_after_going_idle_is_prompted_again() {
+    async fn a_returning_session_is_not_prompted_twice_in_the_same_quota_cycle() {
         let (state, transport, dir) = armed_state("wiring-return").await;
         let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
 
@@ -2937,12 +2981,12 @@ mod auto_pause_tests {
         refresh_usage(&sink, &state)
             .await
             .expect("the third refresh must succeed");
-        wait_for_prompts(&transport, 2).await;
+        wait_for_pause_worker(&state).await;
 
         assert_eq!(
             transport.sent_prompts().len(),
-            2,
-            "a returning session starts a new active period and may be prompted again"
+            1,
+            "a new active period must not duplicate a confirmed quota-cycle message"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2969,13 +3013,13 @@ mod auto_pause_tests {
     }
 
     /// A batch that outlives the deadline is cancelled and releases its
-    /// reservation, so a later refresh may try again.
+    /// reservation; after submission, an unknown result must suppress blind retries.
     ///
     /// The handshake answers at once and only the send hangs. That way a
     /// reservation really exists when the deadline cuts the batch off, and
     /// the measured clock is the batch rather than the refresh.
     #[tokio::test]
-    async fn a_batch_that_outlives_the_deadline_releases_its_reservation() {
+    async fn a_timed_out_submitted_batch_releases_reservations_without_blind_resend() {
         let (state, transport, dir) = armed_state("wiring-deadline").await;
         transport.set_send_delay_ms(3_000);
         {
@@ -3030,15 +3074,15 @@ mod auto_pause_tests {
         let status = state.auto_pause.lock().unwrap().status(true);
         assert_eq!(status.confirmed_count, 0);
 
-        // The next refresh tries again.
+        // A submitted request with no acknowledgement must not be blindly resent.
         transport.set_send_delay_ms(0);
         refresh_usage(&sink, &state)
             .await
             .expect("the second refresh must succeed");
-        wait_for_prompts(&transport, 2).await;
-        assert_eq!(transport.sent_prompts().len(), 2);
+        wait_for_pause_worker(&state).await;
+        assert_eq!(transport.sent_prompts().len(), 1);
         let status = state.auto_pause.lock().unwrap().status(true);
-        assert_eq!(status.confirmed_count, 1);
+        assert_eq!(status.confirmed_count, 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3198,7 +3242,7 @@ mod auto_pause_tests {
     /// The quota cycle never changed, so only a fresh period identity can
     /// lift the de-duplication of the earlier pause request.
     #[tokio::test]
-    async fn toggling_auto_pause_off_and_on_resets_active_periods_so_restarted_turn_is_paused() {
+    async fn toggling_auto_pause_preserves_confirmed_quota_cycle_dedup() {
         let (state, transport, dir) = armed_state("period-reset").await;
         let sink = OfflineSink::with_usage(low_quota_usage(Some("acct-1")));
 
@@ -3247,12 +3291,12 @@ mod auto_pause_tests {
         refresh_usage(&sink, &state)
             .await
             .expect("the third refresh must succeed");
-        wait_for_prompts(&transport, 2).await;
+        wait_for_pause_worker(&state).await;
 
         assert_eq!(
             transport.sent_prompts().len(),
-            2,
-            "a session that returns after the switch was off is paused again"
+            1,
+            "toggling protection must not duplicate a confirmed quota-cycle message"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

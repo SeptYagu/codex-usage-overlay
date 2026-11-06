@@ -26,7 +26,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -173,6 +173,7 @@ pub fn triggered_quotas(settings: &OverlaySettings, usage: &CodexUsage) -> Vec<T
 }
 
 /// The overlay owns resume scheduling; a cooperative message only asks to pause.
+#[cfg(test)]
 pub fn pause_message(language: &str, _triggers: &[Trigger], _observed_at: i64) -> String {
     pause_message_for_language(language).to_string()
 }
@@ -534,6 +535,12 @@ pub enum BridgeError {
 /// controller can hold it and an offline test can replace it.
 pub trait BridgeTransport: Send + Sync {
     fn capabilities(&self) -> status::ControlCapabilities { status::ControlCapabilities::default() }
+    fn call_tool_observed<'a>(
+        &'a self, pipe: &'a str, caller: &'a str, tool: &'a str, arguments:Value, started:&'a AtomicBool,
+    )->Pin<Box<dyn Future<Output=Result<ToolCallOutcome,BridgeError>>+Send+'a>> {
+        // Unknown transports conservatively treat the invocation as possibly submitted.
+        started.store(true,Ordering::Release);self.call_tool(pipe,caller,tool,arguments)
+    }
     fn call_tool<'a>(
         &'a self,
         pipe: &'a str,
@@ -550,6 +557,17 @@ pub struct NamedPipeTransport;
 
 #[cfg(windows)]
 impl BridgeTransport for NamedPipeTransport {
+    fn call_tool_observed<'a>(
+        &'a self, pipe:&'a str, caller:&'a str, tool:&'a str, arguments:Value, started:&'a AtomicBool,
+    )->Pin<Box<dyn Future<Output=Result<ToolCallOutcome,BridgeError>>+Send+'a>> {
+        Box::pin(async move {
+            let body=serde_json::to_vec(&build_request(tool,arguments,caller)).map_err(|e|BridgeError::Protocol(e.to_string()))?;
+            let mut client=open_pipe(pipe).await?;
+            started.store(true,Ordering::Release);
+            write_frame(&mut client,&body).await?;
+            parse_tool_outcome(&read_frame(&mut client).await?)
+        })
+    }
     fn call_tool<'a>(
         &'a self,
         pipe: &'a str,
@@ -838,6 +856,7 @@ async fn send_pause(
     candidate: &BridgeCandidate,
     target: &ActiveThread,
     prompt: &str,
+    started: &AtomicBool,
 ) -> Result<bool, BridgeError> {
     let mut arguments = json!({ "threadId": target.id, "prompt": prompt });
     if let Some(host_id) = target.host_id.as_deref() {
@@ -850,11 +869,12 @@ async fn send_pause(
     };
     let outcome = tokio::time::timeout(
         CALL_TIMEOUT,
-        transport.call_tool(
+        transport.call_tool_observed(
             &candidate.pipe,
             caller,
             "send_message_to_thread",
             arguments,
+            started,
         ),
     )
     .await
@@ -995,6 +1015,7 @@ pub struct AutoPauseController {
     delivery_cursor: usize,
     /// The confirmed deliveries.
     sent: Vec<DeliveryKey>,
+    cycle_attempts: Vec<DeliveryKey>,
     /// The reserved but not yet confirmed deliveries.
     pending: Vec<DeliveryKey>,
     /// Whether a delivery worker is running.
@@ -1044,6 +1065,7 @@ impl AutoPauseController {
             telemetry: status::Telemetry::default(),
             delivery_cursor: 0,
             sent: Vec::new(),
+            cycle_attempts: Vec::new(),
             pending: Vec::new(),
             running: false,
             queued: None,
@@ -1153,6 +1175,7 @@ impl AutoPauseController {
                 .map(|resets_at| resets_at > observed_at)
                 .unwrap_or(true)
         };
+        self.cycle_attempts.retain(still_relevant);
         self.sent.retain(still_relevant);
         self.pending.retain(still_relevant);
     }
@@ -1272,6 +1295,20 @@ impl AutoPauseController {
             self.push_pending(key.clone());
         }
         Reservation::Send { keys: uncovered }
+    }
+
+    fn cycle_keys(account:&str, thread:&str,triggers:&[Trigger])->Vec<DeliveryKey> {
+        triggers.iter().map(|t|DeliveryKey{account:account.into(),thread_id:thread.into(),quota:t.quota,resets_at:t.resets_at}).collect()
+    }
+    fn reserve_target(&mut self,account:&str,thread:&str,period:&str,triggers:&[Trigger])->Reservation {
+        let keys=Self::cycle_keys(account,thread,triggers);
+        if keys.iter().all(|k|self.cycle_attempts.contains(k)) {return Reservation::Nothing;}
+        if self.cycle_attempts.len()+keys.iter().filter(|k|!self.cycle_attempts.contains(k)).count()>512 {return Reservation::Nothing;}
+        let result=self.reserve(account,period,triggers);
+        if matches!(result,Reservation::Backfilled) {
+            for key in keys {if !self.cycle_attempts.contains(&key){self.cycle_attempts.push(key);}}
+        }
+        result
     }
 
     /// Records a confirmed delivery.
@@ -1554,8 +1591,6 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
     if triggers.is_empty() {
         return;
     }
-    // Continuation scheduling belongs to the gated resume manager.
-    let prompt = pause_message(&sample.settings.language, &triggers, sample.usage.fetched_at);
 
     // The transport and the discovery override are read under the lock, but
     // the discovery itself is ordinary file system work. Running it while
@@ -1656,7 +1691,7 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
             continue;
         };
         let reservation =
-            { lock_controller(state).reserve(&sample.account_id, &period_id, &triggers) };
+            { lock_controller(state).reserve_target(&sample.account_id, &thread.id, &period_id, &triggers) };
         let keys = match reservation {
             Reservation::Nothing | Reservation::Backfilled => continue,
             Reservation::Send { keys } => keys,
@@ -1665,10 +1700,14 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
         // The guard releases the reservation on every failure path,
         // including a cancelled batch, so a timeout never blocks a retry.
         let mut guard = ReservationGuard::new(state.clone(), keys.clone());
+        guard.cycles=AutoPauseController::cycle_keys(&sample.account_id,&thread.id,&triggers);
+        let prompt=if triggers.iter().any(|t|t.quota==QuotaKind::Weekly){sample.settings.auto_pause_weekly_message.clone()}
+            else{crate::pause_message::render_five_hour(&sample.settings.auto_pause_five_hour_message,sample.usage.five_hour_resets_at,unix_now(),&sample.settings.language)};
+
         lock_controller(state).telemetry.record(thread, &period_id, "requested", None);
-        let confirmed = send_pause(transport.as_ref(), &candidate, thread, &prompt)
-            .await
-            .unwrap_or(false);
+        let result=send_pause(transport.as_ref(), &candidate, thread, &prompt,&guard.started).await;
+        if matches!(result,Ok(false)){guard.started.store(false,Ordering::Release);}
+        let confirmed=result.unwrap_or(false);
         if confirmed {
             let record_reset_at = {
                 let mut controller = lock_controller(state);
@@ -1712,7 +1751,8 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
                 resume::update(state, None).await;
             }
         } else if lock_controller(state).generation == sample.generation {
-            lock_controller(state).telemetry.record(thread, &period_id, "failed", Some("deliveryFailed"));
+            let unknown=guard.started.load(Ordering::Acquire);
+            lock_controller(state).telemetry.record(thread, &period_id, if unknown{"unknown"}else{"failed"}, Some(if unknown{"submissionUnknown"}else{"deliveryFailed"}));
         }
     }
 }
@@ -1742,6 +1782,8 @@ struct ReservationGuard {
     state: Arc<AppState>,
     keys: Vec<DeliveryKey>,
     confirmed: bool,
+    started: AtomicBool,
+    cycles: Vec<DeliveryKey>,
 }
 
 impl ReservationGuard {
@@ -1749,7 +1791,7 @@ impl ReservationGuard {
         Self {
             state,
             keys,
-            confirmed: false,
+            confirmed: false, started:AtomicBool::new(false),cycles:Vec::new(),
         }
     }
 
@@ -1760,11 +1802,13 @@ impl ReservationGuard {
 
 impl Drop for ReservationGuard {
     fn drop(&mut self) {
-        if self.confirmed {
-            return;
+        let mut controller=lock_controller(&self.state);
+        if self.confirmed || self.started.load(Ordering::Acquire) {
+            for key in &self.cycles {
+                if !controller.cycle_attempts.contains(key) {controller.cycle_attempts.push(key.clone());}
+            }
         }
-        let mut controller = lock_controller(&self.state);
-        controller.release(&self.keys);
+        if !self.confirmed {controller.release(&self.keys);}
     }
 }
 

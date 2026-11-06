@@ -23,6 +23,8 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 dirs = "6.0"
+chrono = "0.4"
+iana-time-zone = "0.1"
 windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Foundation",
