@@ -1,3 +1,4 @@
+import { bufferUsage, takeMatchingUsage } from './usageSource';
 import { describe, expect, it } from 'vitest';
 import { CodexUsage, DEFAULT_SETTINGS, SettingsEnvelope } from './types';
 import { sourceBinding, usageMatchesSource, usageSourceScope } from './usageSource';
@@ -41,4 +42,12 @@ it('orders same-sample algorithm projections by presentation revision rather tha
  expect(usageIsOlder({...current,presentationRevision:9},current)).toBe(true);
  expect(usageIsOlder({...current,presentationRevision:11},current)).toBe(false);
  expect(usageIsOlder({...current,presentationRevision:10,fetchedAt:999},current)).toBe(true);
+});
+
+it('bounds early source caches and retains the newest projection inside each identity',()=>{
+  const inbox=new Map();
+  const sample={fiveHourRemainingPercent:1,fiveHourBurnRatePerHour:null,weekRemainingPercent:null,weekBurnRatePerHour:null,creditsDisplay:'',creditsBalance:null,hasCredits:false,fiveHourResetsAt:null,weekResetsAt:null,fetchedAt:1,sourceKey:'codex',sourceGeneration:0,presentationRevision:3};
+  bufferUsage(inbox,sample);bufferUsage(inbox,{...sample,presentationRevision:2});
+  expect(takeMatchingUsage(inbox,u=>u.sourceKey==='codex')?.presentationRevision).toBe(3);expect(inbox.size).toBe(0);
+  for(let i=0;i<30;i++)bufferUsage(inbox,{...sample,sourceGeneration:i});expect(inbox.size).toBe(12);
 });

@@ -66,6 +66,10 @@ Choose **Claude** under **Provider settings** to configure its connection and pr
 
 ## New main-branch features (not released yet)
 
+Settings now has fixed Codex, Claude and DSH columns with independent monitoring, refresh, protection, reset alerts and sounds. Common appearance and update settings remain in a collapsible section.
+
+Quota rotation is opt-in. Choose participating providers in their columns and adjust the matching interval slider from 3–30 seconds, in one-second steps (default eight). Only monitored providers with fresh, usable cached readings participate. Fewer than two eligible providers means standby. Hover, keyboard focus, dragging, menus, hiding, minimizing and a collapsed dock pause rotation; resuming restarts a full interval, and manual selection holds for 30 seconds. Automatic switches do not save settings, fetch quota or alter protection. Turning rotation off keeps the visible provider. A source label stays visible during rotation even with logos hidden.
+
 The Codex column has separate 5-hour and Weekly pause messages, saved on blur with a 2,000 UTF-16-unit limit. Weekly takes precedence. Confirmed or uncertain submissions are not automatically repeated for the same account/chat/quota cycle; editing text does not reset this ledger.
 
 Explicitly applying the continuation preset inserts `{resume_at}` as the server reset time plus 120 seconds, including date, seconds, offset and zone. The receiving chat creates and verifies its own task, whose saved prompt requires self-pausing before continuing. The overlay does not create tasks directly, acceptance proves neither stopping nor scheduling, and disabling protection does not cancel existing tasks. Invalid time or zone falls back to plain pause.

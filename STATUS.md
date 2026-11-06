@@ -1,13 +1,13 @@
 # Status
 
-## Three-plan implementation — 2026-11-06 (IN PROGRESS)
+## Three-plan implementation — 2026-11-06 (SOURCE COMPLETE)
 
-- [Implementation and review log](docs/handoff/2026-11-06-three-plan-implementation.md): independent settings and Codex customization have completed implementation, review and repairs. Carousel implementation is complete; its review and repair follow.
+- [Implementation and review log](docs/handoff/2026-11-06-three-plan-implementation.md): all three plans have completed implementation, source review and repairs, with each stage committed and pushed.
 - Schema 3 and three fixed settings columns provide provider-specific refresh, notifications and audio preferences. Frontend 165/build, Rust 449 + 10 plus an explicit Registry isolation regression, Edge 634 + 252 and packaging 6 pass. Native installed-window/audio acceptance remains unperformed. No release or installed application changes.
 - Repair verification: frontend 167/build and Rust library 452 pass (8 existing ignored). Correlated playback errors, late async failures and partial migrations are covered; a controlled mutation demonstrates the preview race regression detects the old defect.
 - Codex customization source milestone: custom messages/absolute continuation templates, quota-cycle deduplication with unknown-submission suppression, selectable Classic/Weighted/continuous Personalized display and cache-only projection. Frontend 173/build and Rust library 461 pass; 13 regenerated replay evidence files remain byte-identical. Review and repair completed: Rust 467, frontend 176/build and the 96-case independent synthetic parity check pass. Response correlation, unknown delivery telemetry, cancellation gates, actual learning cadence and visible capacity refusal are covered. No live delivery or task creation.
 
-- Carousel source milestone: opt-in rotation, provider participation, a 3–30-second slider, effective/manual selection separation, pause aggregation, identity/freshness filtering and stable measured capsule sizing. Frontend 181/build, Rust 476 (8 ignored) and Edge 634 + 252 + 200 pass. No installed/native acceptance or release.
+- Carousel source milestone: opt-in rotation, provider participation, a 3–30-second slider, effective/manual selection separation, pause aggregation, identity/freshness filtering and stable measured capsule sizing. Frontend 181/build, Rust 476 (8 ignored) and Edge 634 + 252 + 200 pass. Repair complete: frontend 184/build, Rust 478 + 10 (8 existing ignored), all-targets, DSH offline 16, packaging 6 and 96 synthetic parity origins pass. The new App regression detects the old cross-source bug under a controlled mutation and passes after restoration, including StrictMode. No installed/native acceptance or release.
 
 ## Multi-agent quota carousel — 2026-11-06 (PLAN)
 

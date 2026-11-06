@@ -43,3 +43,22 @@ export function usageIsOlder(next: CodexUsage, current: CodexUsage): boolean {
       && next.presentationRevision !== current.presentationRevision) return next.presentationRevision < current.presentationRevision;
   return next.fetchedAt < current.fetchedAt;
 }
+
+// Generations are ordered only inside a source identity, never across providers.
+export function bufferUsage(inbox:Map<string,CodexUsage>,sample:CodexUsage) {
+  const key=JSON.stringify([sample.sourceKey??null,sample.sourceGeneration??null]);
+  const old=inbox.get(key);
+  if(old&&usageIsOlder(sample,old))return;
+  inbox.delete(key);inbox.set(key,sample);
+  // Three live sources plus recent replaced generations; never unbounded history.
+  while(inbox.size>12)inbox.delete(inbox.keys().next().value!);
+}
+export function takeMatchingUsage(inbox:Map<string,CodexUsage>,matches:(sample:CodexUsage)=>boolean):CodexUsage|null {
+  let selected:CodexUsage|null=null;
+  for(const [key,sample] of inbox){
+    if(!matches(sample))continue;
+    inbox.delete(key);
+    if(!selected||!usageIsOlder(sample,selected))selected=sample;
+  }
+  return selected;
+}

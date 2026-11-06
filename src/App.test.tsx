@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
@@ -29,7 +30,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: async (name: string, callback: (event: { payload: unknown }) => void) => {
     tauri.listeners.set(name, callback);
     if (name === 'usage_updated' && tauri.usageRegistration) await tauri.usageRegistration;
-    return () => { tauri.listeners.delete(name); };
+    return () => { if(tauri.listeners.get(name)===callback)tauri.listeners.delete(name); };
   },
 }));
 
@@ -331,6 +332,24 @@ describe('main usage startup', () => {
     await act(async()=>hydration.resolve({...selected,revision:1,effectiveProvider:'codex',sourceKey:'codex',sourceGeneration:0}));expect(screen.getByText('41%')).toBeTruthy();
     act(()=>tauri.listeners.get('usage_updated')!({payload:{...codex,fetchedAt:9999999999,fiveHourRemainingPercent:12}}));expect(screen.queryByText('12%')).toBeNull();
     expect(view.container.querySelector('.overlay-provider svg')?.getAttribute('data-provider')).toBe('claude');expect(tauri.invoke).not.toHaveBeenCalledWith('fetch_usage');
+  });
+
+  it.each([false,true])('keeps early readings in separate source slots with higher foreign generations (StrictMode=%s)',async(strict)=>{
+    const selected:DisplayState={revision:1,settingsRevision:0,effectiveProvider:'codex',manualProvider:'codex',sourceKey:'codex',sourceGeneration:0,carouselEnabled:false,intervalSeconds:8,candidates:[],pauseReasons:[],status:'off'};
+    tauri.invoke.mockImplementation(async(command:string)=>{
+      if(command==='get_settings')return {revision:0,settings:DEFAULT_SETTINGS,sourceKey:'codex',sourceGeneration:0};
+      if(command==='get_display_state')return selected;
+      if(command==='get_dock_state')return {docked:false,edge:null,expanded:true,hidden:false};
+      if(command==='get_last_usage')return {...cached,sourceKey:'codex',sourceGeneration:0};
+      return null;
+    });
+    render(strict?<StrictMode><App/></StrictMode>:<App/>);await screen.findByText('69%');
+    act(()=>{
+      tauri.listeners.get('usage_updated')!({payload:{...cached,fiveHourRemainingPercent:22,sourceKey:'dsh-old',sourceGeneration:8}});
+      tauri.listeners.get('usage_updated')!({payload:{...cached,fiveHourRemainingPercent:41,sourceKey:'claude',sourceGeneration:1}});
+      tauri.listeners.get('display_updated')!({payload:{...selected,revision:2,effectiveProvider:'claude',sourceKey:'claude',sourceGeneration:1}});
+    });
+    expect(await screen.findByText('41%')).toBeTruthy();expect(screen.queryByText('22%')).toBeNull();expect(screen.queryByText('69%')).toBeNull();
   });
 
   it('registers the usage listener before reading cache and does not auto-fetch', async () => {

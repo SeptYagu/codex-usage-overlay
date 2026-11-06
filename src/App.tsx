@@ -9,7 +9,7 @@ import { CodexUsage, DockStateInfo, OverlaySettings, SettingsEnvelope, DEFAULT_S
 import { OverlayView } from './components/OverlayView';
 import { SettingsView } from './components/SettingsView';
 import { TrayMenuView } from './components/TrayMenuView';
-import { sourceBinding, UsageSourceScope, usageMatchesSource, usageSourceScope, usageIsOlder } from './usageSource';
+import { sourceBinding, UsageSourceScope, usageMatchesSource, usageSourceScope, usageIsOlder, bufferUsage, takeMatchingUsage } from './usageSource';
 import { useDisplayState } from './hooks/useDisplayState';
 import { useProviderMonitors } from './hooks/useProviderMonitors';
 import { mergeSettingsPatch, mergePendingPatches, settingsForProvider } from './providerSettings';
@@ -34,7 +34,7 @@ export const App: React.FC = () => {
   const usageEventRevision = useRef(0);
   const sourceScope = useRef<UsageSourceScope | null>(null);
   const currentSettings = useRef(DEFAULT_SETTINGS);
-  const pendingUsage = useRef<CodexUsage | null>(null);
+  const pendingUsage = useRef(new Map<string,CodexUsage>());
   const monitors = useProviderMonitors();
   const display=useDisplayState();
   const currentDisplay=useRef(display);currentDisplay.current=display;
@@ -43,10 +43,10 @@ export const App: React.FC = () => {
     : usageMatchesSource(sample,sourceScope.current);
   useEffect(()=>{
     if(!display)return;
+    const pending=takeMatchingUsage(pendingUsage.current,matchesActive);
     setUsage(current=>{
       const retained=current&&matchesActive(current)?current:null;
-      const pending=pendingUsage.current;
-      if(pending&&matchesActive(pending)){pendingUsage.current=null;return retained&&usageIsOlder(pending,retained)?retained:pending;}
+      if(pending){return retained&&usageIsOlder(pending,retained)?retained:pending;}
       return retained;
     });
   },[display]);
@@ -63,11 +63,10 @@ export const App: React.FC = () => {
     const scope = usageSourceScope(confirmed ? envelope : { revision: envelope.revision, settings: merged }, merged, sourceScope.current);
     sourceScope.current = scope;
     currentSettings.current = merged;
+    const pending = takeMatchingUsage(pendingUsage.current,matchesActive);
     setUsage(current => {
       const retained = current && matchesActive(current) ? current : null;
-      const pending = pendingUsage.current;
-      if (pending && matchesActive(pending)) {
-        pendingUsage.current = null;
+      if (pending) {
         return retained && usageIsOlder(pending, retained) ? retained : pending;
       }
       return retained;
@@ -107,12 +106,7 @@ export const App: React.FC = () => {
       if (!matchesActive(next)) {
         // A sample may arrive before its settings broadcast. Hold it without
         // displaying it; only a matching authoritative source can release it.
-        const pending = pendingUsage.current;
-        // A late old-source event must not evict an already buffered newer
-        // generation while its authoritative settings broadcast is in flight.
-        if (!pending || (next.sourceGeneration ?? -1) >= (pending.sourceGeneration ?? -1)) {
-          pendingUsage.current = next;
-        }
+        bufferUsage(pendingUsage.current,next);
         return;
       }
       setUsage((current) => {
@@ -188,7 +182,7 @@ export const App: React.FC = () => {
       const merged = mergeSettingsPatch(currentSettings.current, patch);
       if (!currentDisplay.current && sourceBinding(merged) !== sourceBinding(currentSettings.current)) {
         sourceScope.current = { binding: sourceBinding(merged), allowLegacy: false };
-        pendingUsage.current = null;
+        pendingUsage.current.clear();
         setUsage(null);
       }
       currentSettings.current = merged;

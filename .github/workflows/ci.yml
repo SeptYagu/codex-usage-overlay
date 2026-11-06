@@ -43,7 +43,11 @@ jobs:
         shell: pwsh
         run: |
           npm run build
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' }
           npm test
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed.' }
+          node scripts/affine-parity-fixture.mjs --check
+          if ($LASTEXITCODE -ne 0) { throw 'Affine parity fixture changed.' }
 
       - name: DSH Companion Offline Security Tests
         shell: pwsh
