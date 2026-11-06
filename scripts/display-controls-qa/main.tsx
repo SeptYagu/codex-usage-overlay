@@ -20,16 +20,17 @@ window.qa = { render: async (settings, edge = null, missing = false, view = 'ove
         };
         const monitors = Object.fromEntries(order.map(provider => [provider, {
             provider, sourceKey: provider, sourceGeneration: 0, revision: 1, monitorEnabled: true,
-            available: true, health: 'current', error: null, usage: samples[provider],
+            available: true, health: 'current', error: null, usage: {...samples[provider],sourceKey:provider,sourceGeneration:0},
         }]));
         setProtectionFixture(fixture);
         const sample = fixture === 'full' ? { ...usage, fiveHourRemainingPercent: 100, weekRemainingPercent: 100 }
             : fixture === 'empty' ? { ...usage, fiveHourRemainingPercent: 0, weekRemainingPercent: 0 }
-            : fixture === 'multi' ? samples[s.provider] : usage;
+            : ['multi','carousel'].includes(fixture) ? samples[s.provider] : usage;
         root.render(view === 'settings' ? <SettingsView settings={s} onPatchSettings={() => { }}/> : view === 'tray'
             ? <TrayMenuView settings={s} onPatchSettings={() => { }}/>
             : <OverlayView settings={s} usage={missing ? null : sample} isLoading={missing}
-                monitors={fixture === 'multi' ? monitors : {}}
+                monitors={['multi','carousel'].includes(fixture) ? monitors : {}}
+                display={fixture==='carousel'?{revision:1,settingsRevision:0,effectiveProvider:s.provider,manualProvider:'codex',sourceKey:s.provider,sourceGeneration:0,carouselEnabled:true,intervalSeconds:8,candidates:order.map(provider=>({provider,sourceKey:provider,sourceGeneration:0})),pauseReasons:[],status:'rotating'}:undefined}
                 onCycleProvider={fixture === 'multi' ? async () => {
                     await window.qa.render({ ...settings, provider: order[(order.indexOf(s.provider) + 1) % 3] }, edge, missing, view, fixture);
                 } : undefined}

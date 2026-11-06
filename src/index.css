@@ -191,3 +191,7 @@ html, body, #root {
 .settings-provider-body { min-height:0; overflow-y:auto; overflow-wrap:anywhere; }
 @media(max-width:1179px) { .settings-shell { height:auto; min-height:100vh; overflow:visible; } .settings-provider-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .settings-provider-body { overflow:visible; } }
 @media(max-width:799px) { .settings-provider-grid { grid-template-columns:minmax(0,1fr); } }
+
+.overlay-source-label {align-self:center;display:flex;flex-direction:column;gap:2px;font-size:11px;font-weight:600;color:var(--overlay-secondary);}
+.overlay-source-label small {font-size:9px;font-weight:400;}
+.overlay-measurements {position:fixed;left:-20000px;top:-20000px;visibility:hidden;pointer-events:none;}

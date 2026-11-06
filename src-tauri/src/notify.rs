@@ -158,7 +158,7 @@ pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Ar
         *status = TrayReadStatus::Success;
         {
             let _tray = state.tray_gate.lock().unwrap_or_else(|p| p.into_inner());
-            if state.is_displayed() { sink.present(crate::tray::tray_presentation(&settings, cached.as_ref(), *status)); }
+            if state.is_displayed() { sink.present(crate::tray::runtime_presentation(state,&settings, cached.as_ref(), *status)); }
         }
         settings.clone()
     };

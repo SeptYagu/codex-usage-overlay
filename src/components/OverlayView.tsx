@@ -3,7 +3,7 @@ import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
-import { CodexUsage, DockStateInfo, OverlaySettings, MonitorSnapshot, Provider } from '../types';
+import { CodexUsage, DockStateInfo, OverlaySettings, MonitorSnapshot, Provider, DisplayState } from '../types';
 import { useTranslation } from 'react-i18next';
 import { ProviderLogo } from './ProviderLogo';
 
@@ -13,6 +13,7 @@ interface OverlayViewProps {
   isLoading: boolean;
   dockState?: DockStateInfo;
   monitors?: Partial<Record<Provider, MonitorSnapshot>>;
+  display?: DisplayState;
   onCycleProvider?: () => Promise<void>;
 }
 
@@ -46,10 +47,13 @@ export function formatBurnRate(rate: number | null | undefined): string {
  */
 const PERCENTAGE_GRID_TICKS = [10, 20, 30, 40, 50, 60, 70, 80, 90];
 
-export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoading, dockState, monitors = {}, onCycleProvider }) => {
+export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoading, dockState, monitors = {}, display, onCycleProvider }) => {
   const { t } = useTranslation();
   const [, setTick] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
+  const measureRef=useRef<HTMLDivElement>(null);
+  const [reservedSize,setReservedSize]=useState({width:0,height:0});
+  const carousel=settings.quotaCarouselEnabled??false;
   const lastSizeRef = useRef({ width: 0, height: 0 });
   // Tracks the dock state and backend size invalidations already accounted for,
   // so a programmatic resize drops the cached measurement exactly once.
@@ -71,6 +75,22 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
   const providerLabel = (provider: Provider) => t(provider === 'claude' ? 'providerClaude' : provider === 'dsh' ? 'providerDsh' : 'providerCodex');
   const logoHint = nextProvider ? t('switchProviderHint', { current: providerLabel(settings.provider), next: providerLabel(nextProvider) })
     : t('singleProviderHint', { current: providerLabel(settings.provider) });
+
+  const interaction=(reason:'hover'|'focus',active:boolean)=>{void invoke('set_display_interaction',{reason,active}).catch(()=>{});};
+  useEffect(()=>{
+    const clear=()=>{interaction('hover',false);interaction('focus',false);};
+    window.addEventListener('blur',clear);window.addEventListener('pagehide',clear);
+    return()=>{window.removeEventListener('blur',clear);window.removeEventListener('pagehide',clear);clear();};
+  },[]);
+  useLayoutEffect(()=>{
+    if(!carousel||collapsed){setReservedSize(current=>current.width||current.height?{width:0,height:0}:current);return;}
+    const nodes=measureRef.current?.children;
+    if(!nodes)return;
+    const sizes=Array.from(nodes).map(el=>el.getBoundingClientRect());
+    const width=Math.ceil(Math.max(0,...sizes.map(r=>r.width)));
+    const height=Math.ceil(Math.max(0,...sizes.map(r=>r.height)));
+    setReservedSize(current=>current.width===width&&current.height===height?current:{width,height});
+  });
 
   // WebView2 renders content at devicePixelRatio = monitor DPI scale x system
   // text scaling (Windows "make text bigger"), while Tauri converts window
@@ -116,11 +136,6 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
     return () => { active = false; if (unlisten) unlisten(); };
   }, []);
 
-  const rawCredit = usage?.creditsDisplay ?? '—';
-  const numericCredit = Number(rawCredit);
-  const formattedCredit = rawCredit.trim() !== '' && Number.isFinite(numericCredit)
-    ? numericCredit.toFixed(2) : rawCredit;
-
   const fitCapsuleSize = useCallback(async () => {
     if (collapsed) return;
     const el = rootRef.current;
@@ -152,7 +167,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
       lastSizeRef.current = { width: 0, height: 0 };
     }
     void fitCapsuleSize();
-  }, [scale, layout, showCredits, claude, showLogo, settings.showFiveHourQuota, settings.showBurnRate, settings.language, usage, fitCapsuleSize, dprComp, dockState, sizeInvalidation]);
+  }, [scale, layout, showCredits, claude, showLogo, reservedSize, settings.showFiveHourQuota, settings.showBurnRate, settings.language, usage, fitCapsuleSize, dprComp, dockState, sizeInvalidation]);
 
   useEffect(() => {
     const el = rootRef.current;
@@ -185,10 +200,12 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
   };
 
   const handleMouseEnter = () => {
+    interaction('hover',true);
     if (dockState?.docked) void invoke('dock_mouse_enter').catch((err) => console.error(err));
   };
 
   const handleMouseLeave = () => {
+    interaction('hover',false);
     if (dockState?.docked) void invoke('dock_mouse_leave').catch((err) => console.error(err));
   };
 
@@ -264,6 +281,8 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
       <div
         ref={rootRef}
         data-layout={layout}
+        onFocusCapture={()=>interaction('focus',true)}
+        onBlurCapture={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node|null))interaction('focus',false);}}
         onMouseDown={handleDragStart}
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
@@ -274,6 +293,8 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
           '--overlay-alpha': (100 - settings.backgroundTransparencyPercent) / 100,
           transform: `scale(${scale / dprComp})`,
           transformOrigin: 'top left',
+          minWidth: carousel&&reservedSize.width?reservedSize.width:undefined,
+          minHeight: carousel&&reservedSize.height?reservedSize.height:undefined,
         } as React.CSSProperties}
         className={`overlay-surface overlay-capsule overlay-${layout}`}
       >
@@ -294,37 +315,46 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
             {layout === 'grouped' && <span aria-hidden="true" className="overlay-divider" />}
           </>
         )}
-        {visibleQuotas.map((quota, index) => (
-          <React.Fragment key={quota.key}>
-            {index > 0 && layout === 'grouped' && <span aria-hidden="true" className="overlay-divider" />}
-            <div className="overlay-quota" role="group" aria-label={quota.key === 'five' ? t('fiveHourLabel') : t('weeklyLabel')}>
-              <div className="overlay-reading">
-                <span className="overlay-label">{quota.label}</span>
-                <span className={`overlay-value overlay-${usageTone(quota.percent)}`}>
-                  {quota.percent === null || quota.percent === undefined ? '--%' : `${quota.percent}%`}
-                </span>
-              </div>
-              <div className="overlay-meta-row">
-                <span className="overlay-countdown">{quota.countdown}</span>
-                {settings.showBurnRate && <span className="overlay-burn-rate" title={settings.provider === 'codex' && quota.key === 'five' ? burnRatePresentation(usage,t) : undefined}>{quota.burnRate}</span>}
-              </div>
-            </div>
-          </React.Fragment>
-        ))}
-        {showCredits && (
-          <>
-            {layout === 'grouped' && <span aria-hidden="true" className="overlay-divider" />}
-            <div className="overlay-credit" role="group" aria-label={t('creditsLabel')}>
-              <div className="overlay-reading">
-                <span className="overlay-label">{layout === 'stacks' ? t('creditsLabel') : 'CR'}</span>
-                <span className="overlay-value">{formattedCredit}</span>
-              </div>
-              {layout === 'stacks' && <span className="overlay-countdown">{t('balanceLabel')}</span>}
-            </div>
-          </>
-        )}
-        {isLoading && <span role="status" aria-label={t('refreshing')} className="overlay-loading" />}
+        <CapsuleReadings settings={settings} usage={usage} isLoading={isLoading} health={monitors[settings.provider]?.health} status={display?.status} />
       </div>
+      {carousel && <div ref={measureRef} aria-hidden="true" className="overlay-measurements">
+        {Array.from(new Set([settings.provider,...(display?.candidates.map(c=>c.provider)??[])])).map(provider=>{
+          const candidate=display?.candidates.find(c=>c.provider===provider);
+          const cached=monitors[provider]?.usage;
+          const sample=provider===settings.provider?usage:cached&&candidate&&cached.sourceKey===candidate.sourceKey&&cached.sourceGeneration===candidate.sourceGeneration?cached:null;
+          return <div key={provider} className={`overlay-surface overlay-capsule overlay-${layout}`}>
+            {showLogo&&<><span className="overlay-provider"><ProviderLogo provider={provider}/></span>{layout==='grouped'&&<span className="overlay-divider"/>}</>}
+            <CapsuleReadings settings={{...settings,provider}} usage={sample} isLoading={false} health={monitors[provider]?.health} status={display?.status}/>
+          </div>;
+        })}
+      </div>}
     </div>
   );
 };
+
+function CapsuleReadings({settings,usage,isLoading,health,status}:{settings:OverlaySettings;usage:CodexUsage|null;isLoading:boolean;health?:MonitorSnapshot['health'];status?:DisplayState['status']}) {
+  const {t}=useTranslation();const layout=settings.overlayLayout;
+  const raw=usage?.creditsDisplay??'—';const numeric=Number(raw);
+  const credit=raw.trim()!==''&&Number.isFinite(numeric)?numeric.toFixed(2):raw;
+  const quotas=[
+    {key:'five',label:layout==='stacks'?t('fiveHourLabel'):'5H',percent:usage?.fiveHourRemainingPercent,countdown:formatResetCountdown(usage?.fiveHourResetsAt),burn:formatBurnRate(usage?.fiveHourBurnRatePerHour)},
+    {key:'week',label:layout==='stacks'?t('weeklyLabel'):'WK',percent:usage?.weekRemainingPercent,countdown:formatResetCountdown(usage?.weekResetsAt,true),burn:formatBurnRate(usage?.weekBurnRatePerHour)},
+  ].filter(q=>q.key!=='five'||settings.showFiveHourQuota);
+  const providerLabel=t(settings.provider==='codex'?'providerCodex':settings.provider==='claude'?'providerClaude':'providerDsh');
+  const healthLabel=health==='failed'&&usage?t('carouselCached'):health==='stale'?t('carouselStale'):!usage?t('carouselUnavailable'):'';
+  return <>
+    {settings.quotaCarouselEnabled&&<span className="overlay-source-label" title={`${providerLabel} · ${t(`carouselStatus_${status??'rotating'}`)}${health?t(`monitorHealth.${health}`):''}`}>{providerLabel}{healthLabel&&<small>{healthLabel}</small>}</span>}
+    {quotas.map((quota,index)=><React.Fragment key={quota.key}>
+      {index>0&&layout==='grouped'&&<span aria-hidden="true" className="overlay-divider"/>}
+      <div className="overlay-quota" role="group" aria-label={quota.key==='five'?t('fiveHourLabel'):t('weeklyLabel')}>
+        <div className="overlay-reading"><span className="overlay-label">{quota.label}</span><span className={`overlay-value overlay-${usageTone(quota.percent)}`}>{quota.percent==null?'--%':`${quota.percent}%`}</span></div>
+        <div className="overlay-meta-row"><span className="overlay-countdown">{quota.countdown}</span>{settings.showBurnRate&&<span className="overlay-burn-rate" title={settings.provider==='codex'&&quota.key==='five'?burnRatePresentation(usage,t):undefined}>{quota.burn}</span>}</div>
+      </div>
+    </React.Fragment>)}
+    {settings.showCredits&&settings.provider!=='claude'&&<>
+      {layout==='grouped'&&<span aria-hidden="true" className="overlay-divider"/>}
+      <div className="overlay-credit" role="group" aria-label={t('creditsLabel')}><div className="overlay-reading"><span className="overlay-label">{layout==='stacks'?t('creditsLabel'):'CR'}</span><span className="overlay-value">{credit}</span></div>{layout==='stacks'&&<span className="overlay-countdown">{t('balanceLabel')}</span>}</div>
+    </>}
+    {isLoading&&<span role="status" aria-label={t('refreshing')} className="overlay-loading"/>}
+  </>;
+}

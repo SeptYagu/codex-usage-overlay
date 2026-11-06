@@ -39,6 +39,9 @@ pub struct AppServices {
     pub audio: OnceLock<crate::audio::AudioHandle>,
     pub owner: std::sync::OnceLock<std::sync::Weak<AppState>>,
     pub displayed_provider: std::sync::atomic::AtomicU8,
+    pub display: StdMutex<crate::display::Controller>,
+    pub display_wake: tokio::sync::Notify,
+    pub carousel_enabled: AtomicBool,
 }
 
 /// One independent quota/protection pipeline. The app-owned context also holds
@@ -102,6 +105,9 @@ impl AppState {
             audio: OnceLock::new(),
             owner: Default::default(),
             displayed_provider: std::sync::atomic::AtomicU8::new(settings.provider.index()),
+            display: StdMutex::new(crate::display::Controller::new(&settings)),
+            display_wake: Default::default(),
+            carousel_enabled: AtomicBool::new(settings.quota_carousel_enabled),
         });
         Self::with_services(config_manager, settings, services, None)
     }
@@ -600,7 +606,7 @@ pub(crate) async fn process_usage_error<S: TrayPresentationSink>(sink: &S, state
     let cached = state.last_usage.lock().await.clone();
     {
         let _tray = state.tray_gate.lock().unwrap_or_else(|p| p.into_inner());
-        if state.is_displayed() { sink.present(crate::tray::tray_presentation(&settings, cached.as_ref(), *status)); }
+        if state.is_displayed() { sink.present(crate::tray::runtime_presentation(state,&settings, cached.as_ref(), *status)); }
     }
 }
 
@@ -617,7 +623,7 @@ pub(crate) fn overlay_geometry_changed(previous: &OverlaySettings, next: &Overla
 
 #[tauri::command]
 pub async fn fetch_usage(state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<UsageEnvelope, String> {
-    let provider = state.settings.lock().await.provider;
+    let provider = crate::display::effective(&state);
     let runtime = crate::monitor::selected(state.inner(), provider);
     if !runtime.monitor_enabled.load(Ordering::Acquire) { return Err("Monitoring is disabled for this provider".into()); }
     let state = &runtime;
@@ -631,7 +637,7 @@ pub async fn fetch_usage(state: State<'_, Arc<AppState>>, app: AppHandle) -> Res
 
 #[tauri::command]
 pub async fn get_last_usage(state: State<'_, Arc<AppState>>) -> Result<Option<UsageEnvelope>, String> {
-    let provider = state.settings.lock().await.provider;
+    let provider = crate::display::effective(&state);
     let runtime = crate::monitor::selected(state.inner(), provider);
     let state = &runtime;
     let _source_commit = state.settings_patch.lock().await;
@@ -964,7 +970,7 @@ pub async fn get_auto_pause_status(
     provider: Option<Provider>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<crate::pause_control::AutoPauseStatus, String> {
-    let provider = provider.unwrap_or(state.settings.lock().await.provider);
+    let provider = provider.unwrap_or_else(||crate::display::effective(&state));
     let runtime = crate::monitor::selected(state.inner(), provider);
     Ok(crate::pause_control::status::snapshot(&runtime).await)
 }
@@ -976,7 +982,7 @@ pub async fn resume_chat(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<String, String> {
-    let provider = provider.unwrap_or(state.settings.lock().await.provider);
+    let provider = provider.unwrap_or_else(||crate::display::effective(&state));
     let runtime = crate::monitor::selected(state.inner(), provider);
     let state = &runtime;
     if state.settings.lock().await.provider != Provider::Codex { return Err("Resume is only supported for the local Codex source".into()); }
@@ -1045,7 +1051,7 @@ fn resume_quota_gate(settings: &OverlaySettings, usage: &CodexUsage, fresh: bool
 
 #[tauri::command]
 pub async fn cancel_resume_plans(provider: Option<Provider>, state: State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
-    let provider = provider.unwrap_or(state.settings.lock().await.provider);
+    let provider = provider.unwrap_or_else(||crate::display::effective(&state));
     let runtime = crate::monitor::selected(state.inner(), provider);
     let state = &runtime;
     if state.settings.lock().await.provider != Provider::Codex { return Err("Resume is only supported for the local Codex source".into()); }
@@ -1084,7 +1090,8 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             | "weeklyResetNotification" | "autoEdgeHide" | "mousePassthrough" | "showPercentageGrid"
             | "showFiveHourQuota" | "showBurnRate" | "autoPauseOnLowQuota"
             | "autoResumeAfterQuotaReset" | "includePrereleaseUpdates" | "claudeLivePolling"
-            | "showProviderLogo" => value.is_boolean(),
+            | "showProviderLogo" | "quotaCarouselEnabled" => value.is_boolean(),
+            "quotaCarouselIntervalSeconds" => value.as_u64().is_some_and(|n|(3..=30).contains(&n)),
             "autoStart" => allow_auto_start && value.is_boolean(),
             "autoPauseFiveHourThresholdPercent" => value.as_u64().is_some_and(|n| (1..=15).contains(&n)),
             "autoPauseWeeklyThresholdPercent" => value.as_u64().is_some_and(|n| (1..=10).contains(&n)),
@@ -1093,7 +1100,7 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "provider" => matches!(value.as_str(), Some("codex" | "claude" | "dsh")),
             "providerPreferences" => value.as_object().is_some_and(|providers| !providers.is_empty() && providers.iter().all(|(provider, fields)| {
                 matches!(provider.as_str(), "codex" | "claude" | "dsh") && fields.as_object().is_some_and(|fields| !fields.is_empty() && fields.iter().all(|(key, value)| match key.as_str() {
-                    "monitorEnabled" | "protectionEnabled" => value.is_boolean(),
+                    "monitorEnabled" | "protectionEnabled" | "carouselIncluded" => value.is_boolean(),
                     "fiveHourResetNotification" | "weeklyResetNotification" => value.is_boolean(),
                     "refreshIntervalSeconds" => value.as_u64().is_some_and(|v| (15..=3600).contains(&v)),
                     "fiveHourSoundMode" | "weeklySoundMode" => matches!(value.as_str(), Some("windows" | "custom")),
@@ -1311,10 +1318,15 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     let _patch_guard = state.settings_patch.lock().await;
     let previous_dsh_enabled = dsh_monitor_enabled(state, &*state.settings.lock().await);
     let patch = if patch == serde_json::json!({"cycleProvider": true}) {
-        let current = state.settings.lock().await.provider;
+        let current = crate::display::effective(state);
         let next = state.monitors.get().and_then(|r| r.next(current)).ok_or("No other monitored provider is available")?;
         serde_json::json!({"provider": next})
     } else { patch };
+    // Freeze the visible page in the same successful save that turns rotation off.
+    let mut patch=patch;
+    if patch.get("quotaCarouselEnabled")==Some(&Value::Bool(false)) && state.settings.lock().await.quota_carousel_enabled && patch.get("provider").is_none() {
+        patch.as_object_mut().unwrap().insert("provider".into(),serde_json::to_value(crate::display::effective(state)).unwrap());
+    }
     let changes = validate_settings_patch(&patch, allow_auto_start)?;
     if changes.contains_key("dshAccountId") || changes.contains_key("dshSessionIds") {
         if state.monitors.get().is_some() {
@@ -1418,6 +1430,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     }
     if let Some(registry) = state.monitors.get() {
         registry.synchronize(state, &envelope.settings).await;
+        crate::display::settings_committed(sink,state,&envelope.settings,changes.contains_key("provider")).await;
         if changes.contains_key("fiveHourBurnRateAlgorithm") {
             let codex=registry.get(Provider::Codex);
             let _commit=codex.settings_patch.lock().await;
@@ -1687,7 +1700,7 @@ pub async fn pick_sound_file(kind: crate::notify::QuotaKind, app: AppHandle) -> 
 pub async fn preview_sound(kind: crate::notify::QuotaKind, provider: Option<Provider>, playback_id: Option<String>, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let provider = provider.unwrap_or(state.settings.lock().await.provider);
+        let provider = provider.unwrap_or_else(||crate::display::effective(&state));
         let settings = state.settings.lock().await.for_provider(provider);
         let path = match kind {
             crate::notify::QuotaKind::FiveHour => settings.five_hour_sound_path.clone(),

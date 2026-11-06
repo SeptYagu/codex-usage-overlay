@@ -51,6 +51,7 @@ impl Provider {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderPreference {
     pub monitor_enabled: bool,
+    pub carousel_included: bool,
     pub protection_enabled: bool,
     pub five_hour_threshold_percent: u32,
     pub weekly_threshold_percent: u32,
@@ -65,7 +66,7 @@ pub struct ProviderPreference {
     present_fields: std::collections::BTreeSet<String>,
 }
 impl Default for ProviderPreference {
-    fn default() -> Self { Self { monitor_enabled: true, protection_enabled: false,
+    fn default() -> Self { Self { monitor_enabled: true, carousel_included: true, protection_enabled: false,
         five_hour_threshold_percent: 5, weekly_threshold_percent: 2,
         refresh_interval_seconds: 60, five_hour_reset_notification: true, weekly_reset_notification: true,
         five_hour_sound_mode: SoundMode::Windows, weekly_sound_mode: SoundMode::Windows,
@@ -84,6 +85,7 @@ impl<'de> Deserialize<'de> for ProviderPreference {
                 }
             }
         }; }
+        field!("carouselIncluded", carousel_included);
         field!("monitorEnabled", monitor_enabled); field!("protectionEnabled", protection_enabled);
         field!("fiveHourThresholdPercent", five_hour_threshold_percent); field!("weeklyThresholdPercent", weekly_threshold_percent);
         field!("refreshIntervalSeconds", refresh_interval_seconds);
@@ -134,9 +136,22 @@ pub fn same_source(left: &OverlaySettings, right: &OverlaySettings) -> bool {
                 && left.dsh_session_ids == right.dsh_session_ids))
 }
 
+fn default_carousel_interval() -> u32 { 8 }
+fn recover_carousel_interval<'de,D:serde::Deserializer<'de>>(d:D)->Result<u32,D::Error>{
+    let v=serde_json::Value::deserialize(d)?;
+    Ok(v.as_u64().filter(|v|(3..=30).contains(v)).map(|v|v as u32).unwrap_or(8))
+}
+fn recover_carousel_enabled<'de,D:serde::Deserializer<'de>>(d:D)->Result<bool,D::Error>{
+    Ok(serde_json::Value::deserialize(d)?.as_bool().unwrap_or(false))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlaySettings {
+    #[serde(default,deserialize_with="recover_carousel_enabled")]
+    pub quota_carousel_enabled: bool,
+    #[serde(default="default_carousel_interval",deserialize_with="recover_carousel_interval")]
+    pub quota_carousel_interval_seconds: u32,
     #[serde(default, deserialize_with="recover_algorithm")]
     pub five_hour_burn_rate_algorithm: FiveHourBurnRateAlgorithm,
     #[serde(default, deserialize_with="recover_message")]
@@ -264,6 +279,7 @@ fn default_auto_pause_weekly_threshold() -> u32 {
 impl Default for OverlaySettings {
     fn default() -> Self {
         Self {
+            quota_carousel_enabled: false, quota_carousel_interval_seconds: 8,
             five_hour_burn_rate_algorithm: FiveHourBurnRateAlgorithm::Legacy,
             auto_pause_five_hour_message: crate::pause_message::default_pause("auto"),
             auto_pause_weekly_message: crate::pause_message::default_pause("auto"),
@@ -310,6 +326,7 @@ impl Default for OverlaySettings {
 impl OverlaySettings {
     pub fn migrate(&mut self) {
         if self.schema_version > 3 { return; }
+        if !(3..=30).contains(&self.quota_carousel_interval_seconds){self.quota_carousel_interval_seconds=8;}
         if !crate::pause_message::valid_message(&self.auto_pause_five_hour_message) { self.auto_pause_five_hour_message=crate::pause_message::default_pause(&self.language); }
         if !crate::pause_message::valid_message(&self.auto_pause_weekly_message) { self.auto_pause_weekly_message=crate::pause_message::default_pause(&self.language); }
         let empty_preferences = self.provider_preferences.is_empty();
@@ -381,6 +398,7 @@ impl OverlaySettings {
         let mut scoped = self.clone();
         let preference = self.preference(provider);
         scoped.provider = provider;
+        scoped.quota_carousel_enabled=false;scoped.quota_carousel_interval_seconds=8;
         if provider != Provider::Codex {
             scoped.five_hour_burn_rate_algorithm=FiveHourBurnRateAlgorithm::Legacy;
             scoped.auto_pause_five_hour_message=String::new();scoped.auto_pause_weekly_message=String::new();
@@ -1047,5 +1065,17 @@ mod partial_migration_repair_tests {
             assert_eq!(p.refresh_interval_seconds,47); assert_eq!(p.five_hour_sound_mode,SoundMode::Custom);
             assert_eq!(p.five_hour_sound_path,None);
         }
+    }
+}
+
+#[cfg(test)]
+mod carousel_settings_tests {
+    use super::*;
+    #[test]
+    fn carousel_recovers_only_invalid_fields_and_preserves_every_integer_interval() {
+        let s:OverlaySettings=serde_json::from_value(serde_json::json!({"quotaCarouselEnabled":"yes","quotaCarouselIntervalSeconds":2,"providerPreferences":{"claude":{"carouselIncluded":false,"refreshIntervalSeconds":47}}})).unwrap();
+        assert!(!s.quota_carousel_enabled);assert_eq!(s.quota_carousel_interval_seconds,8);assert!(!s.preference(Provider::Claude).carousel_included);assert_eq!(s.preference(Provider::Claude).refresh_interval_seconds,47);
+        for interval in 3..=30 {let s:OverlaySettings=serde_json::from_value(serde_json::json!({"quotaCarouselIntervalSeconds":interval})).unwrap();assert_eq!(s.quota_carousel_interval_seconds,interval);}
+        for invalid in [serde_json::json!(3.5),serde_json::json!(31),serde_json::json!("8"),serde_json::Value::Null]{let s:OverlaySettings=serde_json::from_value(serde_json::json!({"quotaCarouselIntervalSeconds":invalid})).unwrap();assert_eq!(s.quota_carousel_interval_seconds,8);}
     }
 }

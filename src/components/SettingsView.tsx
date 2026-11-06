@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { OverlaySettings, Provider, ProviderPreference, SettingsPatch } from '../types';
+import { OverlaySettings, Provider, ProviderPreference, SettingsPatch, DisplayState } from '../types';
 import { providerPreference, settingsForProvider } from '../providerSettings';
 import { useProviderMonitors } from '../hooks/useProviderMonitors';
 import { APP_VERSION } from '../version';
@@ -14,11 +14,12 @@ import { DshConnectionView } from './DshConnection';
 
 interface SettingsViewProps {
   settings: OverlaySettings;
+  display?: DisplayState;
   saveErrors?: string[];
   onPatchSettings: (patch: SettingsPatch, debounce?: boolean) => void;
 }
 
-export const SettingsView = ({ settings, onPatchSettings, saveErrors = [] }: SettingsViewProps) => {
+export const SettingsView = ({ settings, onPatchSettings, saveErrors = [], display }: SettingsViewProps) => {
   const { t } = useTranslation();
   const monitors = useProviderMonitors();
   const [isInstalled, setIsInstalled] = useState(false);
@@ -35,14 +36,23 @@ export const SettingsView = ({ settings, onPatchSettings, saveErrors = [] }: Set
     </header>
     <details className="settings-common shrink-0 rounded-lg border border-slate-200 dark:border-slate-700 p-3">
       <summary className="cursor-pointer font-semibold text-sm">{t('commonSettings')}</summary>
+      <div className="space-y-2 mt-3" data-carousel-settings>
+        <label className="flex items-center justify-between text-sm font-semibold">{t('quotaCarouselEnabled')}<input type="checkbox" className="accent-cyan-500" checked={settings.quotaCarouselEnabled??false} onChange={e=>onPatchSettings({quotaCarouselEnabled:e.target.checked})}/></label>
+        <div className="flex justify-between text-sm"><label htmlFor="carousel-interval">{t('quotaCarouselInterval')}</label><span className="font-mono text-cyan-600">{settings.quotaCarouselIntervalSeconds??8} {t('seconds')}</span></div>
+        <input id="carousel-interval" type="range" min="3" max="30" step="1" value={settings.quotaCarouselIntervalSeconds??8} onChange={e=>onPatchSettings({quotaCarouselIntervalSeconds:Number(e.target.value)},true)} className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500" />
+        <div className="flex justify-between text-[11px] text-slate-400"><span>3 {t('seconds')}</span><span>{t('carouselDefault')}</span><span>30 {t('seconds')}</span></div>
+        <p className="text-xs text-slate-500">{t('carouselHint')}</p>
+        {display?.carouselEnabled && <p role="status" className="text-xs text-cyan-600">{t(`carouselStatus_${display.status}`)} · {display.candidates.length} {t('carouselSources')}</p>}
+      </div>
       <SettingsPanel {...shared} common configurationProvider={settings.provider} />
     </details>
     <main className="settings-provider-grid">
       {(['codex', 'claude', 'dsh'] as Provider[]).map(provider => <section key={provider} data-provider-settings={provider} aria-label={t(provider === 'codex' ? 'providerCodex' : provider === 'claude' ? 'providerClaude' : 'providerDsh')} className="settings-provider-column rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/30">
         <header className="flex items-center justify-between gap-2 p-3 border-b border-slate-200 dark:border-slate-700">
           <h3 className="font-semibold text-sm">{t(provider === 'codex' ? 'providerCodex' : provider === 'claude' ? 'providerClaude' : 'providerDsh')}</h3>
-          <button type="button" aria-pressed={settings.provider === provider} disabled={!monitors[provider]?.available} onClick={() => onPatchSettings({provider})} className="text-xs rounded border px-2 py-1 disabled:opacity-50">{t(settings.provider === provider ? 'currentlyDisplayed' : 'displayThisProvider')}</button>
+          <button type="button" aria-pressed={(display?.effectiveProvider ?? settings.provider) === provider} disabled={!monitors[provider]?.available} onClick={() => onPatchSettings({provider})} className="text-xs rounded border px-2 py-1 disabled:opacity-50">{t((display?.effectiveProvider ?? settings.provider) === provider ? 'currentlyDisplayed' : 'displayThisProvider')}</button>
         </header>
+        <label className="flex items-center justify-between gap-2 p-3 text-xs">{t('carouselIncluded')}<input type="checkbox" className="accent-cyan-500" checked={providerPreference(settings,provider).carouselIncluded??true} onChange={e=>onPatchSettings({providerPreferences:{[provider]:{carouselIncluded:e.target.checked}}})}/></label>
         <SettingsPanel {...shared} configurationProvider={provider} />
       </section>)}
     </main>

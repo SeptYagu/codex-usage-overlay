@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTranslation } from 'react-i18next';
-import { OverlaySettings } from '../types';
+import { OverlaySettings, DisplayState } from '../types';
 import { APP_VERSION } from '../version';
 import { ProtectionStatusView } from './ProtectionStatus';
 
@@ -20,6 +20,7 @@ interface UpdateProgress {
 
 interface TrayMenuViewProps {
   settings: OverlaySettings;
+  display?: DisplayState;
   onPatchSettings: (patch: Partial<OverlaySettings>) => void;
 }
 
@@ -92,7 +93,7 @@ type UpdateState =
   | { kind: 'installing'; progress: UpdateProgress }
   | { kind: 'error'; update?: UpdateInfo };
 
-export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSettings }) => {
+export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSettings, display }) => {
   const { t } = useTranslation();
   const [isInstalled, setIsInstalled] = useState(false);
   const [languageOpen, setLanguageOpen] = useState(false);
@@ -290,6 +291,7 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
   return (
     <div className="overflow-y-auto bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 p-2.5 font-sans select-none" style={{ maxHeight: maxCssHeight }}>
       <div ref={menuRef} role="menu" aria-label={t('menuSettings')} className="space-y-0.5">
+        {display?.carouselEnabled&&<div className="tray-menu-item text-xs text-slate-500" role="status">{t(settings.provider==='codex'?'providerCodex':settings.provider==='claude'?'providerClaude':'providerDsh')} · {t(`carouselStatus_${display.status}`)}</div>}
         <ProtectionStatusView settings={settings} compact />
         <button className="tray-menu-item" role="menuitem" onClick={() => runMenuAction(() => invoke('toggle_overlay_window'))}>
           {t('menuToggleOverlay')}

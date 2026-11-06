@@ -4,6 +4,22 @@ import { initReactI18next } from 'react-i18next';
 const resources = {
   'en-US': {
     translation: {
+      quotaCarouselEnabled: "Automatically rotate quotas",
+      quotaCarouselInterval: "Rotation interval",
+      seconds: "sec",
+      carouselDefault: "Default: 8 sec",
+      carouselHint: "Rotates only selected, monitored providers with fresh readings. Hover, focus, dragging, menus and hidden or collapsed views pause rotation; manual selection holds for 30 seconds.",
+      carouselIncluded: "Include in quota rotation",
+      carouselSources: "eligible providers",
+      carouselStatus_off: "Rotation off",
+      carouselStatus_waiting: "Waiting for at least two eligible providers",
+      carouselStatus_paused: "Rotation paused",
+      carouselStatus_manualHold: "Manual selection · 30-second hold",
+      carouselStatus_rotating: "Automatic rotation",
+      carouselCached: "Cached",
+      carouselStale: "Older reading",
+      carouselUnavailable: "No reading",
+
       burnLearning_observationUnavailable: "New learning paused: no current observation",
 
       settingsSaveFailed: "{{target}} settings could not be saved. Saved values have been restored; please retry.",
@@ -252,6 +268,22 @@ const resources = {
   },
   'zh-CN': {
     translation: {
+      quotaCarouselEnabled: "自动轮播额度",
+      quotaCarouselInterval: "轮播间隔",
+      seconds: "秒",
+      carouselDefault: "默认 8 秒",
+      carouselHint: "只轮播已勾选、已启用监控且读数新鲜的来源。悬停、焦点、拖动、菜单及隐藏或收起时暂停；手动选择后停留 30 秒。",
+      carouselIncluded: "参与额度轮播",
+      carouselSources: "个合格来源",
+      carouselStatus_off: "轮播已关闭",
+      carouselStatus_waiting: "待机：至少需要两个合格来源",
+      carouselStatus_paused: "轮播已暂停",
+      carouselStatus_manualHold: "手动选择 · 停留 30 秒",
+      carouselStatus_rotating: "自动轮播中",
+      carouselCached: "缓存读数",
+      carouselStale: "较旧读数",
+      carouselUnavailable: "暂无读数",
+
       burnLearning_observationUnavailable: "新学习暂停：缺少有效观察",
 
       settingsSaveFailed: "{{target}} 设置保存失败，已恢复已保存的值，请重试。",
@@ -498,6 +530,22 @@ const resources = {
   },
   'zh-Hant': {
     translation: {
+      quotaCarouselEnabled: "自動輪播額度",
+      quotaCarouselInterval: "輪播間隔",
+      seconds: "秒",
+      carouselDefault: "預設 8 秒",
+      carouselHint: "只輪播已勾選、已啟用監控且讀數新鮮的來源。懸停、焦點、拖動、選單及隱藏或收起時暫停；手動選擇後停留 30 秒。",
+      carouselIncluded: "參與額度輪播",
+      carouselSources: "個合格來源",
+      carouselStatus_off: "輪播已關閉",
+      carouselStatus_waiting: "待機：至少需要兩個合格來源",
+      carouselStatus_paused: "輪播已暫停",
+      carouselStatus_manualHold: "手動選擇 · 停留 30 秒",
+      carouselStatus_rotating: "自動輪播中",
+      carouselCached: "快取讀數",
+      carouselStale: "較舊讀數",
+      carouselUnavailable: "暫無讀數",
+
       burnLearning_observationUnavailable: "新學習暫停：缺少有效觀察",
 
       settingsSaveFailed: "{{target}} 設定儲存失敗，已恢復原值，請重試。",

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import { mergeSettingsPatch } from './providerSettings';
 import i18n, { matchSupportedLocale } from './i18n';
-import { CodexUsage, DEFAULT_SETTINGS, OverlaySettings, SettingsEnvelope } from './types';
+import { CodexUsage, DEFAULT_SETTINGS, OverlaySettings, SettingsEnvelope, DisplayState } from './types';
 
 const tauri = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -310,6 +310,27 @@ describe('main usage startup', () => {
     act(() => tauri.listeners.get('monitor_updated')!({ payload: snapshot('claude', { ...claude, fiveHourRemainingPercent: 40 }, 4) }));
     expect(screen.getByText('40%')).toBeTruthy();
     expect(tauri.invoke).not.toHaveBeenCalledWith('fetch_usage');
+  });
+
+  it('orders display events, rejects mismatched source generations and keeps auto pages through ordinary settings saves',async()=>{
+    const hydration=deferred<DisplayState>();
+    const codex={...cached,sourceKey:'codex',sourceGeneration:0};
+    const claude={...cached,fiveHourRemainingPercent:41,sourceKey:'claude',sourceGeneration:1};
+    const selected:DisplayState={revision:2,settingsRevision:0,effectiveProvider:'claude',manualProvider:'codex',sourceKey:'claude',sourceGeneration:1,carouselEnabled:false,intervalSeconds:8,candidates:[],pauseReasons:[],status:'off'};
+    tauri.invoke.mockImplementation(async(command:string)=>{
+      if(command==='get_settings')return {revision:0,settings:DEFAULT_SETTINGS,sourceKey:'codex',sourceGeneration:0};
+      if(command==='get_display_state')return hydration.promise;
+      if(command==='get_dock_state')return {docked:false,edge:null,expanded:true,hidden:false};
+      if(command==='get_monitor_snapshots')return [{provider:'codex',sourceKey:'codex',sourceGeneration:0,revision:1,monitorEnabled:true,available:true,health:'current',error:null,usage:codex},{provider:'claude',sourceKey:'claude',sourceGeneration:0,revision:2,monitorEnabled:true,available:true,health:'current',error:null,usage:{...claude,sourceGeneration:0}}];
+      return null;
+    });
+    const view=render(<App/>);await screen.findByText('69%');
+    act(()=>tauri.listeners.get('display_updated')!({payload:selected}));expect(screen.queryByText('69%')).toBeNull();expect(screen.queryByText('41%')).toBeNull();
+    act(()=>tauri.listeners.get('usage_updated')!({payload:claude}));expect(screen.getByText('41%')).toBeTruthy();
+    act(()=>tauri.listeners.get('settings_updated')!({payload:{revision:1,settings:{...DEFAULT_SETTINGS,language:'en-US'},sourceKey:'codex',sourceGeneration:0}}));expect(screen.getByText('41%')).toBeTruthy();
+    await act(async()=>hydration.resolve({...selected,revision:1,effectiveProvider:'codex',sourceKey:'codex',sourceGeneration:0}));expect(screen.getByText('41%')).toBeTruthy();
+    act(()=>tauri.listeners.get('usage_updated')!({payload:{...codex,fetchedAt:9999999999,fiveHourRemainingPercent:12}}));expect(screen.queryByText('12%')).toBeNull();
+    expect(view.container.querySelector('.overlay-provider svg')?.getAttribute('data-provider')).toBe('claude');expect(tauri.invoke).not.toHaveBeenCalledWith('fetch_usage');
   });
 
   it('registers the usage listener before reading cache and does not auto-fetch', async () => {

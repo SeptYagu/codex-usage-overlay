@@ -24,6 +24,7 @@ export interface CodexUsage {
 export type Provider = 'codex' | 'dsh' | 'claude';
 
 export interface ProviderPreference {
+  carouselIncluded?: boolean;
   monitorEnabled: boolean;
   protectionEnabled: boolean;
   fiveHourThresholdPercent: number;
@@ -54,6 +55,8 @@ export interface MonitorSnapshot {
 }
 
 export interface OverlaySettings {
+  quotaCarouselEnabled?: boolean;
+  quotaCarouselIntervalSeconds?: number;
   autoPauseFiveHourMessage?: string;
   autoPauseWeeklyMessage?: string;
   fiveHourBurnRateAlgorithm?: FiveHourBurnRateAlgorithm;
@@ -114,6 +117,7 @@ export interface DockStateInfo {
 }
 
 export const DEFAULT_SETTINGS: OverlaySettings = {
+  quotaCarouselEnabled: false, quotaCarouselIntervalSeconds: 8,
   provider: 'codex',
   dshBaseUrl: '',
   dshInstanceId: '',
@@ -253,4 +257,13 @@ export interface ClaudeConnectionStatus {
   error: string | null;
   readFailure: string | null;
   readHttpStatus: number | null;
+}
+
+export interface DisplayState {
+  revision: number; settingsRevision: number;
+  effectiveProvider: Provider; manualProvider: Provider;
+  sourceKey: string; sourceGeneration: number;
+  carouselEnabled: boolean; intervalSeconds: number;
+  candidates: Array<{provider: Provider; sourceKey: string; sourceGeneration: number}>;
+  pauseReasons: string[]; status: 'off'|'waiting'|'paused'|'manualHold'|'rotating';
 }

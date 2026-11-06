@@ -439,3 +439,13 @@ it('cycles through available providers on the logo without beginning a drag', as
   fireEvent.contextMenu(logo);
   expect(tauri.invoke).toHaveBeenCalledWith('show_overlay_menu');
 });
+
+it('identifies carousel sources with the logo hidden and correlates hover and focus pauses',async()=>{
+  const view=render(<OverlayView settings={{...DEFAULT_SETTINGS,quotaCarouselEnabled:true,showProviderLogo:false,language:'en-US'}} usage={usage} isLoading={false}/>);
+  await act(async()=>{});const capsule=view.container.querySelector('.overlay-shell > .overlay-capsule')!;
+  expect(within(capsule as HTMLElement).getByText('Local Codex')).toBeTruthy();expect(view.queryByRole('button')).toBeNull();
+  fireEvent.mouseEnter(capsule);expect(tauri.invoke).toHaveBeenCalledWith('set_display_interaction',{reason:'hover',active:true});
+  fireEvent.focus(capsule);expect(tauri.invoke).toHaveBeenCalledWith('set_display_interaction',{reason:'focus',active:true});
+  fireEvent.mouseLeave(capsule);expect(tauri.invoke).toHaveBeenCalledWith('set_display_interaction',{reason:'hover',active:false});
+  view.unmount();expect(tauri.invoke).toHaveBeenCalledWith('set_display_interaction',{reason:'focus',active:false});
+});

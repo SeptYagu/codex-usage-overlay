@@ -11,6 +11,7 @@ mod notify;
 mod pause_control;
 mod pause_message;
 mod presentation;
+mod display;
 mod polling;
 mod monitor;
 mod tray;
@@ -129,6 +130,8 @@ pub fn run() {
             commands::get_settings,
             pause_message::get_pause_templates,
             monitor::get_monitor_snapshots,
+            display::get_display_state,
+            display::set_display_interaction,
             monitor::cycle_display_provider,
             commands::dsh_discover,
             commands::dsh_connection_status,
@@ -248,6 +251,7 @@ pub fn run() {
                 dock::menu_changed(&menu_app, &menu_state, false);
             });
 
+            display::start(app.handle(), &app_state_clone);
             monitor::start(app.handle(), &app_state_clone);
             dsh::auto::start(app.handle().clone(), app_state_clone.clone());
             let status_handle = app.handle().clone();

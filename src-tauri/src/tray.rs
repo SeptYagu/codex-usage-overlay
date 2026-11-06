@@ -34,6 +34,9 @@ pub struct TrayPresentation {
 pub trait TrayPresentationSink {
     fn present(&self, presentation: TrayPresentation);
     fn app_handle(&self) -> Option<&AppHandle>;
+    fn publish_display(&self, display:&crate::display::Snapshot) {
+        if let Some(app)=self.app_handle(){let _=app.emit("display_updated",display);}
+    }
     fn publish_usage(&self, usage:crate::commands::UsageEnvelope) {
         if let Some(app)=self.app_handle(){let _=app.emit("usage_updated",usage);}
     }
@@ -123,6 +126,14 @@ pub fn tray_presentation(
     }
 }
 
+/// Rotation must identify local Codex just as clearly as the other providers.
+/// This atomic flag avoids taking the display mutex under the tray gate.
+pub fn runtime_presentation(state:&crate::commands::AppState,settings:&OverlaySettings,usage:Option<&CodexUsage>,status:TrayReadStatus)->TrayPresentation {
+    let mut frame=tray_presentation(settings,usage,status);
+    if state.carousel_enabled.load(Ordering::Acquire)&&settings.provider==crate::config::Provider::Codex&&!frame.tooltip.contains("Codex") {frame.tooltip=format!("Codex | {}",frame.tooltip);}
+    frame
+}
+
 /// Lock settings first in every presentation entry point so refresh/settings
 /// races cannot repaint a saved new preference with an older snapshot.
 pub async fn repaint_tray<S: TrayPresentationSink>(sink: &S, state: &crate::commands::AppState) {
@@ -135,7 +146,7 @@ pub async fn repaint_tray<S: TrayPresentationSink>(sink: &S, state: &crate::comm
     let settings = state.settings.lock().await;
     let status = state.tray_read_status.lock().await;
     let usage = state.last_usage.lock().await;
-    let mut presentation = tray_presentation(&settings, usage.as_ref(), *status);
+    let mut presentation = runtime_presentation(state,&settings, usage.as_ref(), *status);
     if protection.enabled {
         presentation.tooltip.push_str("\n");
         presentation.tooltip.push_str(protection.tooltip(&settings.language));

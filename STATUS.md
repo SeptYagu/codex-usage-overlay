@@ -2,12 +2,14 @@
 
 ## Three-plan implementation — 2026-11-06 (IN PROGRESS)
 
-- [Implementation and review log](docs/handoff/2026-11-06-three-plan-implementation.md): independent settings implementation, source review and repairs are complete; Codex customization and the quota carousel follow in order.
+- [Implementation and review log](docs/handoff/2026-11-06-three-plan-implementation.md): independent settings and Codex customization have completed implementation, review and repairs. Carousel implementation is complete; its review and repair follow.
 - Schema 3 and three fixed settings columns provide provider-specific refresh, notifications and audio preferences. Frontend 165/build, Rust 449 + 10 plus an explicit Registry isolation regression, Edge 634 + 252 and packaging 6 pass. Native installed-window/audio acceptance remains unperformed. No release or installed application changes.
 - Repair verification: frontend 167/build and Rust library 452 pass (8 existing ignored). Correlated playback errors, late async failures and partial migrations are covered; a controlled mutation demonstrates the preview race regression detects the old defect.
 - Codex customization source milestone: custom messages/absolute continuation templates, quota-cycle deduplication with unknown-submission suppression, selectable Classic/Weighted/continuous Personalized display and cache-only projection. Frontend 173/build and Rust library 461 pass; 13 regenerated replay evidence files remain byte-identical. Review and repair completed: Rust 467, frontend 176/build and the 96-case independent synthetic parity check pass. Response correlation, unknown delivery telemetry, cancellation gates, actual learning cadence and visible capacity refusal are covered. No live delivery or task creation.
 
-## Multi-agent quota carousel — 2026-11-06 (PLAN ONLY)
+- Carousel source milestone: opt-in rotation, provider participation, a 3–30-second slider, effective/manual selection separation, pause aggregation, identity/freshness filtering and stable measured capsule sizing. Frontend 181/build, Rust 476 (8 ignored) and Edge 634 + 252 + 200 pass. No installed/native acceptance or release.
+
+## Multi-agent quota carousel — 2026-11-06 (PLAN)
 
 - [Implementation plan](docs/handoff/2026-11-06-quota-carousel-plan.md) defines opt-in display rotation among eligible Codex/Claude/DSH sources, a matching settings slider from 3–30 seconds in one-second steps (default eight), per-provider participation, 30-second manual hold and interaction/visibility pauses. Slider saves use existing debounce behavior; only successfully committed intervals change scheduling.
 - Introduces a single runtime display coordinator distinct from persisted manual selection; requires fresh identity-matched cached readings, consistent overlay/tray/refresh targets and zero automatic settings writes or forced quota reads.

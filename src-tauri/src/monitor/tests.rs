@@ -25,6 +25,7 @@ fn owner() -> (Arc<AppState>, std::path::PathBuf) {
 
 #[derive(Default)]
 struct Source {
+    display_events:StdMutex<Vec<crate::display::Snapshot>>,
     usage_events:StdMutex<Vec<crate::commands::UsageEnvelope>>,
     frames: StdMutex<Vec<Frame>>,
     reads: AtomicUsize,
@@ -35,6 +36,7 @@ struct Frame {
     pixels: Vec<u8>,
 }
 impl TrayPresentationSink for Source {
+    fn publish_display(&self,snapshot:&crate::display::Snapshot){self.display_events.lock().unwrap().push(snapshot.clone());}
     fn publish_usage(&self,usage:crate::commands::UsageEnvelope){self.usage_events.lock().unwrap().push(usage);}
     fn present(&self, frame: TrayPresentation) {
         self.frames.lock().unwrap().push(Frame {
@@ -581,4 +583,60 @@ async fn fast_protection_cadence_does_not_report_learning_paused_from_the_normal
     }
     assert_eq!(source.reads.load(Ordering::SeqCst),1);
     registry.shutdown();drop(codex);drop(owner);std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn carousel_ticks_publish_effective_cache_selection_without_writes_reads_or_runtime_changes() {
+    let (owner,dir)=owner();let source=Source::default();let registry=owner.monitors.get().unwrap();
+    for state in registry.all(){refresh_usage(&source,&state).await.unwrap();}
+    crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselEnabled":true}),false).await.unwrap();
+    let saved=std::fs::read(owner.config_manager.runtime_dir().join("settings.json")).unwrap();
+    let baseline:Vec<_>=registry.all().into_iter().map(|s|(s.settings_revision.load(Ordering::Acquire),s.source_generation.load(Ordering::Acquire),std::fs::read(s.config_manager.burn_rate_state_path()).unwrap())).collect();
+    let now=std::time::Instant::now();let revision=owner.settings_revision.load(Ordering::Acquire);
+    for (offset,provider) in [(9,Provider::Claude),(18,Provider::Dsh),(27,Provider::Codex)] {
+        let snapshot=crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(offset),false).await;
+        assert_eq!(snapshot.effective_provider,provider);assert_eq!(crate::display::effective(&owner),provider);
+        assert_eq!(snapshot.manual_provider,Provider::Codex);assert_eq!(snapshot.candidates.len(),3);
+        assert!(registry.get(provider).is_displayed());
+        assert!(source.frames.lock().unwrap().last().unwrap().tooltip.contains(match provider{Provider::Claude=>"Claude",Provider::Dsh=>"DSH",_=>"Codex"}));
+    }
+    assert_eq!(owner.settings_revision.load(Ordering::Acquire),revision);assert_eq!(source.reads.load(Ordering::Acquire),3);
+    assert_eq!(std::fs::read(owner.config_manager.runtime_dir().join("settings.json")).unwrap(),saved);
+    for (s,before) in registry.all().iter().zip(baseline){assert_eq!(s.settings_revision.load(Ordering::Acquire),before.0);assert_eq!(s.source_generation.load(Ordering::Acquire),before.1);assert_eq!(std::fs::read(s.config_manager.burn_rate_state_path()).unwrap(),before.2);}
+    assert_eq!(source.display_events.lock().unwrap().last().unwrap().effective_provider,Provider::Codex);
+    let events=source.display_events.lock().unwrap().len();crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(28),false).await;assert_eq!(source.display_events.lock().unwrap().len(),events);
+    let _=std::fs::remove_dir_all(dir);
+}
+#[tokio::test]
+async fn carousel_filters_selected_fresh_identity_bound_sources_and_retains_transient_cached_readings() {
+    let (owner,dir)=owner();let source=Source::default();let registry=owner.monitors.get().unwrap();
+    for state in registry.all(){refresh_usage(&source,&state).await.unwrap();}
+    crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselEnabled":true,"providerPreferences":{"dsh":{"carouselIncluded":false}}}),false).await.unwrap();
+    let claude=registry.get(Provider::Claude);claude.reader.lock().unwrap().failure=Some(crate::codex::reader::ReadFailure::timeout(crate::codex::reader::ReadStage::Quota));
+    let now=std::time::Instant::now();let snapshot=crate::display::tick(&source,&owner,now,false).await;assert_eq!(snapshot.candidates.len(),2);
+    claude.reader.lock().unwrap().failure=Some(crate::codex::reader::ReadFailure::new(crate::codex::reader::ReadStage::Quota,crate::codex::reader::FailureKind::Authentication));
+    assert_eq!(crate::display::tick(&source,&owner,now,false).await.candidates.len(),1);
+    claude.reader.lock().unwrap().failure=None;claude.last_usage.lock().await.as_mut().unwrap().fetched_at-=121;
+    assert_eq!(crate::display::tick(&source,&owner,now,false).await.candidates.len(),1);
+    let codex=registry.get(Provider::Codex);codex.last_usage.lock().await.as_mut().unwrap().fetched_at-=121;
+    let snapshot=crate::display::tick(&source,&owner,now,false).await;assert!(snapshot.candidates.is_empty());assert_eq!(snapshot.effective_provider,Provider::Codex);assert_eq!(snapshot.status,"waiting");
+    assert_eq!(source.reads.load(Ordering::Acquire),3);let _=std::fs::remove_dir_all(dir);
+}
+#[tokio::test]
+async fn manual_next_starts_from_effective_page_and_disabling_freezes_it_in_one_save() {
+    let (owner,dir)=owner();let source=Source::default();let registry=owner.monitors.get().unwrap();
+    for state in registry.all(){refresh_usage(&source,&state).await.unwrap();}
+    crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselEnabled":true}),false).await.unwrap();
+    let now=std::time::Instant::now();crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(9),false).await;
+    assert_eq!(crate::display::effective(&owner),Provider::Claude);
+    let saved=crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"cycleProvider":true}),false).await.unwrap();assert_eq!(saved.settings.provider,Provider::Dsh);
+    let held=crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(29),false).await;assert_eq!(held.effective_provider,Provider::Dsh);assert_eq!(held.status,"manualHold");
+    crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(31),false).await;assert_eq!(crate::display::effective(&owner),Provider::Codex);
+    let before=owner.settings_revision.load(Ordering::Acquire);
+    let frozen=crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselEnabled":false}),false).await.unwrap();assert_eq!(frozen.settings.provider,Provider::Codex);assert_eq!(frozen.revision,before+1);
+    assert_eq!(owner.config_manager.load_settings().provider,Provider::Codex);
+    assert_eq!(crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(60),false).await.effective_provider,Provider::Codex);
+    let unchanged=std::fs::read(owner.config_manager.runtime_dir().join("settings.json")).unwrap();
+    assert!(crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselIntervalSeconds":2}),false).await.is_err());assert_eq!(std::fs::read(owner.config_manager.runtime_dir().join("settings.json")).unwrap(),unchanged);
+    let _=std::fs::remove_dir_all(dir);
 }

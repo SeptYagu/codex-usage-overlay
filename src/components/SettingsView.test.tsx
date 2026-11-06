@@ -53,7 +53,7 @@ describe('independent provider columns', () => {
     expect(view.container.querySelectorAll('[data-common-settings]')).toHaveLength(1);
     const ids = [...view.container.querySelectorAll('[id]')].map(el => el.id);
     expect(new Set(ids).size).toBe(ids.length);
-    expect(view.container.querySelectorAll('input[type="range"]')).toHaveLength(8);
+    expect(view.container.querySelectorAll('input[type="range"]')).toHaveLength(9);
   });
   it('writes refresh only to the initiating provider even when the overlay shows another', async () => {
     const { panel, onPatchSettings } = await mount({provider: 'dsh'});
@@ -94,4 +94,14 @@ describe('independent provider columns', () => {
     for (const key of ['providerCodex','providerClaude','providerDsh']) expect(view.getByRole('heading',{name:i18n.t(key)})).toBeTruthy();
     expect(view.getByText(i18n.t('commonSettings'))).toBeTruthy();
   });
+});
+
+it('keeps carousel participation separate and saves every slider second through debounce',async()=>{
+  const {panel,getByRole,onPatchSettings}=await mount({quotaCarouselEnabled:true,quotaCarouselIntervalSeconds:9});
+  const slider=getByRole('slider',{name:'Rotation interval'}) as HTMLInputElement;
+  expect([slider.min,slider.max,slider.step,slider.value]).toEqual(['3','30','1','9']);
+  fireEvent.change(slider,{target:{value:'11'}});expect(onPatchSettings).toHaveBeenLastCalledWith({quotaCarouselIntervalSeconds:11},true);
+  fireEvent.click(panel('claude').getByRole('checkbox',{name:'Include in quota rotation'}));
+  expect(onPatchSettings).toHaveBeenLastCalledWith({providerPreferences:{claude:{carouselIncluded:false}}});
+  fireEvent.click(getByRole('checkbox',{name:'Automatically rotate quotas'}));expect(onPatchSettings).toHaveBeenLastCalledWith({quotaCarouselEnabled:false});
 });

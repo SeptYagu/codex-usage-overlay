@@ -82,12 +82,6 @@ impl Registry {
     }
 
     pub async fn synchronize(&self, owner: &Arc<AppState>, settings: &OverlaySettings) {
-        {
-            let _tray = owner.tray_gate.lock().unwrap_or_else(|p| p.into_inner());
-            owner
-                .displayed_provider
-                .store(settings.provider.index(), Ordering::Release);
-        }
         for provider in Provider::ALL {
             let previous = self.get(provider);
             let _commit = previous.settings_patch.lock().await;
@@ -272,6 +266,7 @@ impl Registry {
             let _ = app.emit("monitor_updated", snapshot);
         }
     }
+    pub fn track_task(&self, task:tauri::async_runtime::JoinHandle<()>) {self.tasks.lock().unwrap_or_else(|p|p.into_inner()).push(task);}
     pub fn shutdown(&self) {
         for state in self.all() {
             state.monitor_enabled.store(false, Ordering::Release);

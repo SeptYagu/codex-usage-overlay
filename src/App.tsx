@@ -10,6 +10,7 @@ import { OverlayView } from './components/OverlayView';
 import { SettingsView } from './components/SettingsView';
 import { TrayMenuView } from './components/TrayMenuView';
 import { sourceBinding, UsageSourceScope, usageMatchesSource, usageSourceScope, usageIsOlder } from './usageSource';
+import { useDisplayState } from './hooks/useDisplayState';
 import { useProviderMonitors } from './hooks/useProviderMonitors';
 import { mergeSettingsPatch, mergePendingPatches, settingsForProvider } from './providerSettings';
 
@@ -35,6 +36,20 @@ export const App: React.FC = () => {
   const currentSettings = useRef(DEFAULT_SETTINGS);
   const pendingUsage = useRef<CodexUsage | null>(null);
   const monitors = useProviderMonitors();
+  const display=useDisplayState();
+  const currentDisplay=useRef(display);currentDisplay.current=display;
+  const matchesActive=(sample:CodexUsage)=>currentDisplay.current
+    ? sample.sourceKey===currentDisplay.current.sourceKey&&sample.sourceGeneration===currentDisplay.current.sourceGeneration
+    : usageMatchesSource(sample,sourceScope.current);
+  useEffect(()=>{
+    if(!display)return;
+    setUsage(current=>{
+      const retained=current&&matchesActive(current)?current:null;
+      const pending=pendingUsage.current;
+      if(pending&&matchesActive(pending)){pendingUsage.current=null;return retained&&usageIsOlder(pending,retained)?retained:pending;}
+      return retained;
+    });
+  },[display]);
 
   const applySavedSettings = useCallback((envelope: SettingsEnvelope) => {
     if (envelope.revision < settingsRevision.current) return;
@@ -49,9 +64,9 @@ export const App: React.FC = () => {
     sourceScope.current = scope;
     currentSettings.current = merged;
     setUsage(current => {
-      const retained = current && usageMatchesSource(current, scope) ? current : null;
+      const retained = current && matchesActive(current) ? current : null;
       const pending = pendingUsage.current;
-      if (pending && usageMatchesSource(pending, scope)) {
+      if (pending && matchesActive(pending)) {
         pendingUsage.current = null;
         return retained && usageIsOlder(pending, retained) ? retained : pending;
       }
@@ -89,7 +104,7 @@ export const App: React.FC = () => {
     // Register first, then hydrate only if no live event arrived during the
     // cache request. fetchedAt alone cannot order samples within the same second.
     const applyUsageIfNewer = (next: CodexUsage) => {
-      if (!usageMatchesSource(next, sourceScope.current)) {
+      if (!matchesActive(next)) {
         // A sample may arrive before its settings broadcast. Hold it without
         // displaying it; only a matching authoritative source can release it.
         const pending = pendingUsage.current;
@@ -101,8 +116,8 @@ export const App: React.FC = () => {
         return;
       }
       setUsage((current) => {
-        if (!usageMatchesSource(next, sourceScope.current)) return current;
-        return current && usageMatchesSource(current, sourceScope.current)
+        if (!matchesActive(next)) return current;
+        return current && matchesActive(current)
           && usageIsOlder(next, current) ? current : next;
       });
       setIsLoading(false);
@@ -171,7 +186,7 @@ export const App: React.FC = () => {
     pendingPatches.current.push(patch);
     if (optimistic) {
       const merged = mergeSettingsPatch(currentSettings.current, patch);
-      if (sourceBinding(merged) !== sourceBinding(currentSettings.current)) {
+      if (!currentDisplay.current && sourceBinding(merged) !== sourceBinding(currentSettings.current)) {
         sourceScope.current = { binding: sourceBinding(merged), allowLegacy: false };
         pendingUsage.current = null;
         setUsage(null);
@@ -255,26 +270,34 @@ export const App: React.FC = () => {
         settings={settings}
         onPatchSettings={handlePatchSettings}
         saveErrors={Object.values(saveErrors)}
+        display={display ?? undefined}
       />
     );
   }
 
   if (windowLabel === 'tray-menu' || window.location.hash === '#tray-menu') {
     if (settingsLoadState !== 'ready') return null;
-    return <TrayMenuView settings={settingsForProvider(settings, settings.provider)} onPatchSettings={handlePatchSettings} />;
+    return <TrayMenuView display={display??undefined} settings={settingsForProvider(settings, display?.effectiveProvider ?? settings.provider)} onPatchSettings={handlePatchSettings} />;
   }
 
   if (windowLabel === 'main' && (settingsLoadState === 'loading' || dockState === null)) return null;
 
+  const effectiveProvider=display?.effectiveProvider??settings.provider;
+  const monitor=monitors[effectiveProvider];
+  const matches=(sample:CodexUsage|null|undefined)=>!!sample && (display
+    ?sample.sourceKey===display.sourceKey&&sample.sourceGeneration===display.sourceGeneration
+    :usageMatchesSource(sample,sourceScope.current));
+  const monitorUsage=matches(monitor?.usage)?monitor!.usage:null;
+  const directUsage=matches(usage)?usage:null;
+  const displayedUsage=monitorUsage&&directUsage ?(usageIsOlder(monitorUsage,directUsage)?directUsage:monitorUsage):monitorUsage??directUsage;
   return (
     <OverlayView
-      settings={settings}
-      usage={monitors[settings.provider]
-        ? (monitors[settings.provider]!.usage && usageMatchesSource(monitors[settings.provider]!.usage!, sourceScope.current) ? monitors[settings.provider]!.usage : null)
-        : usage}
-      isLoading={monitors[settings.provider] ? monitors[settings.provider]!.health === 'checking' : isLoading}
+      settings={settingsForProvider(settings,effectiveProvider)}
+      usage={displayedUsage}
+      isLoading={monitor ? monitor.health === 'checking' : isLoading}
       dockState={dockState ?? undefined}
       monitors={monitors}
+      display={display ?? undefined}
       onCycleProvider={async () => {
         try { applySavedSettings(await invoke<SettingsEnvelope>('cycle_display_provider')); }
         catch (error) { console.error('Could not switch displayed provider:', error); }
