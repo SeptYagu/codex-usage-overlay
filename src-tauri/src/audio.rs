@@ -11,6 +11,12 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::notify::QuotaKind;
+use crate::config::Provider;
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackContext { pub provider: Provider, pub kind: QuotaKind, pub playback_id: String }
+
 
 const MAX_PLAYBACK: Duration = Duration::from_secs(10);
 const PREVIEW_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -103,13 +109,15 @@ enum AudioCommand {
     EnqueueNotification {
         path: PathBuf,
         kind: QuotaKind,
+        provider: Provider,
     },
     Preview {
         path: PathBuf,
         kind: QuotaKind,
+        context: PlaybackContext,
         reply: mpsc::SyncSender<Result<(), AudioError>>,
     },
-    StopPreview,
+    StopPreview(Option<String>),
     Shutdown,
 }
 
@@ -122,20 +130,21 @@ struct WorkerShared {
 pub struct AudioHandle(Arc<WorkerShared>);
 
 impl AudioHandle {
-    pub fn enqueue_notification(&self, path: PathBuf, kind: QuotaKind) {
+    pub fn enqueue_notification(&self, path: PathBuf, kind: QuotaKind, provider: Provider) {
         let _ = self
             .0
             .sender
-            .send(AudioCommand::EnqueueNotification { path, kind });
+            .send(AudioCommand::EnqueueNotification { path, kind, provider });
     }
 
-    pub fn preview(&self, path: PathBuf, kind: QuotaKind) -> Result<(), AudioError> {
+    pub fn preview(&self, path: PathBuf, kind: QuotaKind, context: PlaybackContext) -> Result<(), AudioError> {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.0
             .sender
             .send(AudioCommand::Preview {
                 path,
                 kind,
+                context,
                 reply: reply_tx,
             })
             .map_err(|_| AudioError::Busy)?;
@@ -144,8 +153,8 @@ impl AudioHandle {
             .map_err(|_| AudioError::Busy)?
     }
 
-    pub fn stop_preview(&self) {
-        let _ = self.0.sender.send(AudioCommand::StopPreview);
+    pub fn stop_preview(&self, id: Option<String>) {
+        let _ = self.0.sender.send(AudioCommand::StopPreview(id));
     }
 
     pub fn shutdown(&self) {
@@ -163,6 +172,7 @@ struct AudioJob {
     path: PathBuf,
     kind: Option<QuotaKind>,
     preview: bool,
+    context: Option<PlaybackContext>,
 }
 
 #[derive(Default)]
@@ -177,6 +187,7 @@ impl PlaybackQueue {
             path,
             kind: Some(kind),
             preview: false,
+            context: None,
         });
     }
 
@@ -185,6 +196,7 @@ impl PlaybackQueue {
             path,
             kind: Some(kind),
             preview: true,
+            context: None,
         });
     }
 
@@ -209,6 +221,8 @@ struct CurrentPlayback {
 struct PlaybackErrorEvent {
     kind: Option<QuotaKind>,
     error: String,
+    #[serde(flatten)]
+    context: Option<PlaybackContext>,
 }
 
 pub fn spawn_worker(app: AppHandle) -> Result<AudioHandle, String> {
@@ -236,7 +250,7 @@ fn run_worker(app: AppHandle, receiver: mpsc::Receiver<AudioCommand>) {
         {
             let ended = current.take().expect("current playback was checked above");
             if ended.job.preview {
-                let _ = app.emit("sound_preview_finished", ());
+                let _ = app.emit("sound_preview_finished", &ended.job.context);
             }
         }
 
@@ -267,10 +281,11 @@ fn run_worker(app: AppHandle, receiver: mpsc::Receiver<AudioCommand>) {
         }
 
         match receiver.recv_timeout(WORKER_POLL) {
-            Ok(AudioCommand::EnqueueNotification { path, kind }) => {
-                queue.push_notification(path, kind)
+            Ok(AudioCommand::EnqueueNotification { path, kind, provider }) => {
+                queue.push_notification(path, kind);
+                if let Some(job) = queue.notifications.back_mut() { job.context = Some(PlaybackContext { provider, kind, playback_id: String::new() }); }
             }
-            Ok(AudioCommand::Preview { path, kind, reply }) => {
+            Ok(AudioCommand::Preview { path, kind, context, reply }) => {
                 let validation = probe_audio(&path).and_then(|_| {
                     if sink.is_none() {
                         sink = DeviceSinkBuilder::open_default_sink().ok();
@@ -283,7 +298,12 @@ fn run_worker(app: AppHandle, receiver: mpsc::Receiver<AudioCommand>) {
                 });
                 match validation {
                     Ok(()) => {
+                        for job in queue.previews.drain(..) { let _ = app.emit("sound_preview_finished", &job.context); }
+                        if current.as_ref().is_some_and(|p| p.job.preview) {
+                            if let Some(old) = current.take() { old.player.stop(); let _ = app.emit("sound_preview_finished", &old.job.context); }
+                        }
                         queue.push_preview(path, kind);
+                        if let Some(job) = queue.previews.back_mut() { job.context = Some(context); }
                         let _ = reply.send(Ok(()));
                     }
                     Err(error) => {
@@ -291,13 +311,14 @@ fn run_worker(app: AppHandle, receiver: mpsc::Receiver<AudioCommand>) {
                     }
                 }
             }
-            Ok(AudioCommand::StopPreview) => {
-                queue.clear_previews();
-                if current.as_ref().is_some_and(|playing| playing.job.preview) {
-                    if let Some(playing) = current.take() {
-                        playing.player.stop();
-                    }
-                    let _ = app.emit("sound_preview_finished", ());
+            Ok(AudioCommand::StopPreview(id)) => {
+                queue.previews.retain(|job| {
+                    let matches = id.as_ref().is_none_or(|id| job.context.as_ref().is_some_and(|c| &c.playback_id == id));
+                    if matches { let _ = app.emit("sound_preview_finished", &job.context); }
+                    !matches
+                });
+                if current.as_ref().is_some_and(|p| p.job.preview && id.as_ref().is_none_or(|id| p.job.context.as_ref().is_some_and(|c| &c.playback_id == id))) {
+                    if let Some(old) = current.take() { old.player.stop(); let _ = app.emit("sound_preview_finished", &old.job.context); }
                 }
             }
             Ok(AudioCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -321,6 +342,7 @@ fn report_playback_error(app: &AppHandle, job: &AudioJob, error: AudioError) {
         PlaybackErrorEvent {
             kind: job.kind,
             error: error.to_string(),
+            context: job.context.clone(),
         },
     );
 }

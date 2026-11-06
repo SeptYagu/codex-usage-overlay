@@ -1,5 +1,10 @@
 # Status
 
+## Three-plan implementation — 2026-11-06 (IN PROGRESS)
+
+- [Implementation and review log](docs/handoff/2026-11-06-three-plan-implementation.md): independent settings source milestone is implemented and checked; review/fixes follow before starting Codex customization and the quota carousel.
+- Schema 3 and three fixed settings columns provide provider-specific refresh, notifications and audio preferences. Frontend 165/build, Rust 449 + 10 plus an explicit Registry isolation regression, Edge 634 + 252 and packaging 6 pass. Native installed-window/audio acceptance remains unperformed. No release or installed application changes.
+
 ## Multi-agent quota carousel — 2026-11-06 (PLAN ONLY)
 
 - [Implementation plan](docs/handoff/2026-11-06-quota-carousel-plan.md) defines opt-in display rotation among eligible Codex/Claude/DSH sources, a matching settings slider from 3–30 seconds in one-second steps (default eight), per-provider participation, 30-second manual hold and interaction/visibility pauses. Slider saves use existing debounce behavior; only successfully committed intervals change scheduling.

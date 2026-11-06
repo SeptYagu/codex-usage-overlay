@@ -21,6 +21,13 @@ export interface ProviderPreference {
   protectionEnabled: boolean;
   fiveHourThresholdPercent: number;
   weeklyThresholdPercent: number;
+  refreshIntervalSeconds?: number;
+  fiveHourResetNotification?: boolean;
+  weeklyResetNotification?: boolean;
+  fiveHourSoundMode?: 'windows' | 'custom';
+  weeklySoundMode?: 'windows' | 'custom';
+  fiveHourSoundPath?: string | null;
+  weeklySoundPath?: string | null;
 }
 
 export type SettingsPatch = Partial<Omit<OverlaySettings, 'providerPreferences'>> & {

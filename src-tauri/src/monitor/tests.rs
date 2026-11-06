@@ -518,3 +518,22 @@ fn migration_preserves_only_the_previously_enabled_protection_and_source_store_p
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn provider_preference_patch_is_persisted_and_only_reconfigures_its_runtime() {
+    let (owner, dir)=owner(); let registry=owner.monitors.get().unwrap(); let source=Source::default();
+    let codex=registry.get(Provider::Codex); let claude=registry.get(Provider::Claude); let dsh=registry.get(Provider::Dsh);
+    let codex_revision=codex.settings_revision.load(Ordering::Acquire);
+    let dsh_revision=dsh.settings_revision.load(Ordering::Acquire);
+    crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"providerPreferences":{"claude":{
+        "refreshIntervalSeconds":120,"weeklyResetNotification":false,"fiveHourSoundPath":null
+    }}}),false).await.unwrap();
+    assert_eq!(claude.settings.lock().await.refresh_interval_seconds,120);
+    assert!(!claude.settings.lock().await.weekly_reset_notification);
+    assert_eq!(codex.settings_revision.load(Ordering::Acquire),codex_revision);
+    assert_eq!(dsh.settings_revision.load(Ordering::Acquire),dsh_revision);
+    assert_eq!(source.reads.load(Ordering::SeqCst),0);
+    assert_eq!(owner.config_manager.load_settings().for_provider(Provider::Claude).refresh_interval_seconds,120);
+    assert!(owner.config_manager.load_settings().for_provider(Provider::Codex).weekly_reset_notification);
+    registry.shutdown();drop(codex);drop(claude);drop(dsh);drop(owner);std::fs::remove_dir_all(dir).unwrap();
+}

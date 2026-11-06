@@ -37,17 +37,55 @@ impl Provider {
     pub fn key(self) -> &'static str { match self { Self::Codex => "codex", Self::Claude => "claude", Self::Dsh => "dsh" } }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", default)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderPreference {
     pub monitor_enabled: bool,
     pub protection_enabled: bool,
     pub five_hour_threshold_percent: u32,
     pub weekly_threshold_percent: u32,
+    pub refresh_interval_seconds: u32,
+    pub five_hour_reset_notification: bool,
+    pub weekly_reset_notification: bool,
+    pub five_hour_sound_mode: SoundMode,
+    pub weekly_sound_mode: SoundMode,
+    pub five_hour_sound_path: Option<String>,
+    pub weekly_sound_path: Option<String>,
+    #[serde(skip)]
+    present_fields: std::collections::BTreeSet<String>,
 }
 impl Default for ProviderPreference {
     fn default() -> Self { Self { monitor_enabled: true, protection_enabled: false,
-        five_hour_threshold_percent: 5, weekly_threshold_percent: 2 } }
+        five_hour_threshold_percent: 5, weekly_threshold_percent: 2,
+        refresh_interval_seconds: 60, five_hour_reset_notification: true, weekly_reset_notification: true,
+        five_hour_sound_mode: SoundMode::Windows, weekly_sound_mode: SoundMode::Windows,
+        five_hour_sound_path: None, weekly_sound_path: None, present_fields: Default::default() } }
+}
+
+impl<'de> Deserialize<'de> for ProviderPreference {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut result = Self::default();
+        macro_rules! field { ($json:literal, $name:ident) => {
+            if let Some(value) = value.get($json) {
+                if let Ok(parsed) = serde_json::from_value(value.clone()) {
+                    result.$name = parsed;
+                    result.present_fields.insert($json.into());
+                }
+            }
+        }; }
+        field!("monitorEnabled", monitor_enabled); field!("protectionEnabled", protection_enabled);
+        field!("fiveHourThresholdPercent", five_hour_threshold_percent); field!("weeklyThresholdPercent", weekly_threshold_percent);
+        field!("refreshIntervalSeconds", refresh_interval_seconds);
+        field!("fiveHourResetNotification", five_hour_reset_notification); field!("weeklyResetNotification", weekly_reset_notification);
+        field!("fiveHourSoundMode", five_hour_sound_mode); field!("weeklySoundMode", weekly_sound_mode);
+        field!("fiveHourSoundPath", five_hour_sound_path); field!("weeklySoundPath", weekly_sound_path);
+        if !(15..=3600).contains(&result.refresh_interval_seconds) {
+            result.refresh_interval_seconds = 60;
+            result.present_fields.remove("refreshIntervalSeconds");
+        }
+        Ok(result)
+    }
 }
 
 /// A non-secret identity used by persistence and UI delivery. Never include a
@@ -206,7 +244,7 @@ fn default_auto_pause_weekly_threshold() -> u32 {
 impl Default for OverlaySettings {
     fn default() -> Self {
         Self {
-            schema_version: 2, provider_preferences: Default::default(),
+            schema_version: 3, provider_preferences: Default::default(),
             provider: Provider::default(),
             dsh_base_url: String::new(),
             dsh_instance_id: String::new(),
@@ -248,6 +286,8 @@ impl Default for OverlaySettings {
 
 impl OverlaySettings {
     pub fn migrate(&mut self) {
+        if self.schema_version > 3 { return; }
+        let empty_preferences = self.provider_preferences.is_empty();
         if self.schema_version < 2 || self.provider_preferences.is_empty() {
             for provider in Provider::ALL {
                 let mut preference = ProviderPreference::default();
@@ -262,17 +302,32 @@ impl OverlaySettings {
                 self.provider_preferences.insert(provider.key().into(), preference);
             }
         }
-        self.schema_version = 2;
+        let inherit = self.schema_version < 3 || empty_preferences;
         for provider in Provider::ALL {
             let preference = self.provider_preferences.entry(provider.key().into()).or_insert_with(|| {
                 let mut p = ProviderPreference::default();
                 if provider == Provider::Dsh { p.five_hour_threshold_percent = 0; p.weekly_threshold_percent = 0; }
                 p
             });
+            if inherit {
+                macro_rules! inherit { ($json:literal, $name:ident) => {
+                    if !preference.present_fields.contains($json) { preference.$name = self.$name.clone(); }
+                }; }
+                inherit!("refreshIntervalSeconds", refresh_interval_seconds);
+                inherit!("fiveHourResetNotification", five_hour_reset_notification);
+                inherit!("weeklyResetNotification", weekly_reset_notification);
+                inherit!("fiveHourSoundMode", five_hour_sound_mode); inherit!("weeklySoundMode", weekly_sound_mode);
+                inherit!("fiveHourSoundPath", five_hour_sound_path); inherit!("weeklySoundPath", weekly_sound_path);
+            }
+            if !(15..=3600).contains(&preference.refresh_interval_seconds) { preference.refresh_interval_seconds = 60; }
+            for path in [&mut preference.five_hour_sound_path, &mut preference.weekly_sound_path] {
+                if path.as_ref().is_some_and(|s| s.is_empty() || s.len() > 4096) { *path = None; }
+            }
             if !preference.monitor_enabled { preference.protection_enabled = false; }
             preference.five_hour_threshold_percent = preference.five_hour_threshold_percent.clamp(if provider == Provider::Dsh {0} else {1}, 15);
             preference.weekly_threshold_percent = preference.weekly_threshold_percent.clamp(if provider == Provider::Dsh {0} else {1}, 10);
         }
+        self.schema_version = 3;
     }
     pub fn preference(&self, provider: Provider) -> ProviderPreference {
         self.provider_preferences.get(provider.key()).cloned().unwrap_or_else(|| {
@@ -282,6 +337,13 @@ impl OverlaySettings {
     pub fn mirror_display_preferences(&mut self) {
         let displayed = self.preference(self.provider);
         self.auto_pause_on_low_quota = displayed.monitor_enabled && displayed.protection_enabled;
+        self.refresh_interval_seconds = displayed.refresh_interval_seconds;
+        self.five_hour_reset_notification = displayed.five_hour_reset_notification;
+        self.weekly_reset_notification = displayed.weekly_reset_notification;
+        self.five_hour_sound_mode = displayed.five_hour_sound_mode;
+        self.weekly_sound_mode = displayed.weekly_sound_mode;
+        self.five_hour_sound_path = displayed.five_hour_sound_path;
+        self.weekly_sound_path = displayed.weekly_sound_path;
         if self.provider != Provider::Dsh {
             self.auto_pause_five_hour_threshold_percent = displayed.five_hour_threshold_percent;
             self.auto_pause_weekly_threshold_percent = displayed.weekly_threshold_percent;
@@ -294,6 +356,13 @@ impl OverlaySettings {
         let mut scoped = self.clone();
         let preference = self.preference(provider);
         scoped.provider = provider;
+        scoped.refresh_interval_seconds = preference.refresh_interval_seconds;
+        scoped.five_hour_reset_notification = preference.five_hour_reset_notification;
+        scoped.weekly_reset_notification = preference.weekly_reset_notification;
+        scoped.five_hour_sound_mode = preference.five_hour_sound_mode;
+        scoped.weekly_sound_mode = preference.weekly_sound_mode;
+        scoped.five_hour_sound_path = preference.five_hour_sound_path;
+        scoped.weekly_sound_path = preference.weekly_sound_path;
         scoped.auto_pause_on_low_quota = preference.monitor_enabled && preference.protection_enabled;
         scoped.auto_pause_five_hour_threshold_percent = preference.five_hour_threshold_percent;
         scoped.auto_pause_weekly_threshold_percent = preference.weekly_threshold_percent;
@@ -461,6 +530,11 @@ impl ConfigManager {
 
     pub fn save_settings_checked(&self, settings: &OverlaySettings) -> Result<(), String> {
         let path = self.settings_path();
+        let disk_version = fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|v| v.get("schemaVersion").and_then(|v| v.as_u64()));
+        if settings.schema_version > 3 || disk_version.is_some_and(|v| v > 3) {
+            return Err("Settings were created by a newer application; refusing to overwrite them".into());
+        }
         let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
         fs::write(&tmp, json).map_err(|e| e.to_string())?;
@@ -882,5 +956,46 @@ pub fn updater_target() -> &'static str {
         "windows-x86_64-nsis"
     } else {
         "windows-x86_64-msi"
+    }
+}
+
+#[cfg(test)]
+mod independent_preferences_tests {
+    use super::*;
+    #[test]
+    fn v2_migration_preserves_explicit_values_and_inherits_only_missing_fields() {
+        let mut settings: OverlaySettings = serde_json::from_value(serde_json::json!({
+            "schemaVersion":2,"refreshIntervalSeconds":300,"weeklyResetNotification":false,
+            "fiveHourSoundPath":"C:/alert.wav", "providerPreferences":{
+                "codex":{"refreshIntervalSeconds":47,"fiveHourSoundPath":null},
+                "claude":{"weeklyResetNotification":true}
+            }
+        })).unwrap();
+        settings.migrate();
+        assert_eq!(settings.schema_version,3);
+        assert_eq!(settings.preference(Provider::Codex).refresh_interval_seconds,47);
+        assert_eq!(settings.preference(Provider::Codex).five_hour_sound_path,None);
+        assert!(!settings.preference(Provider::Codex).weekly_reset_notification);
+        assert!(settings.preference(Provider::Claude).weekly_reset_notification);
+        assert_eq!(settings.preference(Provider::Dsh).refresh_interval_seconds,300);
+        let once=serde_json::to_value(&settings).unwrap();
+        settings.migrate();
+        assert_eq!(serde_json::to_value(&settings).unwrap(),once);
+    }
+    #[test]
+    fn independent_settings_project_without_leaking_other_sources() {
+        let mut s=OverlaySettings::default(); s.migrate();
+        s.provider_preferences.get_mut("claude").unwrap().refresh_interval_seconds=120;
+        s.provider_preferences.get_mut("dsh").unwrap().weekly_reset_notification=false;
+        assert_eq!(s.for_provider(Provider::Claude).refresh_interval_seconds,120);
+        assert_eq!(s.for_provider(Provider::Codex).refresh_interval_seconds,60);
+        assert!(s.for_provider(Provider::Claude).weekly_reset_notification);
+        assert!(!s.for_provider(Provider::Dsh).weekly_reset_notification);
+        let mut restored:OverlaySettings=serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+        restored.migrate();assert_eq!(restored.for_provider(Provider::Claude).refresh_interval_seconds,120);
+    }
+    #[test]
+    fn future_schema_is_never_downgraded() {
+        let mut s=OverlaySettings{schema_version:99,..Default::default()};s.migrate();assert_eq!(s.schema_version,99);
     }
 }

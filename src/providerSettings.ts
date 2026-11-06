@@ -12,6 +12,13 @@ export function providerPreference(settings: OverlaySettings, provider: Provider
 export function settingsForProvider(settings: OverlaySettings, provider: Provider): OverlaySettings {
   const preference = providerPreference(settings, provider);
   return { ...settings, provider,
+    refreshIntervalSeconds: preference.refreshIntervalSeconds ?? settings.refreshIntervalSeconds,
+    fiveHourResetNotification: preference.fiveHourResetNotification ?? settings.fiveHourResetNotification,
+    weeklyResetNotification: preference.weeklyResetNotification ?? settings.weeklyResetNotification,
+    fiveHourSoundMode: preference.fiveHourSoundMode ?? settings.fiveHourSoundMode,
+    weeklySoundMode: preference.weeklySoundMode ?? settings.weeklySoundMode,
+    fiveHourSoundPath: preference.fiveHourSoundPath === undefined ? settings.fiveHourSoundPath : preference.fiveHourSoundPath,
+    weeklySoundPath: preference.weeklySoundPath === undefined ? settings.weeklySoundPath : preference.weeklySoundPath,
     autoPauseOnLowQuota: preference.monitorEnabled && preference.protectionEnabled,
     autoPauseFiveHourThresholdPercent: preference.fiveHourThresholdPercent,
     autoPauseWeeklyThresholdPercent: preference.weeklyThresholdPercent,

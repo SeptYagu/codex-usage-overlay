@@ -100,7 +100,7 @@ impl Registry {
             }
             let binding_changed =
                 crate::config::source_key(&old) != crate::config::source_key(&next);
-            let urgent = binding_changed
+            let urgent = old.refresh_interval_seconds != next.refresh_interval_seconds || binding_changed
                 || previous.monitor_enabled.load(Ordering::Acquire) != enabled
                 || old.claude_live_polling != next.claude_live_polling
                 || old.auto_pause_on_low_quota != next.auto_pause_on_low_quota

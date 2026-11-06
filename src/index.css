@@ -184,3 +184,10 @@ html, body, #root {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(128, 128, 128, .3); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(128, 128, 128, .4); }
+
+.settings-shell { height:100vh; display:flex; flex-direction:column; gap:12px; padding:20px; overflow:hidden; }
+.settings-provider-grid { flex:1; min-height:0; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
+.settings-provider-column { min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+.settings-provider-body { min-height:0; overflow-y:auto; overflow-wrap:anywhere; }
+@media(max-width:1179px) { .settings-shell { height:auto; min-height:100vh; overflow:visible; } .settings-provider-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .settings-provider-body { overflow:visible; } }
+@media(max-width:799px) { .settings-provider-grid { grid-template-columns:minmax(0,1fr); } }

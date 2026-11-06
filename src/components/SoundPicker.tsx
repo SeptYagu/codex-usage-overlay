@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
-import { QuotaKind } from '../types';
+import { Provider, QuotaKind } from '../types';
 
 interface SoundPickerProps {
+  provider?: Provider;
   kind: QuotaKind;
   path: string | null;
   disabled?: boolean;
@@ -23,32 +24,33 @@ function errorKey(error: unknown): string {
   return String(error).split(':', 1)[0].trim();
 }
 
-export const SoundPicker: React.FC<SoundPickerProps> = ({ kind, path, disabled = false, onChangePath }) => {
+export const SoundPicker: React.FC<SoundPickerProps> = ({ provider = 'codex', kind, path, disabled = false, onChangePath }) => {
   const { t } = useTranslation();
   const [error, setError] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
+  const playbackId = useRef<string | null>(null);
 
   useEffect(() => {
     let unlistenError: (() => void) | undefined;
     let unlistenFinished: (() => void) | undefined;
-    listen<{ kind?: QuotaKind; error: string }>('sound_playback_error', (event) => {
-      if (!event.payload.kind || event.payload.kind === kind) {
+    listen<{ provider?: Provider; kind?: QuotaKind; playbackId?: string; error: string }>('sound_playback_error', (event) => {
+      if (event.payload.provider === provider && event.payload.kind === kind && event.payload.playbackId === playbackId.current) {
         setError(errorKey(event.payload.error));
         setPreviewing(false);
       }
     }).then((unlisten) => { unlistenError = unlisten; }).catch(() => {});
-    listen('sound_preview_finished', () => setPreviewing(false))
+    listen<{playbackId?: string}>('sound_preview_finished', event => { if (event.payload?.playbackId === playbackId.current) { playbackId.current = null; setPreviewing(false); } })
       .then((unlisten) => { unlistenFinished = unlisten; }).catch(() => {});
     return () => {
       unlistenError?.();
       unlistenFinished?.();
     };
-  }, [kind]);
+  }, [kind, provider]);
 
   const chooseFile = async () => {
     setError(null);
     try {
-      const selected = await invoke<string | null>('pick_sound_file', { kind });
+      const selected = await invoke<string | null>('pick_sound_file', { kind, provider });
       if (selected) onChangePath(selected);
     } catch (reason) {
       setError(errorKey(reason));
@@ -59,7 +61,7 @@ export const SoundPicker: React.FC<SoundPickerProps> = ({ kind, path, disabled =
     if (!path) return;
     if (previewing) {
       try {
-        await invoke('stop_preview_sound');
+        await invoke('stop_preview_sound', { playbackId: playbackId.current });
       } finally {
         setPreviewing(false);
       }
@@ -67,9 +69,12 @@ export const SoundPicker: React.FC<SoundPickerProps> = ({ kind, path, disabled =
     }
     setError(null);
     try {
-      await invoke('preview_sound', { kind });
+      const id = crypto.randomUUID();
+      playbackId.current = id;
       setPreviewing(true);
+      await invoke('preview_sound', { kind, provider, playbackId: id });
     } catch (reason) {
+      playbackId.current = null; setPreviewing(false);
       setError(errorKey(reason));
     }
   };

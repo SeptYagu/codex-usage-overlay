@@ -1077,6 +1077,10 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "providerPreferences" => value.as_object().is_some_and(|providers| !providers.is_empty() && providers.iter().all(|(provider, fields)| {
                 matches!(provider.as_str(), "codex" | "claude" | "dsh") && fields.as_object().is_some_and(|fields| !fields.is_empty() && fields.iter().all(|(key, value)| match key.as_str() {
                     "monitorEnabled" | "protectionEnabled" => value.is_boolean(),
+                    "fiveHourResetNotification" | "weeklyResetNotification" => value.is_boolean(),
+                    "refreshIntervalSeconds" => value.as_u64().is_some_and(|v| (15..=3600).contains(&v)),
+                    "fiveHourSoundMode" | "weeklySoundMode" => matches!(value.as_str(), Some("windows" | "custom")),
+                    "fiveHourSoundPath" | "weeklySoundPath" => value.is_null() || value.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 4096),
                     "fiveHourThresholdPercent" => value.as_u64().is_some_and(|v| (if provider == "dsh" {0} else {1}..=15).contains(&v)),
                     "weeklyThresholdPercent" => value.as_u64().is_some_and(|v| (if provider == "dsh" {0} else {1}..=10).contains(&v)),
                     _ => false,
@@ -1097,6 +1101,11 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
     if changes.get("autoCheckUpdates") == Some(&Value::Bool(false))
         && changes.get("autoInstallUpdates") == Some(&Value::Bool(true)) {
         return Err("Automatic installation requires automatic update checks".into());
+    }
+    let legacy_fields = ["refreshIntervalSeconds", "fiveHourResetNotification", "weeklyResetNotification", "fiveHourSoundMode", "weeklySoundMode", "fiveHourSoundPath", "weeklySoundPath"];
+    if legacy_fields.iter().any(|key| changes.contains_key(*key))
+        && (changes.contains_key("provider") || changes.contains_key("providerPreferences")) {
+        return Err("Use explicit provider preferences instead of ambiguous legacy settings".into());
     }
     Ok(changes)
 }
@@ -1341,6 +1350,13 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
                 if changes.contains_key("dshFiveHourThresholdPercent") { preference.five_hour_threshold_percent = next.dsh_five_hour_threshold_percent; }
                 if changes.contains_key("dshWeeklyThresholdPercent") { preference.weekly_threshold_percent = next.dsh_weekly_threshold_percent; }
             }
+            macro_rules! legacy { ($json:literal, $name:ident) => {
+                if changes.contains_key($json) { preference.$name = next.$name.clone(); }
+            }; }
+            legacy!("refreshIntervalSeconds", refresh_interval_seconds);
+            legacy!("fiveHourResetNotification", five_hour_reset_notification); legacy!("weeklyResetNotification", weekly_reset_notification);
+            legacy!("fiveHourSoundMode", five_hour_sound_mode); legacy!("weeklySoundMode", weekly_sound_mode);
+            legacy!("fiveHourSoundPath", five_hour_sound_path); legacy!("weeklySoundPath", weekly_sound_path);
             if !preference.monitor_enabled { preference.protection_enabled = false; }
             next.mirror_display_preferences();
         }
@@ -1646,10 +1662,11 @@ pub async fn pick_sound_file(kind: crate::notify::QuotaKind, app: AppHandle) -> 
 }
 
 #[tauri::command]
-pub async fn preview_sound(kind: crate::notify::QuotaKind, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+pub async fn preview_sound(kind: crate::notify::QuotaKind, provider: Option<Provider>, playback_id: Option<String>, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let settings = state.settings.lock().await;
+        let provider = provider.unwrap_or(state.settings.lock().await.provider);
+        let settings = state.settings.lock().await.for_provider(provider);
         let path = match kind {
             crate::notify::QuotaKind::FiveHour => settings.five_hour_sound_path.clone(),
             crate::notify::QuotaKind::Week => settings.weekly_sound_path.clone(),
@@ -1657,26 +1674,26 @@ pub async fn preview_sound(kind: crate::notify::QuotaKind, state: State<'_, Arc<
         .ok_or_else(|| "sound_path_missing".to_string())?;
         drop(settings);
         let audio = state.audio.get().ok_or_else(|| "sound_audio_busy".to_string())?.clone();
-        tauri::async_runtime::spawn_blocking(move || audio.preview(path.into(), kind))
+        tauri::async_runtime::spawn_blocking(move || audio.preview(path.into(), kind, crate::audio::PlaybackContext { provider, kind, playback_id: playback_id.unwrap_or_default() }))
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())
     }
     #[cfg(not(windows))]
     {
-        let _ = (kind, state);
+        let _ = (kind, state, provider, playback_id);
         Err("sound_audio_busy".into())
     }
 }
 
 #[tauri::command]
-pub fn stop_preview_sound(state: State<'_, Arc<AppState>>) {
+pub fn stop_preview_sound(playback_id: Option<String>, state: State<'_, Arc<AppState>>) {
     #[cfg(windows)]
     if let Some(audio) = state.audio.get() {
-        audio.stop_preview();
+        audio.stop_preview(playback_id);
     }
     #[cfg(not(windows))]
-    let _ = state;
+    let _ = (state, playback_id);
 }
 
 pub fn shutdown_audio(app: &AppHandle) {

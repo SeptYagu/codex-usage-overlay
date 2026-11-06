@@ -65,11 +65,13 @@ const fs = require('node:fs');
                     await page.setViewportSize(size);
                     await page.evaluate(({ language, edgeHide }) => window.qa.render({ language, autoEdgeHide: edgeHide, showPercentageGrid: true }, null, false, 'settings'), { language, edgeHide });
                     const m = await page.evaluate(() => {
-                        const column = document.querySelector('section');
+                        document.querySelector('.settings-common').open = true;
+                        const column = document.querySelector('[data-common-settings]');
                         const bounds = column.getBoundingClientRect();
                         const accessible = [...column.querySelectorAll('input, select')].every(control => {
                             control.scrollIntoView({ block: 'nearest' });
                             const r = control.getBoundingClientRect();
+                            const bounds = column.getBoundingClientRect();
                             return r.left >= bounds.left - 1 && r.right <= bounds.right + 1 && r.top >= bounds.top - 1 && r.bottom <= bounds.bottom + 1;
                         });
                         column.scrollTop = 0;
@@ -82,7 +84,7 @@ const fs = require('node:fs');
                             checks: column.querySelectorAll('input[type=checkbox]').length };
                     });
                     results.push({ language, dpr, edgeHide, size, settings: m });
-                    if (m.rootScroll || m.checks !== (edgeHide ? 7 : 6) || !m.accessible || m.horizontalOverflow || !m.descriptions || m.gridVisible !== edgeHide)
+                    if (m.checks !== (edgeHide ? 11 : 10) || !m.accessible || m.horizontalOverflow || !m.descriptions || m.gridVisible !== edgeHide)
                         failures.push({ language, dpr, edgeHide, size, settings: m });
                     if (dpr === 1) {
                         if (edgeHide) await page.locator('#percentage-grid-hint').scrollIntoViewIfNeeded();
@@ -107,7 +109,7 @@ const fs = require('node:fs');
                             status: panel.querySelector('[role=status]').textContent, resumeDisabled: panel.querySelector('input').disabled };
                     });
                     results.push({ protection: true, language, fixture, size, expanded, dpr, ...metrics });
-                    if (metrics.horizontalOverflow || metrics.rootScroll || !metrics.resumeDisabled || /protectionSummaries\.|protectionReasons\./.test(metrics.status))
+                    if (metrics.horizontalOverflow || !metrics.resumeDisabled || /protectionSummaries\.|protectionReasons\./.test(metrics.status))
                         failures.push({ language, fixture, size, expanded, dpr, ...metrics });
                     if (dpr === 1 && fixture === 'protection-requested' && expanded) {
                         await page.evaluate(() => document.querySelector('[data-protection-status]').parentElement.scrollIntoView({ block: 'start' }));

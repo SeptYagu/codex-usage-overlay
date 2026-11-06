@@ -282,7 +282,7 @@ fn show_quota_reset(
             #[cfg(windows)]
             if let (Some(path), Some(audio)) = (sound_path.filter(|path| !path.is_empty()), state.audio.get()) {
                 let toast_result = show_toast(title, body, None, &app.config().identifier);
-                audio.enqueue_notification(path.into(), kind);
+                audio.enqueue_notification(path.into(), kind, state.runtime_provider.unwrap_or(crate::config::Provider::Codex));
                 return toast_result;
             }
             #[cfg(not(windows))]

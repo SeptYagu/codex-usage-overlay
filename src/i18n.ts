@@ -4,6 +4,7 @@ import { initReactI18next } from 'react-i18next';
 const resources = {
   'en-US': {
     translation: {
+      commonSettings: 'Common settings', currentlyDisplayed: 'Showing', displayThisProvider: 'Show in overlay',
       monitorHealth: {"disabled": "Monitoring off", "checking": "Checking this provider…", "current": "Quota is up to date", "stale": "Showing an older reading; waiting for fresh data", "failed": "Quota read failed; the last reading is retained", "needsSetup": "Provider unavailable or needs setup"},
       singleProviderHint: "Showing {{current}}. Connect and enable another provider in Settings to switch.",
       switchProviderHint: "Showing {{current}}. Click to show {{next}}.",
@@ -225,6 +226,7 @@ const resources = {
   },
   'zh-CN': {
     translation: {
+      commonSettings: '公共设置', currentlyDisplayed: '正在显示', displayThisProvider: '在浮窗显示',
       monitorHealth: {"disabled": "监控已关闭", "checking": "正在检查此来源…", "current": "额度已更新", "stale": "正在显示旧读数，等待新数据", "failed": "额度读取失败，保留上次读数", "needsSetup": "来源不可用或需要配置"},
       singleProviderHint: "当前显示 {{current}}。在设置中连接并启用其他来源后即可切换。",
       switchProviderHint: "当前显示 {{current}}。点击切换到 {{next}}。",
@@ -444,6 +446,7 @@ const resources = {
   },
   'zh-Hant': {
     translation: {
+      commonSettings: '公共設定', currentlyDisplayed: '正在顯示', displayThisProvider: '在浮窗顯示',
       monitorHealth: {"disabled": "監控已關閉", "checking": "正在檢查此來源…", "current": "額度已更新", "stale": "正在顯示舊讀數，等待新資料", "failed": "額度讀取失敗，保留上次讀數", "needsSetup": "來源無法使用或需要設定"},
       singleProviderHint: "目前顯示 {{current}}。在設定中連線並啟用其他來源後即可切換。",
       switchProviderHint: "目前顯示 {{current}}。點擊切換至 {{next}}。",

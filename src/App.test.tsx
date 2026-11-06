@@ -1,6 +1,7 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
+import { mergeSettingsPatch } from './providerSettings';
 import i18n, { matchSupportedLocale } from './i18n';
 import { CodexUsage, DEFAULT_SETTINGS, OverlaySettings, SettingsEnvelope } from './types';
 
@@ -64,7 +65,7 @@ beforeEach(async () => {
   tauri.invoke.mockImplementation(async (command: string, args?: { patch?: Partial<OverlaySettings> }) => {
     if (command === 'get_settings') return { revision: serverRevision, settings: { ...serverSettings } };
     if (command === 'patch_settings') {
-      serverSettings = { ...serverSettings, ...args?.patch };
+      serverSettings = mergeSettingsPatch(serverSettings, args?.patch ?? {});
       return { revision: ++serverRevision, settings: { ...serverSettings } };
     }
     if (command === 'pick_sound_file') return 'C:\\sounds\\alert.wav';
@@ -94,22 +95,24 @@ describe('settings synchronization', () => {
   });
 
   it('keeps quota notifications independent and patches sound mode by field', async () => {
-    render(<App />);
-    const fiveHour = await screen.findByRole('checkbox', { name: '5-hour quota reset notification Enable notification' });
+    const view = render(<App />);
+    await screen.findByRole('heading', {name:'Local Codex'});
+    const codex = within(view.container.querySelector('[data-provider-settings="codex"]')! as HTMLElement);
+    const fiveHour = await codex.findByRole('checkbox', { name: '5-hour quota reset notification Enable notification' });
     fireEvent.click(fiveHour);
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
-      patch: { fiveHourResetNotification: false },
+      patch: { providerPreferences: {codex:{ fiveHourResetNotification: false }} },
     }));
     expect(serverSettings.weeklyResetNotification).toBe(true);
 
-    fireEvent.change(screen.getByRole('combobox', { name: 'Weekly quota reset notification Alert sound' }), {
+    fireEvent.change(codex.getByRole('combobox', { name: 'Weekly quota reset notification Alert sound' }), {
       target: { value: 'custom' },
     });
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
-      patch: { weeklySoundMode: 'custom' },
+      patch: { providerPreferences: {codex:{ weeklySoundMode: 'custom' }} },
     }));
-    expect(serverSettings.fiveHourResetNotification).toBe(false);
-    expect(serverSettings.weeklySoundMode).toBe('custom');
+    expect(serverSettings.providerPreferences?.codex?.fiveHourResetNotification).toBe(false);
+    expect(serverSettings.providerPreferences?.codex?.weeklySoundMode).toBe('custom');
   });
 
   it('saves the auto edge hide preference from settings', async () => {
@@ -142,24 +145,26 @@ describe('settings synchronization', () => {
   });
 
   it('selects, previews, stops, and clears a custom sound path', async () => {
-    render(<App />);
-    const mode = await screen.findByRole('combobox', { name: 'Weekly quota reset notification Alert sound' });
+    const view = render(<App />);
+    await screen.findByRole('heading', {name:'Local Codex'});
+    const codex = within(view.container.querySelector('[data-provider-settings="codex"]')! as HTMLElement);
+    const mode = await codex.findByRole('combobox', { name: 'Weekly quota reset notification Alert sound' });
     fireEvent.change(mode, { target: { value: 'custom' } });
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
-      patch: { weeklySoundMode: 'custom' },
+      patch: { providerPreferences: {codex:{ weeklySoundMode: 'custom' }} },
     }));
 
-    fireEvent.click(screen.getByRole('button', { name: 'Choose file…' }));
-    expect(await screen.findByText('C:\\sounds\\alert.wav')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
-    await screen.findByRole('button', { name: 'Stop preview' });
-    expect(tauri.invoke).toHaveBeenCalledWith('preview_sound', { kind: 'week' });
-    fireEvent.click(screen.getByRole('button', { name: 'Stop preview' }));
-    expect(tauri.invoke).toHaveBeenCalledWith('stop_preview_sound');
+    fireEvent.click(codex.getByRole('button', { name: 'Choose file…' }));
+    expect(await codex.findByText('C:\\sounds\\alert.wav')).toBeTruthy();
+    fireEvent.click(codex.getByRole('button', { name: 'Preview' }));
+    await codex.findByRole('button', { name: 'Stop preview' });
+    expect(tauri.invoke).toHaveBeenCalledWith('preview_sound', { kind: 'week', provider:'codex', playbackId:expect.any(String) });
+    fireEvent.click(codex.getByRole('button', { name: 'Stop preview' }));
+    expect(tauri.invoke).toHaveBeenCalledWith('stop_preview_sound', {playbackId:expect.any(String)});
 
-    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    fireEvent.click(codex.getByRole('button', { name: 'Clear' }));
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
-      patch: { weeklySoundPath: null },
+      patch: { providerPreferences: {codex:{ weeklySoundPath: null }} },
     }));
   });
 

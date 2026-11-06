@@ -46,20 +46,20 @@ const fs = require('node:fs');
                     }
                     if (dpr === 1 && scalePercent === 100 && overlayLayout === 'grouped') await page.locator('.overlay-capsule').screenshot({ path: `output/multi-provider-qa/overlay-${language}-${colorScheme}.png` });
                 }
-                for (const size of [{ width: 960, height: 620 }, { width: 760, height: 500 }]) {
+                for (const size of [{ width:1320,height:800 },{ width: 960, height: 620 }, { width: 760, height: 500 }]) {
                     await page.setViewportSize(size);
                     await page.evaluate(language => window.qa.render({ language, provider: 'codex' }, null, false, 'settings'), language);
                     for (const provider of ['codex', 'claude', 'dsh']) {
-                        await page.locator('#usage-provider').selectOption(provider);
-                        const metrics = await page.evaluate(() => {
-                            const grid = document.querySelector('.grid-cols-2');
+                        await page.locator(`[data-provider-settings="${provider}"]`).scrollIntoViewIfNeeded();
+                        const metrics = await page.evaluate(provider => {
+                            const grid = document.querySelector(`[data-provider-settings="${provider}"]`);
                             // Controls inside details become reachable by opening
                             // the disclosure, rather than scrolling a closed one.
                             for (const details of grid.querySelectorAll('details')) details.open = true;
                             const overflow = [...grid.children].some(column => column.scrollWidth > column.clientWidth);
                             const inaccessible = [];
                             const accessible = [...grid.querySelectorAll('input,select,button')].every(control => {
-                                const column = [...grid.children].find(c => c.contains(control));
+                                const column = grid;
                                 control.scrollIntoView({ block: 'nearest' });
                                 const r = control.getBoundingClientRect(), c = column.getBoundingClientRect();
                                 const fits = r.left >= c.left - 1 && r.right <= c.right + 1 && r.top >= c.top - 1 && r.bottom <= c.bottom + 1;
@@ -67,13 +67,14 @@ const fs = require('node:fs');
                                 return fits;
                             });
                             for (const column of grid.children) column.scrollTop = 0;
-                            return { display: document.getElementById('display-provider').value, configured: document.getElementById('usage-provider').value,
+                            const ids = [...document.querySelectorAll('[id]')].map(el=>el.id);
+                            return { display: document.querySelector('[aria-pressed=true]')?.closest('[data-provider-settings]')?.getAttribute('data-provider-settings'), configured: grid.getAttribute('data-provider-settings'), duplicateIds:ids.length!==new Set(ids).size, columns:document.querySelectorAll('[data-provider-settings]').length,
                                 overflow, accessible, inaccessible, rootScroll: document.documentElement.scrollHeight > innerHeight,
                                 missingTranslation: /monitorHealth\.|displayedProviderHint|monitorProvider|usageProviderHint/.test(grid.textContent) };
-                        });
+                        }, provider);
                         const item = { settings: true, colorScheme, dpr, language, provider, size, ...metrics }; results.push(item);
-                        if (metrics.display !== 'codex' || metrics.configured !== provider || metrics.overflow || !metrics.accessible || metrics.rootScroll || metrics.missingTranslation) failures.push(item);
-                        if (dpr === 1 && size.width === 960) await page.screenshot({ path: `output/multi-provider-qa/settings-${language}-${provider}-${colorScheme}.png` });
+                        if (metrics.display !== 'codex' || metrics.configured !== provider || metrics.columns !== 3 || metrics.duplicateIds || metrics.overflow || !metrics.accessible || metrics.missingTranslation) failures.push(item);
+                        if (dpr === 1 && size.width >= 960) await page.screenshot({ path: `output/multi-provider-qa/settings-${language}-${provider}-${size.width}-${colorScheme}.png` });
                     }
                 }
             }

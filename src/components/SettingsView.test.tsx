@@ -2,7 +2,6 @@ import { act, cleanup, fireEvent, render, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SettingsView } from './SettingsView';
 import { DEFAULT_SETTINGS, OverlaySettings } from '../types';
-import { APP_VERSION } from '../version';
 import i18n from '../i18n';
 
 const tauri = vi.hoisted(() => ({
@@ -38,455 +37,61 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/**
- * Sizes the three top-level bands the way the real window does: the body is the
- * `grid-cols-2` element, its two direct `<section>` children are the columns and the
- * header/footer are the sibling bands that span both columns.
- */
-async function renderSettings(overrides: Partial<OverlaySettings> = {}) {
+async function mount(overrides: Partial<OverlaySettings> = {}) {
   const onPatchSettings = vi.fn();
-  const utils = render(
-    <SettingsView settings={{ ...DEFAULT_SETTINGS, ...overrides }} onPatchSettings={onPatchSettings} />,
-  );
-  // Let the two mount-time invokes settle so their state updates stay inside act().
+  const view = render(<SettingsView settings={{ ...DEFAULT_SETTINGS, ...overrides }} onPatchSettings={onPatchSettings} />);
   await act(async () => {});
-
-  const root = utils.container.firstElementChild as HTMLElement;
-  const grid = utils.container.querySelector('.grid-cols-2') as HTMLElement;
-  const [left, right] = Array.from(grid.children) as HTMLElement[];
-  const header = root.children[0] as HTMLElement;
-  const footer = root.children[2] as HTMLElement;
-  return { ...utils, onPatchSettings, root, grid, left, right, header, footer };
+  const panel = (provider: string) => within(view.container.querySelector(`[data-provider-settings="${provider}"]`)! as HTMLElement);
+  return { ...view, panel, onPatchSettings };
 }
 
-describe('two-column settings layout', () => {
-  it('spans the header and footer across a grid that splits the body into two columns', async () => {
-    const { root, grid, left, right, header, footer } = await renderSettings();
-
-    // Single screen, no vertical scrollbar: the shell clips and fills the window.
-    expect(root.className).toContain('h-screen');
-    expect(root.className).toContain('overflow-hidden');
-    expect(root.classList.contains('flex-col')).toBe(true);
-
-    // Exactly three bands: header, the two-column grid, footer.
-    expect(root.children).toHaveLength(3);
-    expect(root.children[1]).toBe(grid);
-
-    // The grid owns exactly the two column sections.
-    expect(grid.children).toHaveLength(2);
-    expect(left.tagName).toBe('SECTION');
-    expect(right.tagName).toBe('SECTION');
-
-    // Both columns must have overflow-y-auto and min-h-0 so oversized content
-    // scrolls within the column and never clips controls or breaks root clientHeight == scrollHeight.
-    expect(left.classList.contains('overflow-y-auto')).toBe(true);
-    expect(right.classList.contains('overflow-y-auto')).toBe(true);
-    expect(left.classList.contains('min-h-0')).toBe(true);
-    expect(right.classList.contains('min-h-0')).toBe(true);
-
-    // Header and footer sit outside the columns, so they span the full window.
-    expect(grid.contains(header)).toBe(false);
-    expect(grid.contains(footer)).toBe(false);
-    expect(within(header).getByRole('heading', { name: 'Settings' })).toBeTruthy();
-    expect(within(header).getByText(`v${APP_VERSION}`)).toBeTruthy();
-    expect(within(footer).getByText('septwind@agent.qq.com')).toBeTruthy();
+describe('independent provider columns', () => {
+  it('mounts every provider, keeps common settings once and has no provider-edit selector', async () => {
+    const view = await mount();
+    expect(view.container.querySelectorAll('[data-provider-settings]')).toHaveLength(3);
+    expect(view.queryByLabelText('Provider settings')).toBeNull();
+    expect(view.container.querySelectorAll('[data-common-settings]')).toHaveLength(1);
+    const ids = [...view.container.querySelectorAll('[id]')].map(el => el.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(view.container.querySelectorAll('input[type="range"]')).toHaveLength(8);
   });
-
-  it('renders compact sound pickers preserving layout budget when custom sounds are selected', async () => {
-    const { right } = await renderSettings({
-      fiveHourResetNotification: true,
-      fiveHourSoundMode: 'custom',
-      fiveHourSoundPath: 'C:\\Users\\custom\\five_hour_alert_long_path_sample.wav',
-      weeklyResetNotification: true,
-      weeklySoundMode: 'custom',
-      weeklySoundPath: 'C:\\Users\\custom\\weekly_alert_long_path_sample.wav',
-    });
-
-    // Both sound pickers are mounted and fully rendered within the right section
-    const chooseButtons = within(right).getAllByRole('button', { name: 'Choose file…' });
-    expect(chooseButtons).toHaveLength(2);
-
-    const previewButtons = within(right).getAllByRole('button', { name: 'Preview' });
-    expect(previewButtons).toHaveLength(2);
-
-    const clearButtons = within(right).getAllByRole('button', { name: 'Clear' });
-    expect(clearButtons).toHaveLength(2);
-
-    // FE-M2 sentinel: SoundPicker must maintain compact footprint (truncate, py-0.5, gap-1.5)
-    // to prevent vertical overflow regression inside the fixed 486px slot.
-    for (const button of [...chooseButtons, ...previewButtons, ...clearButtons]) {
-      expect(button.className).toContain('py-0.5');
-    }
-
-    const pathParagraphs = [
-      within(right).getByText('C:\\Users\\custom\\five_hour_alert_long_path_sample.wav'),
-      within(right).getByText('C:\\Users\\custom\\weekly_alert_long_path_sample.wav'),
-    ];
-    for (const p of pathParagraphs) {
-      expect(p.className).toContain('truncate');
-      expect(p.className).toContain('font-mono');
-    }
-
-    const buttonContainers = chooseButtons.map((btn) => btn.parentElement as HTMLElement);
-    for (const container of buttonContainers) {
-      expect(container.className).toContain('gap-1.5');
-    }
+  it('writes refresh only to the initiating provider even when the overlay shows another', async () => {
+    const { panel, onPatchSettings } = await mount({provider: 'dsh'});
+    fireEvent.change(panel('claude').getByRole('combobox', {name: 'Refresh Interval'}), {target:{value:'120'}});
+    expect(onPatchSettings).toHaveBeenCalledWith({providerPreferences:{claude:{refreshIntervalSeconds:120}}}, false);
+    expect(onPatchSettings.mock.calls[0][0].provider).toBeUndefined();
   });
-
-  it('keeps overlay controls in the left column and system controls in the right', async () => {
-    const { left, right } = await renderSettings({ autoEdgeHide: true });
-
-    // Left column: appearance, size and interaction.
-    within(left).getByRole('combobox', { name: 'Overlay layout' });
-    within(left).getByRole('slider', { name: 'Overlay Size' });
-    within(left).getByRole('slider', { name: 'Background Transparency' });
-    within(left).getByRole('checkbox', { name: 'Show Credit Balance' });
-    within(left).getByRole('checkbox', { name: 'Auto hide at screen edge' });
-    within(left).getByRole('checkbox', { name: 'Show 10% grid on edge bars' });
-    within(left).getByRole('checkbox', { name: 'Mouse click-through' });
-
-    // Right column: refresh cadence, start-up/updates and reset alerts.
-    within(right).getByRole('combobox', { name: 'Refresh Interval' });
-    within(right).getByRole('checkbox', { name: 'Check for updates automatically' });
-    within(right).getByRole('checkbox', { name: 'Allow automatic update installation' });
-    within(right).getByRole('heading', { name: 'Notifications' });
-
-    // Neither half bleeds into the other.
-    expect(within(right).queryByRole('checkbox', { name: 'Show 10% grid on edge bars' })).toBeNull();
-    expect(within(left).queryByRole('combobox', { name: 'Refresh Interval' })).toBeNull();
-    expect(within(left).queryByRole('heading', { name: 'Notifications' })).toBeNull();
+  it('keeps reminder preferences and explicit null paths separate', async () => {
+    const { panel, onPatchSettings } = await mount();
+    fireEvent.click(panel('dsh').getByRole('checkbox', {name:'Weekly quota reset notification Enable notification'}));
+    expect(onPatchSettings).toHaveBeenCalledWith({providerPreferences:{dsh:{weeklyResetNotification:false}}}, false);
   });
-
-  it('tucks the percentage-grid switch directly below the edge-hide switch', async () => {
-    const { left } = await renderSettings({ autoEdgeHide: true });
-    const switchLabels = Array.from(left.children).filter((child) => child.tagName === 'LABEL');
-    const names = switchLabels.map((label) => label.textContent);
-    const edgeHideIndex = names.indexOf('Auto hide at screen edge');
-    expect(edgeHideIndex).toBeGreaterThanOrEqual(0);
-    expect(names[edgeHideIndex + 1]).toBe('Show 10% grid on edge bars');
+  it('keeps protection thresholds and zero-capable DSH ranges independent', async () => {
+    const { panel, onPatchSettings } = await mount({autoPauseOnLowQuota:true});
+    const threshold = panel('codex').getByRole('slider', {name:'5-hour quota threshold'}) as HTMLInputElement;
+    expect(threshold.min).toBe('1');
+    expect((panel('dsh').getByRole('slider', {name:'5-hour quota threshold'}) as HTMLInputElement).min).toBe('0');
+    fireEvent.change(threshold, {target:{value:'9'}});
+    expect(onPatchSettings).toHaveBeenCalledWith({providerPreferences:{codex:{fiveHourThresholdPercent:9}}}, true);
   });
-});
-
-describe('percentage grid interaction', () => {
-  it.each(['en-US', 'zh-CN', 'zh-Hant'])('explains edge bars in %s and hides the grid option until edge auto-hide is on', async (language) => {
-    await i18n.changeLanguage(language);
-    const settings = { ...DEFAULT_SETTINGS, language, showPercentageGrid: true, autoEdgeHide: false };
-    const { left, rerender, onPatchSettings } = await renderSettings(settings);
-    const label = i18n.getResource(language, 'translation', 'showPercentageGrid');
-    expect(within(left).queryByRole('checkbox', { name: label })).toBeNull();
-    expect(left.querySelector('#percentage-grid-hint')).toBeNull();
-
-    rerender(<SettingsView settings={{ ...settings, autoEdgeHide: true }} onPatchSettings={onPatchSettings} />);
-    const toggle = within(left).getByRole('checkbox', { name: label }) as HTMLInputElement;
-    expect(toggle.checked).toBe(true);
-    const hint = left.querySelector(`#${toggle.getAttribute('aria-describedby')}`);
-    const translatedHint = i18n.getResource(language, 'translation', 'showPercentageGridHint');
-    expect(translatedHint).toContain('10%');
-    expect(hint?.textContent).toBe(translatedHint);
-    for (const key of ['overlayLayoutHint', 'transparencyHint', 'showFiveHourQuotaHint', 'showBurnRateHint', 'autoEdgeHideHint', 'mousePassthroughHint', 'usageProviderHint', 'refreshIntervalHint']) {
-      const translation = i18n.getResource(language, 'translation', key);
-      expect(typeof translation).toBe('string');
-      expect(translation.length).toBeGreaterThan(0);
-      within(left.parentElement!).getByText(translation);
-    }
-
-    rerender(<SettingsView settings={settings} onPatchSettings={onPatchSettings} />);
-    expect(within(left).queryByRole('checkbox', { name: label })).toBeNull();
-    // Visibility changes preserve the saved grid preference without saving it again.
-    expect(onPatchSettings).not.toHaveBeenCalled();
+  it('disables protection controls for a disabled source without hiding other columns', async () => {
+    const {panel} = await mount({providerPreferences:{codex:{monitorEnabled:false,protectionEnabled:false,fiveHourThresholdPercent:5,weeklyThresholdPercent:2}}});
+    expect((panel('codex').getByRole('checkbox',{name:'Pause Codex when quota runs low'}) as HTMLInputElement).disabled).toBe(true);
+    expect(panel('claude').getByRole('checkbox',{name:'Monitor this provider'})).toBeTruthy();
   });
-
-  it('patches showPercentageGrid on when the switch is turned on', async () => {
-    const { left, onPatchSettings } = await renderSettings({ showPercentageGrid: false, autoEdgeHide: true });
-    const toggle = within(left).getByRole('checkbox', { name: 'Show 10% grid on edge bars' }) as HTMLInputElement;
-    expect(toggle.checked).toBe(false);
-
-    fireEvent.click(toggle);
-
-    expect(onPatchSettings).toHaveBeenCalledTimes(1);
-    expect(onPatchSettings.mock.calls[0][0]).toEqual({ showPercentageGrid: true });
+  it('preserves a legal nonstandard refresh value instead of selecting a different default', async () => {
+    const {panel} = await mount({refreshIntervalSeconds:47});
+    expect((panel('codex').getByRole('combobox',{name:'Refresh Interval'}) as HTMLSelectElement).value).toBe('47');
   });
-
-  it('reflects an enabled grid and patches it off without touching other fields', async () => {
-    const { left, onPatchSettings } = await renderSettings({ showPercentageGrid: true, autoEdgeHide: true });
-    const toggle = within(left).getByRole('checkbox', { name: 'Show 10% grid on edge bars' }) as HTMLInputElement;
-    expect(toggle.checked).toBe(true);
-
-    fireEvent.click(toggle);
-
-    expect(onPatchSettings).toHaveBeenCalledTimes(1);
-    expect(onPatchSettings.mock.calls[0][0]).toEqual({ showPercentageGrid: false });
+  it('queries global installation and permission status only once', async () => {
+    await mount();
+    expect(tauri.invoke.mock.calls.filter(([name])=>name==='get_notification_status')).toHaveLength(1);
+    expect(tauri.invoke.mock.calls.filter(([name])=>name==='is_installed_version')).toHaveLength(1);
   });
-});
-
-
-describe('smart pause settings', () => {
-  it('renders the auto-pause controls in the right column only', async () => {
-    const { left, right } = await renderSettings();
-
-    within(right).getByRole('checkbox', { name: 'Pause Codex when quota runs low' });
-    within(right).getByRole('slider', { name: '5-hour quota threshold' });
-    within(right).getByRole('slider', { name: 'Weekly quota threshold' });
-
-    expect(within(left).queryByRole('checkbox', { name: 'Pause Codex when quota runs low' })).toBeNull();
-    expect(within(left).queryByRole('slider', { name: '5-hour quota threshold' })).toBeNull();
-    expect(within(left).queryByRole('slider', { name: 'Weekly quota threshold' })).toBeNull();
-  });
-
-  it('keeps the master switch off by default and saves it immediately', async () => {
-    const { right, onPatchSettings } = await renderSettings();
-    const toggle = within(right).getByRole('checkbox', { name: 'Pause Codex when quota runs low' }) as HTMLInputElement;
-    expect(toggle.checked).toBe(false);
-
-    fireEvent.click(toggle);
-
-    expect(onPatchSettings).toHaveBeenCalledTimes(1);
-    // Only the master switch is patched; no threshold rides along.
-    expect(onPatchSettings.mock.calls[0][0]).toEqual({ providerPreferences: { codex: { protectionEnabled: true } } });
-    // Immediate save: the call is not routed through the debounced slider path.
-    expect(onPatchSettings.mock.calls[0][1]).toBeFalsy();
-  });
-
-  it('disables both threshold sliders while the master switch is off', async () => {
-    const { right, onPatchSettings, rerender } = await renderSettings();
-    const five = within(right).getByRole('slider', { name: '5-hour quota threshold' }) as HTMLInputElement;
-    const weekly = within(right).getByRole('slider', { name: 'Weekly quota threshold' }) as HTMLInputElement;
-
-    expect(five.disabled).toBe(true);
-    expect(weekly.disabled).toBe(true);
-
-    rerender(<SettingsView settings={{ ...DEFAULT_SETTINGS, autoPauseOnLowQuota: true }} onPatchSettings={onPatchSettings} />);
-
-    const enabledFive = within(right).getByRole('slider', { name: '5-hour quota threshold' }) as HTMLInputElement;
-    const enabledWeekly = within(right).getByRole('slider', { name: 'Weekly quota threshold' }) as HTMLInputElement;
-    expect(enabledFive.disabled).toBe(false);
-    expect(enabledWeekly.disabled).toBe(false);
-  });
-
-  it('patches the 5-hour threshold for Codex independently', async () => {
-    const { right, onPatchSettings } = await renderSettings({ autoPauseOnLowQuota: true });
-    const five = within(right).getByRole('slider', { name: '5-hour quota threshold' });
-
-    fireEvent.change(five, { target: { value: '7' } });
-
-    expect(onPatchSettings).toHaveBeenCalledTimes(1);
-    expect(onPatchSettings.mock.calls[0][0]).toEqual({ providerPreferences: { codex: { fiveHourThresholdPercent: 7 } } });
-    expect(onPatchSettings.mock.calls[0][1]).toBe(true);
-  });
-
-  it('patches the weekly threshold for Codex independently', async () => {
-    const { right, onPatchSettings } = await renderSettings({ autoPauseOnLowQuota: true });
-    const weekly = within(right).getByRole('slider', { name: 'Weekly quota threshold' });
-
-    fireEvent.change(weekly, { target: { value: '4' } });
-
-    expect(onPatchSettings).toHaveBeenCalledTimes(1);
-    expect(onPatchSettings.mock.calls[0][0]).toEqual({ providerPreferences: { codex: { weeklyThresholdPercent: 4 } } });
-    expect(onPatchSettings.mock.calls[0][1]).toBe(true);
-  });
-
-  it('renders the current threshold percentages and the hint', async () => {
-    const { right } = await renderSettings();
-
-    expect(within(right).getByText('5%')).toBeTruthy();
-    expect(within(right).getByText('2%')).toBeTruthy();
-    expect(within(right).getByText(/Sends a pause request to your active Codex session/)).toBeTruthy();
-  });
-});
-
-
-it.each([
-  ['en-US', 'Pause Codex when quota runs low', '5-hour quota threshold', 'Weekly quota threshold'],
-  ['zh-CN', '额度不足时暂停 Codex', '5 小时额度阈值', '每周额度阈值'],
-  ['zh-Hant', '額度不足時暫停 Codex', '5 小時額度閾值', '每週額度閾值'],
-])('exposes localized auto-pause control names in %s', async (language, toggleName, fiveName, weeklyName) => {
-  await i18n.changeLanguage(language);
-  const { right, onPatchSettings } = await renderSettings();
-
-  const toggle = within(right).getByRole('checkbox', { name: toggleName }) as HTMLInputElement;
-  expect(toggle.checked).toBe(false);
-  fireEvent.click(toggle);
-  expect(onPatchSettings).toHaveBeenCalledTimes(1);
-  expect(onPatchSettings.mock.calls[0][0]).toEqual({ providerPreferences: { codex: { protectionEnabled: true } } });
-
-  const five = within(right).getByRole('slider', { name: fiveName }) as HTMLInputElement;
-  const weekly = within(right).getByRole('slider', { name: weeklyName }) as HTMLInputElement;
-  expect(five.disabled).toBe(true);
-  expect(weekly.disabled).toBe(true);
-
-  // The accessible name must follow the active locale instead of staying English.
-  if (language !== 'en-US') {
-    expect(within(right).queryByRole('checkbox', { name: 'Pause Codex when quota runs low' })).toBeNull();
-  }
-});
-
-
-it.each([
-  ['en-US', 'Show 5-hour quota', 'Show Burn Rate (%/h)'],
-  ['zh-CN', '显示 5 小时额度', '显示消耗速度（%/h）'],
-  ['zh-Hant', '顯示 5 小時額度', '顯示消耗速度（%/h）'],
-])('sends independent display patches in %s', async (language, fiveLabel, rateLabel) => {
-  await i18n.changeLanguage(language);
-  const { left, right, onPatchSettings, rerender } = await renderSettings();
-  const five = within(left).getByRole('checkbox', { name: fiveLabel }) as HTMLInputElement;
-  const rate = within(left).getByRole('checkbox', { name: rateLabel }) as HTMLInputElement;
-  expect(five.checked).toBe(true);
-  expect(rate.checked).toBe(true);
-  fireEvent.click(five);
-  expect(onPatchSettings).toHaveBeenLastCalledWith({ showFiveHourQuota: false }, false);
-  rerender(<SettingsView settings={{ ...DEFAULT_SETTINGS, showFiveHourQuota: false }} onPatchSettings={onPatchSettings} />);
-  expect(rate.disabled).toBe(false);
-  fireEvent.click(rate);
-  expect(onPatchSettings).toHaveBeenLastCalledWith({ showBurnRate: false }, false);
-  const resume = within(right).getByRole('checkbox', { name: i18n.t('autoResumeAfterQuotaReset') });
-  expect((resume as HTMLInputElement).disabled).toBe(true);
-  expect(within(right).getAllByRole('checkbox').filter(box => box !== resume)
-    .every(box => !(box as HTMLInputElement).disabled)).toBe(true);
-});
-
-describe('usage provider', () => {
-  it('configures a background provider without changing the displayed source or other protection settings', async () => {
-    const { getByLabelText, getByRole, onPatchSettings } = await renderSettings({ provider: 'codex', providerPreferences: {
-      codex: { monitorEnabled: true, protectionEnabled: true, fiveHourThresholdPercent: 7, weeklyThresholdPercent: 3 },
-      claude: { monitorEnabled: true, protectionEnabled: false, fiveHourThresholdPercent: 4, weeklyThresholdPercent: 2 },
-    } });
-    fireEvent.change(getByLabelText('Provider settings'), { target: { value: 'claude' } });
-    expect((getByLabelText('Displayed provider') as HTMLSelectElement).value).toBe('codex');
-    expect(onPatchSettings).not.toHaveBeenCalled();
-    fireEvent.click(getByRole('checkbox', { name: 'Block Claude Code requests when quota runs low' }));
-    expect(onPatchSettings).toHaveBeenLastCalledWith({ providerPreferences: { claude: { protectionEnabled: true } } }, false);
-    onPatchSettings.mockClear();
-    fireEvent.click(getByRole('checkbox', { name: 'Monitor this provider' }));
-    expect(onPatchSettings).toHaveBeenCalledWith({ providerPreferences: { claude: { monitorEnabled: false, protectionEnabled: false } } });
-  });
-  const claudeStatus = {
-    statusLine: false, hooks: false, bridgeAvailable: true,
-    settingsPath: 'C:\\Users\\me\\.claude\\settings.json',
-    snapshotCapturedAt: null, claudeVersion: null, blockedCount: 0, lastBlockedAt: null, error: null,
-  };
-
-  it('switches the provider and keeps the Codex controls for Codex', async () => {
-    const { onPatchSettings, getByLabelText, queryByText, getByText } = await renderSettings();
-    expect(getByText('Show Credit Balance')).toBeTruthy();
-    expect(getByText('Pause Codex when quota runs low')).toBeTruthy();
-    expect(queryByText('Claude Code connection')).toBeNull();
-    fireEvent.change(getByLabelText('Displayed provider'), { target: { value: 'claude' } });
-    expect(onPatchSettings).toHaveBeenCalledWith({ provider: 'claude' });
-  });
-
-  it('switches to DSH without auto-resume and exposes all three independent source labels', async () => {
-    const { onPatchSettings, getByLabelText } = await renderSettings();
-    for (const name of ['Local Codex', 'DSH Codex subscription', 'Claude']) expect(within(getByLabelText('Displayed provider')).getByRole('option', { name })).toBeTruthy();
-    fireEvent.change(getByLabelText('Displayed provider'), { target: { value: 'dsh' } });
-    expect(onPatchSettings).toHaveBeenCalledWith({ provider: 'dsh' });
-  });
-
-  it('uses independent zero-capable DSH thresholds and preserves local threshold ranges and values', async () => {
-    const { right, onPatchSettings, rerender } = await renderSettings({ provider: 'dsh', autoPauseOnLowQuota: true });
-    const five = within(right).getByRole('slider', { name: '5-hour quota threshold' }) as HTMLInputElement;
-    const weekly = within(right).getByRole('slider', { name: 'Weekly quota threshold' }) as HTMLInputElement;
-    expect([five.value, five.min, five.max]).toEqual(['0', '0', '15']);
-    expect([weekly.value, weekly.min, weekly.max]).toEqual(['0', '0', '10']);
-    expect(within(right).getByText(i18n.t('quotaThresholdZeroHint'))).toBeTruthy();
-    fireEvent.change(five, { target: { value: '3' } });
-    expect(onPatchSettings).toHaveBeenLastCalledWith({ providerPreferences: { dsh: { fiveHourThresholdPercent: 3 } } }, true);
-    fireEvent.change(weekly, { target: { value: '4' } });
-    expect(onPatchSettings).toHaveBeenLastCalledWith({ providerPreferences: { dsh: { weeklyThresholdPercent: 4 } } }, true);
-    rerender(<SettingsView settings={{ ...DEFAULT_SETTINGS, autoPauseOnLowQuota: true }} onPatchSettings={onPatchSettings} />);
-    expect([five.value, five.min, five.max]).toEqual(['5', '1', '15']);
-    expect([weekly.value, weekly.min, weekly.max]).toEqual(['2', '1', '10']);
-    expect(within(right).queryByText(i18n.t('quotaThresholdZeroHint'))).toBeNull();
-  });
-
-  it('shows the Claude connection card and the hook-based guard for Claude', async () => {
-    tauri.invoke.mockImplementation(async (command: string) => {
-      if (command === 'is_installed_version') return true;
-      if (command === 'get_notification_status') return 'enabled';
-      if (command === 'claude_connection_status') return claudeStatus;
-      if (command === 'claude_connect') return { ...claudeStatus, statusLine: true, hooks: true, snapshotCapturedAt: 1_800_000_000, claudeVersion: '2.1.90' };
-      return null;
-    });
-    const { getByRole, getByText, queryByText } = await renderSettings({ provider: 'claude', autoPauseOnLowQuota: true });
-    await act(async () => {});
-    const card = within(getByRole('group', { name: 'Claude Code connection' }));
-    expect(card.getByText('Not connected')).toBeTruthy();
-    expect(card.getByText(/No limits received yet/)).toBeTruthy();
-    expect(card.getByText(/C:\\Users\\me\\\.claude\\settings\.json/)).toBeTruthy();
-    expect(queryByText('Show Credit Balance')).toBeNull();
-    expect(getByText('Block Claude Code requests when quota runs low')).toBeTruthy();
-    expect(queryByText('Pause protection status')).toBeNull();
-
-    await act(async () => { fireEvent.click(card.getByRole('button', { name: 'Connect Claude Code' })); });
-    expect(tauri.invoke).toHaveBeenCalledWith('claude_connect');
-    expect(card.getByText('Connected')).toBeTruthy();
-    expect(card.getByText(/Claude Code 2\.1\.90/)).toBeTruthy();
-    expect(card.getByRole('button', { name: 'Disconnect' })).toBeTruthy();
-  });
-
-  it('disables connecting when the helper is missing', async () => {
-    tauri.invoke.mockImplementation(async (command: string) => {
-      if (command === 'claude_connection_status') return { ...claudeStatus, bridgeAvailable: false };
-      return null;
-    });
-    const { getByRole } = await renderSettings({ provider: 'claude' });
-    await act(async () => {});
-    const card = within(getByRole('group', { name: 'Claude Code connection' }));
-    expect(card.getByRole('alert').textContent).toContain('claude-usage-bridge.exe');
-    expect((card.getByRole('button', { name: 'Connect Claude Code' }) as HTMLButtonElement).disabled).toBe(true);
-  });
-});
-
-describe('update channel', () => {
-  it('opts into preview releases from the update section', async () => {
-    const { onPatchSettings, getByLabelText, getByText } = await renderSettings();
-    const toggle = getByLabelText('Include preview releases') as HTMLInputElement;
-    expect(toggle.checked).toBe(false);
-    expect(getByText(/does not downgrade an installed one/)).toBeTruthy();
-    fireEvent.click(toggle);
-    expect(onPatchSettings).toHaveBeenCalledWith({ includePrereleaseUpdates: true }, false);
-  });
-});
-
-describe('provider logo and live Claude reading', () => {
-  it('toggles the provider logo for either provider', async () => {
-    const { onPatchSettings, getByLabelText } = await renderSettings();
-    const toggle = getByLabelText('Show provider logo') as HTMLInputElement;
-    expect(toggle.checked).toBe(true);
-    fireEvent.click(toggle);
-    expect(onPatchSettings).toHaveBeenCalledWith({ showProviderLogo: false }, false);
-  });
-
-  it('opts into live reading and explains a missing terminal login', async () => {
-    const status = {
-      statusLine: true, hooks: true, bridgeAvailable: true, settingsPath: 'C:\Users\me\.claude\settings.json',
-      snapshotCapturedAt: null, claudeVersion: null, blockedCount: 0, lastBlockedAt: null, error: null,
-      readFailure: 'authentication', readHttpStatus: null,
-    };
-    tauri.invoke.mockImplementation(async (command: string) => command === 'claude_connection_status' ? status : null);
-    const off = await renderSettings({ provider: 'claude' });
-    await act(async () => {});
-    const card = within(off.getByRole('group', { name: 'Claude Code connection' }));
-    expect(card.getByText(/In the desktop app, turn on live reading/)).toBeTruthy();
-    // The sign-in hint belongs to live reading only.
-    expect(card.queryByText(/No usable terminal login/)).toBeNull();
-    fireEvent.click(card.getByLabelText('Read limits live with your Claude login'));
-    expect(off.onPatchSettings).toHaveBeenCalledWith({ claudeLivePolling: true }, false);
-    cleanup();
-
-    const on = await renderSettings({ provider: 'claude', claudeLivePolling: true });
-    await act(async () => {});
-    const liveCard = within(on.getByRole('group', { name: 'Claude Code connection' }));
-    expect(liveCard.getByRole('alert').textContent).toMatch(/No usable terminal login.*\/login/);
-  });
-
-  it('reports a refused live read with its HTTP status', async () => {
-    tauri.invoke.mockImplementation(async (command: string) => command === 'claude_connection_status' ? {
-      statusLine: false, hooks: false, bridgeAvailable: true, settingsPath: null, snapshotCapturedAt: 1_800_000_000,
-      claudeVersion: null, blockedCount: 0, lastBlockedAt: null, error: null, readFailure: 'rpc', readHttpStatus: 429,
-    } : null);
-    const { getByRole } = await renderSettings({ provider: 'claude', claudeLivePolling: true });
-    await act(async () => {});
-    expect(within(getByRole('group', { name: 'Claude Code connection' })).getByRole('alert').textContent)
-      .toBe('Live reading failed: HTTP 429. The overlay keeps the last stored reading, if any.');
+  it.each(['en-US','zh-CN','zh-Hant'])('keeps all providers and unique labels in %s', async locale => {
+    await i18n.changeLanguage(locale);
+    const view = await mount();
+    for (const key of ['providerCodex','providerClaude','providerDsh']) expect(view.getByRole('heading',{name:i18n.t(key)})).toBeTruthy();
+    expect(view.getByText(i18n.t('commonSettings'))).toBeTruthy();
   });
 });

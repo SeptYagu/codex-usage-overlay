@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { OverlaySettings, Provider, ProviderPreference, SettingsPatch } from '../types';
@@ -16,25 +16,54 @@ interface SettingsViewProps {
   onPatchSettings: (patch: SettingsPatch, debounce?: boolean) => void;
 }
 
-/**
- * The settings window uses two independently scrolling columns at 960x620:
- * header and footer span both columns, the left column holds the
- * overlay's appearance/size/interaction controls and the right one everything that
- * integrates with the system (refresh cadence, start-up, updates, reset alerts).
- */
-export const SettingsView: React.FC<SettingsViewProps> = ({
-  settings: savedSettings,
-  onPatchSettings: savePatch,
-}) => {
+export const SettingsView = ({ settings, onPatchSettings }: SettingsViewProps) => {
   const { t } = useTranslation();
-  const [configurationProvider, setConfigurationProvider] = useState(savedSettings.provider);
-  // Compatibility for legacy callers that have no independent provider preferences.
-  useEffect(() => { if (!savedSettings.providerPreferences) setConfigurationProvider(savedSettings.provider); }, [savedSettings.provider, savedSettings.providerPreferences]);
+  const monitors = useProviderMonitors();
+  const [isInstalled, setIsInstalled] = useState(false);
+  const [notificationStatus, setNotificationStatus] = useState<string>('loading');
+  useEffect(() => {
+    invoke<boolean>('is_installed_version').then(setIsInstalled).catch(() => {});
+    invoke<string>('get_notification_status').then(setNotificationStatus).catch(() => setNotificationStatus('unavailable'));
+  }, []);
+  useEffect(() => { getCurrentWindow().setTitle(t('windowSettings')).catch(console.error); }, [t, settings.language]);
+  const shared = { savedSettings: settings, savePatch: onPatchSettings, monitors, isInstalled, notificationStatus };
+  return <div className="settings-shell bg-[#F5F6F8] dark:bg-slate-900 text-slate-800 dark:text-slate-100 font-sans select-none">
+    <header className="flex shrink-0 justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-3">
+      <h2 className="text-base font-bold">{t('windowSettings')}</h2><span className="text-xs font-mono">v{APP_VERSION}</span>
+    </header>
+    <details className="settings-common shrink-0 rounded-lg border border-slate-200 dark:border-slate-700 p-3">
+      <summary className="cursor-pointer font-semibold text-sm">{t('commonSettings')}</summary>
+      <SettingsPanel {...shared} common configurationProvider={settings.provider} />
+    </details>
+    <main className="settings-provider-grid">
+      {(['codex', 'claude', 'dsh'] as Provider[]).map(provider => <section key={provider} data-provider-settings={provider} aria-label={t(provider === 'codex' ? 'providerCodex' : provider === 'claude' ? 'providerClaude' : 'providerDsh')} className="settings-provider-column rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/30">
+        <header className="flex items-center justify-between gap-2 p-3 border-b border-slate-200 dark:border-slate-700">
+          <h3 className="font-semibold text-sm">{t(provider === 'codex' ? 'providerCodex' : provider === 'claude' ? 'providerClaude' : 'providerDsh')}</h3>
+          <button type="button" aria-pressed={settings.provider === provider} disabled={!monitors[provider]?.available} onClick={() => onPatchSettings({provider})} className="text-xs rounded border px-2 py-1 disabled:opacity-50">{t(settings.provider === provider ? 'currentlyDisplayed' : 'displayThisProvider')}</button>
+        </header>
+        <SettingsPanel {...shared} configurationProvider={provider} />
+      </section>)}
+    </main>
+    <footer className="shrink-0 text-center text-xs text-slate-400">{t('feedback')} <span className="select-text">septwind@agent.qq.com</span></footer>
+  </div>;
+};
+
+function SettingsPanel({ savedSettings, savePatch, configurationProvider, monitors, isInstalled, notificationStatus, common = false }: {
+  savedSettings: OverlaySettings;
+  savePatch: SettingsViewProps['onPatchSettings'];
+  configurationProvider: Provider;
+  monitors: ReturnType<typeof useProviderMonitors>;
+  isInstalled: boolean;
+  notificationStatus: string;
+  common?: boolean;
+}) {
+  const { t } = useTranslation();
   const settings = settingsForProvider(savedSettings, configurationProvider);
   const preference = providerPreference(savedSettings, configurationProvider);
-  const monitors = useProviderMonitors();
   const onPatchSettings = (patch: SettingsPatch, debounce = false) => {
     const fields: Record<string, keyof ProviderPreference> = {
+      refreshIntervalSeconds: 'refreshIntervalSeconds', fiveHourResetNotification: 'fiveHourResetNotification', weeklyResetNotification: 'weeklyResetNotification',
+      fiveHourSoundMode: 'fiveHourSoundMode', weeklySoundMode: 'weeklySoundMode', fiveHourSoundPath: 'fiveHourSoundPath', weeklySoundPath: 'weeklySoundPath',
       autoPauseOnLowQuota: 'protectionEnabled', autoPauseFiveHourThresholdPercent: 'fiveHourThresholdPercent',
       autoPauseWeeklyThresholdPercent: 'weeklyThresholdPercent', dshFiveHourThresholdPercent: 'fiveHourThresholdPercent',
       dshWeeklyThresholdPercent: 'weeklyThresholdPercent',
@@ -49,22 +78,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
     savePatch(global as SettingsPatch, debounce);
   };
-  const [isInstalled, setIsInstalled] = useState<boolean>(false);
-  const [notificationStatus, setNotificationStatus] = useState<'enabled' | 'disabled' | 'unavailable' | 'loading'>('loading');
-
-  useEffect(() => {
-    invoke<boolean>('is_installed_version')
-      .then((installed) => setIsInstalled(installed))
-      .catch(() => setIsInstalled(false));
-    invoke<'enabled' | 'disabled' | 'unavailable'>('get_notification_status')
-      .then(setNotificationStatus)
-      .catch(() => setNotificationStatus('unavailable'));
-  }, []);
-
-  useEffect(() => {
-    getCurrentWindow().setTitle(t('windowSettings')).catch(console.error);
-  }, [t, settings.language]);
-
   const updateField = <K extends keyof OverlaySettings>(key: K, value: OverlaySettings[K]) => {
     onPatchSettings({ [key]: value }, key === 'scalePercent' || key === 'backgroundTransparencyPercent');
   };
@@ -81,21 +94,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const fiveHourThreshold = dsh ? settings.dshFiveHourThresholdPercent : settings.autoPauseFiveHourThresholdPercent;
   const weeklyThreshold = dsh ? settings.dshWeeklyThresholdPercent : settings.autoPauseWeeklyThresholdPercent;
 
-  return (
-    <div className="h-screen overflow-hidden bg-[#F5F6F8] dark:bg-slate-900 text-slate-800 dark:text-slate-100 p-5 flex flex-col font-sans select-none">
-      {/* Header — full width */}
-      <div className="flex shrink-0 items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
-        <h2 className="text-base font-bold tracking-tight">{t('windowSettings')}</h2>
-        <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-100 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 font-mono">
-          v{APP_VERSION}
-        </span>
-      </div>
-
-      {/* Two columns */}
-      <div className="grid flex-1 min-h-0 grid-cols-2 gap-5 pt-4">
-        {/* Left column: overlay appearance, size and interaction */}
-        <section aria-label={t('windowSettings')} className="min-h-0 space-y-1.5 overflow-y-auto pr-1">
-          <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
+  if (common) return <div data-common-settings className="grid gap-4 md:grid-cols-2 max-h-72 overflow-y-auto pt-4">
+    <div className="space-y-2">          <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
             <label htmlFor="overlay-layout" className="text-sm font-medium">{t('overlayLayout')}</label>
             <select
               id="overlay-layout"
@@ -257,38 +257,64 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <p className="px-1 text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
             {t('hint')}
           </p>
-        </section>
+</div><div className="space-y-2">          {/* Autostart (only meaningful for installed builds) */}
+          {isInstalled && (
+            <label className={toggleRow}>
+              <span className="text-sm font-medium">{t('autoStart')}</span>
+              <input
+                type="checkbox"
+                checked={settings.autoStart}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  invoke('set_autostart', { enable: checked }).catch(console.error);
+                }}
+                className={checkbox}
+              />
+            </label>
+          )}
 
-        {/* Right column: system integration, updates and reset alerts */}
-        <section aria-label={t('notificationSection')} className="min-h-0 space-y-2.5 overflow-y-auto pr-1">
-          <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
-            <label htmlFor="display-provider" className="text-sm font-medium">{t('displayedProvider')}</label>
-            <select id="display-provider" value={savedSettings.provider}
-              onChange={event => savePatch({ provider: event.target.value as Provider })}
-              className="min-w-0 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1">
-              <option value="codex">{t('providerCodex')}</option>
-              <option value="claude">{t('providerClaude')}</option>
-              <option value="dsh">{t('providerDsh')}</option>
-            </select>
-          </div>
-          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('displayedProviderHint')}</p>
-          <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
-            <label htmlFor="usage-provider" className="text-sm font-medium">{t('usageProvider')}</label>
-            <select
-              id="usage-provider"
-              aria-describedby="usage-provider-hint"
-              value={configurationProvider}
-              onChange={(e) => setConfigurationProvider(e.target.value as Provider)}
-              className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500"
-            >
-              <option value="codex">{t('providerCodex')}</option>
-              <option value="dsh">{t('providerDsh')}</option>
-              <option value="claude">{t('providerClaude')}</option>
-            </select>
-          </div>
-
-          <p id="usage-provider-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('usageProviderHint')}</p>
           <label className={toggleRow}>
+            <span className="text-sm font-medium">{t('autoCheckUpdates')}</span>
+            <input
+              type="checkbox"
+              checked={settings.autoCheckUpdates}
+              onChange={(e) => onPatchSettings(e.target.checked
+                ? { autoCheckUpdates: true }
+                : { autoCheckUpdates: false, autoInstallUpdates: false })}
+              className={checkbox}
+            />
+          </label>
+
+          <label className={toggleRow}>
+            <span className="text-sm font-medium">{t('autoInstallUpdates')}</span>
+            <input
+              type="checkbox"
+              checked={settings.autoInstallUpdates}
+              onChange={(e) => onPatchSettings(e.target.checked
+                ? { autoInstallUpdates: true, autoCheckUpdates: true }
+                : { autoInstallUpdates: false })}
+              className={checkbox}
+            />
+          </label>
+          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('autoInstallUpdatesHint')}</p>
+
+          <label className={toggleRow}>
+            <span className="text-sm font-medium">{t('includePrereleaseUpdates')}</span>
+            <input
+              type="checkbox"
+              aria-label={t('includePrereleaseUpdates')}
+              checked={settings.includePrereleaseUpdates}
+              onChange={(e) => updateField('includePrereleaseUpdates', e.target.checked)}
+              className={checkbox}
+            />
+          </label>
+          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('includePrereleaseUpdatesHint')}</p>
+
+
+      {notificationStatus === 'disabled' && <p role="status">{t('notifyPermissionDenied')}</p>}
+      {notificationStatus === 'unavailable' && <p role="status">{t('notificationStatusUnavailable')}</p>}
+    </div></div>;
+  return <div className="settings-provider-body space-y-3 p-3">          <label className={toggleRow}>
             <span className="text-sm font-medium">{t('monitorProvider')}</span>
             <input type="checkbox" className={checkbox} checked={preference.monitorEnabled}
               onChange={event => savePatch({ providerPreferences: { [configurationProvider]: {
@@ -306,11 +332,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <span className="text-sm font-medium">{t('refreshInterval')}</span>
             <select
               aria-label={t('refreshInterval')}
-              aria-describedby="refresh-interval-hint"
+              aria-describedby={`${configurationProvider}-refresh-interval-hint`}
               value={settings.refreshIntervalSeconds}
               onChange={(e) => updateField('refreshIntervalSeconds', parseInt(e.target.value, 10))}
               className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono"
             >
+              {![30, 60, 120, 300].includes(settings.refreshIntervalSeconds) && <option value={settings.refreshIntervalSeconds}>{settings.refreshIntervalSeconds} s</option>}
               <option value="30">{t('sec30')}</option>
               <option value="60">{t('sec60')}</option>
               <option value="120">{t('min2')}</option>
@@ -318,7 +345,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </select>
           </div>
 
-          <p id="refresh-interval-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('refreshIntervalHint')}</p>
+          <p id={`${configurationProvider}-refresh-interval-hint`} className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('refreshIntervalHint')}</p>
 
           {/* Smart pause: asks the running Codex session to pause when the quota runs low,
               or, for Claude, lets the Claude Code hooks refuse new requests */}
@@ -388,67 +415,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             {!claude && <ProtectionStatusView settings={settings} onPatchSettings={onPatchSettings} />}
           </div>
 
-          {/* Autostart (only meaningful for installed builds) */}
-          {isInstalled && (
-            <label className={toggleRow}>
-              <span className="text-sm font-medium">{t('autoStart')}</span>
-              <input
-                type="checkbox"
-                checked={settings.autoStart}
-                onChange={(e) => {
-                  const checked = e.target.checked;
-                  invoke('set_autostart', { enable: checked }).catch(console.error);
-                }}
-                className={checkbox}
-              />
-            </label>
-          )}
-
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('autoCheckUpdates')}</span>
-            <input
-              type="checkbox"
-              checked={settings.autoCheckUpdates}
-              onChange={(e) => onPatchSettings(e.target.checked
-                ? { autoCheckUpdates: true }
-                : { autoCheckUpdates: false, autoInstallUpdates: false })}
-              className={checkbox}
-            />
-          </label>
-
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('autoInstallUpdates')}</span>
-            <input
-              type="checkbox"
-              checked={settings.autoInstallUpdates}
-              onChange={(e) => onPatchSettings(e.target.checked
-                ? { autoInstallUpdates: true, autoCheckUpdates: true }
-                : { autoInstallUpdates: false })}
-              className={checkbox}
-            />
-          </label>
-          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('autoInstallUpdatesHint')}</p>
-
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('includePrereleaseUpdates')}</span>
-            <input
-              type="checkbox"
-              aria-label={t('includePrereleaseUpdates')}
-              checked={settings.includePrereleaseUpdates}
-              onChange={(e) => updateField('includePrereleaseUpdates', e.target.checked)}
-              className={checkbox}
-            />
-          </label>
-          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('includePrereleaseUpdatesHint')}</p>
-
-          <section aria-labelledby="reset-notifications-title" className="space-y-2.5">
-            <h3 id="reset-notifications-title" className="text-sm font-semibold">{t('notificationSection')}</h3>
-            {notificationStatus === 'disabled' && (
-              <p role="status" className="text-xs text-amber-700 dark:text-amber-300">{t('notifyPermissionDenied')}</p>
-            )}
-            {notificationStatus === 'unavailable' && (
-              <p role="status" className="text-xs text-slate-500 dark:text-slate-400">{t('notificationStatusUnavailable')}</p>
-            )}
+          <section aria-labelledby={`${configurationProvider}-reset-notifications-title`} className="space-y-2.5">
+            <h3 id={`${configurationProvider}-reset-notifications-title`} className="text-sm font-semibold">{t('notificationSection')}</h3>
             {([
               { title: 'fiveHourResetNotify', enabled: 'fiveHourResetNotification', mode: 'fiveHourSoundMode', path: 'fiveHourSoundPath' },
               { title: 'weeklyResetNotify', enabled: 'weeklyResetNotification', mode: 'weeklySoundMode', path: 'weeklySoundPath' },
@@ -480,6 +448,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </label>
                 {settings[mode] === 'custom' && settings[enabled] && (
                   <SoundPicker
+                    provider={configurationProvider}
                     kind={enabled === 'fiveHourResetNotification' ? 'fiveHour' : 'week'}
                     path={settings[path]}
                     disabled={!settings[enabled]}
@@ -489,13 +458,5 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
             ))}
           </section>
-        </section>
-      </div>
-
-      {/* Footer — full width */}
-      <div className="shrink-0 pt-3 mt-3 border-t border-slate-200 dark:border-slate-800 text-center text-xs text-slate-400">
-        {t('feedback')} <span className="font-semibold text-slate-600 dark:text-slate-300 select-text">septwind@agent.qq.com</span>
-      </div>
-    </div>
-  );
-};
+</div>;
+}
