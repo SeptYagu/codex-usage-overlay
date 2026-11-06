@@ -15,7 +15,7 @@ use crate::config::Provider;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlaybackContext { pub provider: Provider, pub kind: QuotaKind, pub playback_id: String }
+pub struct PlaybackContext { pub provider: Provider, pub playback_id: String }
 
 
 const MAX_PLAYBACK: Duration = Duration::from_secs(10);
@@ -206,6 +206,7 @@ impl PlaybackQueue {
             .or_else(|| self.previews.pop_front())
     }
 
+    #[cfg(test)]
     fn clear_previews(&mut self) {
         self.previews.clear();
     }
@@ -283,7 +284,7 @@ fn run_worker(app: AppHandle, receiver: mpsc::Receiver<AudioCommand>) {
         match receiver.recv_timeout(WORKER_POLL) {
             Ok(AudioCommand::EnqueueNotification { path, kind, provider }) => {
                 queue.push_notification(path, kind);
-                if let Some(job) = queue.notifications.back_mut() { job.context = Some(PlaybackContext { provider, kind, playback_id: String::new() }); }
+                if let Some(job) = queue.notifications.back_mut() { job.context = Some(PlaybackContext { provider, playback_id: String::new() }); }
             }
             Ok(AudioCommand::Preview { path, kind, context, reply }) => {
                 let validation = probe_audio(&path).and_then(|_| {
@@ -385,5 +386,17 @@ mod tests {
         queue.clear_previews();
         assert_eq!(queue.pop_next().unwrap().path, PathBuf::from("alert.wav"));
         assert!(queue.pop_next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod event_contract_tests {
+    use super::*;
+    #[test]
+    fn error_wire_contains_one_kind_and_scoped_playback_identity() {
+        let event=PlaybackErrorEvent{kind:Some(QuotaKind::Week),error:"error".into(),context:Some(PlaybackContext{provider:Provider::Claude,playback_id:"request-one".into()})};
+        let encoded=serde_json::to_string(&event).unwrap();assert_eq!(encoded.matches("\"kind\"").count(),1);
+        let wire:serde_json::Value=serde_json::from_str(&encoded).unwrap();
+        assert_eq!(wire["provider"],"claude");assert_eq!(wire["playbackId"],"request-one");
     }
 }

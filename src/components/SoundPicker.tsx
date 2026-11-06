@@ -60,22 +60,22 @@ export const SoundPicker: React.FC<SoundPickerProps> = ({ provider = 'codex', ki
   const preview = async () => {
     if (!path) return;
     if (previewing) {
+      const stoppedId = playbackId.current;
       try {
         await invoke('stop_preview_sound', { playbackId: playbackId.current });
       } finally {
-        setPreviewing(false);
+        if (playbackId.current === stoppedId) { playbackId.current = null; setPreviewing(false); }
       }
       return;
     }
     setError(null);
+    const id = crypto.randomUUID();
     try {
-      const id = crypto.randomUUID();
       playbackId.current = id;
       setPreviewing(true);
       await invoke('preview_sound', { kind, provider, playbackId: id });
     } catch (reason) {
-      playbackId.current = null; setPreviewing(false);
-      setError(errorKey(reason));
+      if (playbackId.current === id) { playbackId.current = null; setPreviewing(false); setError(errorKey(reason)); }
     }
   };
 

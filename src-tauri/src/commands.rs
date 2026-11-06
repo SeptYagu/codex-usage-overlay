@@ -1674,7 +1674,7 @@ pub async fn preview_sound(kind: crate::notify::QuotaKind, provider: Option<Prov
         .ok_or_else(|| "sound_path_missing".to_string())?;
         drop(settings);
         let audio = state.audio.get().ok_or_else(|| "sound_audio_busy".to_string())?.clone();
-        tauri::async_runtime::spawn_blocking(move || audio.preview(path.into(), kind, crate::audio::PlaybackContext { provider, kind, playback_id: playback_id.unwrap_or_default() }))
+        tauri::async_runtime::spawn_blocking(move || audio.preview(path.into(), kind, crate::audio::PlaybackContext { provider, playback_id: playback_id.unwrap_or_default() }))
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())

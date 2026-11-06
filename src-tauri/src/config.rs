@@ -78,7 +78,11 @@ impl<'de> Deserialize<'de> for ProviderPreference {
         field!("fiveHourThresholdPercent", five_hour_threshold_percent); field!("weeklyThresholdPercent", weekly_threshold_percent);
         field!("refreshIntervalSeconds", refresh_interval_seconds);
         field!("fiveHourResetNotification", five_hour_reset_notification); field!("weeklyResetNotification", weekly_reset_notification);
-        field!("fiveHourSoundMode", five_hour_sound_mode); field!("weeklySoundMode", weekly_sound_mode);
+        for (key, target) in [("fiveHourSoundMode", &mut result.five_hour_sound_mode), ("weeklySoundMode", &mut result.weekly_sound_mode)] {
+            if let Some(mode) = value.get(key).and_then(|v| v.as_str()).and_then(|v| match v { "windows"=>Some(SoundMode::Windows),"custom"=>Some(SoundMode::Custom),_=>None }) {
+                *target=mode; result.present_fields.insert(key.into());
+            }
+        }
         field!("fiveHourSoundPath", five_hour_sound_path); field!("weeklySoundPath", weekly_sound_path);
         if !(15..=3600).contains(&result.refresh_interval_seconds) {
             result.refresh_interval_seconds = 60;
@@ -299,7 +303,7 @@ impl OverlaySettings {
                     preference.five_hour_threshold_percent = self.auto_pause_five_hour_threshold_percent;
                     preference.weekly_threshold_percent = self.auto_pause_weekly_threshold_percent;
                 }
-                self.provider_preferences.insert(provider.key().into(), preference);
+                self.provider_preferences.entry(provider.key().into()).or_insert(preference);
             }
         }
         let inherit = self.schema_version < 3 || empty_preferences;
@@ -997,5 +1001,23 @@ mod independent_preferences_tests {
     #[test]
     fn future_schema_is_never_downgraded() {
         let mut s=OverlaySettings{schema_version:99,..Default::default()};s.migrate();assert_eq!(s.schema_version,99);
+    }
+}
+
+#[cfg(test)]
+mod partial_migration_repair_tests {
+    use super::*;
+    #[test]
+    fn earlier_partial_migrations_keep_nested_values_and_recover_bad_modes() {
+        for schema in [0,1,2] {
+            let mut settings:OverlaySettings=serde_json::from_value(serde_json::json!({
+                "schemaVersion":schema,"fiveHourSoundMode":"custom","fiveHourSoundPath":"C:/sound.wav",
+                "providerPreferences":{"claude":{"monitorEnabled":false,"weeklyThresholdPercent":8,"refreshIntervalSeconds":47,"fiveHourSoundMode":"bad","fiveHourSoundPath":null}}
+            })).unwrap();
+            settings.migrate();let p=settings.preference(Provider::Claude);
+            assert!(!p.monitor_enabled); assert_eq!(p.weekly_threshold_percent,8);
+            assert_eq!(p.refresh_interval_seconds,47); assert_eq!(p.five_hour_sound_mode,SoundMode::Custom);
+            assert_eq!(p.five_hour_sound_path,None);
+        }
     }
 }
