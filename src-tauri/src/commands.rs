@@ -3010,6 +3010,46 @@ mod auto_pause_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Without a reset time there is no quota cycle to deduplicate against, so
+    /// the ledger falls back to active periods: a returning session is paused
+    /// again instead of being skipped until the app restarts.
+    #[tokio::test]
+    async fn a_returning_session_without_a_reset_time_is_paused_again() {
+        let (state, transport, dir) = armed_state("wiring-return-no-reset").await;
+        let mut usage = low_quota_usage(Some("acct-1"));
+        usage.five_hour.resets_at = None;
+        let sink = OfflineSink::with_usage(usage);
+        let active = || crate::pause_control::ToolCallOutcome {
+            success: true,
+            text: Some(serde_json::json!({
+                "pinnedThreads": [],
+                "threads": [{ "id": "session-1", "kind": "codex", "status": "active", "hostId": "host-1" }],
+            }).to_string()),
+        };
+
+        refresh_usage(&sink, &state).await.expect("the first refresh must succeed");
+        wait_for_prompts(&transport, 1).await;
+
+        transport.set_list_threads(crate::pause_control::ToolCallOutcome {
+            success: true,
+            text: Some(serde_json::json!({ "pinnedThreads": [], "threads": [] }).to_string()),
+        });
+        refresh_usage(&sink, &state).await.expect("the second refresh must succeed");
+        wait_for_pause_worker(&state).await;
+        assert_eq!(transport.sent_prompts().len(), 1, "an idle session is not a target");
+
+        transport.set_list_threads(active());
+        refresh_usage(&sink, &state).await.expect("the third refresh must succeed");
+        wait_for_prompts(&transport, 2).await;
+        assert_eq!(
+            transport.sent_prompts().len(),
+            2,
+            "a new active period without a reset time must be paused again"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A transport failure is an unconfirmed delivery, not a success.
     #[tokio::test]
     async fn a_transport_failure_is_not_a_confirmed_delivery() {

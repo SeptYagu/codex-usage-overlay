@@ -567,6 +567,17 @@ async fn algorithm_selection_reprojects_cache_without_reading_training_or_cleari
 }
 
 #[tokio::test]
+async fn reprojection_keeps_the_codex_tray_label_while_the_carousel_is_on() {
+    let (owner,dir)=owner();let registry=owner.monitors.get().unwrap();let codex=registry.get(Provider::Codex);let source=Source::default();
+    refresh_usage(&source,&codex).await.unwrap();
+    owner.carousel_enabled.store(true,Ordering::Release);
+    {let _commit=codex.settings_patch.lock().await;crate::presentation::reproject_locked(&source,&codex).await;}
+    let tooltip=source.frames.lock().unwrap().last().expect("the reprojection must repaint the tray").tooltip.clone();
+    assert!(tooltip.contains("Codex"),"tooltip lost the provider label: {tooltip}");
+    registry.shutdown();drop(codex);drop(owner);std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn fast_protection_cadence_does_not_report_learning_paused_from_the_normal_interval() {
     let (owner,dir)=owner();let registry=owner.monitors.get().unwrap();let codex=registry.get(Provider::Codex);let source=Source::default();
     refresh_usage(&source,&codex).await.unwrap();

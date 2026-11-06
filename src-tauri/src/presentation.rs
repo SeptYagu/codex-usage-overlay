@@ -70,7 +70,7 @@ pub async fn reproject_locked<S:crate::tray::TrayPresentationSink>(sink:&S,state
     let status=*state.tray_read_status.lock().await;
     {
         let _tray=state.tray_gate.lock().unwrap_or_else(|p|p.into_inner());
-        if state.is_displayed(){sink.present(crate::tray::tray_presentation(&settings,Some(&usage),status));}
+        if state.is_displayed(){sink.present(crate::tray::runtime_presentation(state,&settings,Some(&usage),status));}
     }
     sink.publish_usage(crate::commands::usage_envelope(state,&settings,usage));
     if let Some(app)=sink.app_handle(){

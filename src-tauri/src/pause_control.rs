@@ -1310,12 +1310,17 @@ impl AutoPauseController {
         Reservation::Send { keys: uncovered }
     }
 
+    /// Only a trigger with a known reset time names a quota cycle. A key without
+    /// one could never be pruned and would block the thread for good, so such a
+    /// trigger is left to the per-active-period ledger in `reserve`.
     fn cycle_keys(account:&str, thread:&str,triggers:&[Trigger])->Vec<DeliveryKey> {
-        triggers.iter().map(|t|DeliveryKey{account:account.into(),thread_id:thread.into(),quota:t.quota,resets_at:t.resets_at}).collect()
+        triggers.iter().filter(|t|t.resets_at.is_some())
+            .map(|t|DeliveryKey{account:account.into(),thread_id:thread.into(),quota:t.quota,resets_at:t.resets_at}).collect()
     }
     fn reserve_target(&mut self,account:&str,thread:&str,period:&str,triggers:&[Trigger])->Reservation {
         let keys=Self::cycle_keys(account,thread,triggers);
-        if keys.iter().all(|k|self.cycle_attempts.contains(k)) {return Reservation::Nothing;}
+        let every_trigger_has_a_cycle=keys.len()==triggers.len();
+        if every_trigger_has_a_cycle && keys.iter().all(|k|self.cycle_attempts.contains(k)) {return Reservation::Nothing;}
         if self.cycle_attempts.len()+keys.iter().filter(|k|!self.cycle_attempts.contains(k)).count()>512 {return Reservation::Capacity;}
         let result=self.reserve(account,period,triggers);
         if matches!(result,Reservation::Backfilled) {
