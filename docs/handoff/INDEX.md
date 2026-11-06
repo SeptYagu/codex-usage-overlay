@@ -1,6 +1,6 @@
 # Handoff index
 
-2026-11-06 Codex customization plan: [custom pause messages, scheduled continuation and selectable 5H estimators](2026-11-06-codex-custom-pause-continuation-estimator-plan.md). Defines Codex-only configuration and template rendering, opt-in scheduling presets, classic/weighted/continuous-personalized selection, source-aware cache projection, state compatibility and phased acceptance on the v1.6.0 multi-provider baseline. Planning only; no production changes, live messages, schedules, release or installation.
+2026-11-06 Codex customization plan: [custom pause messages, scheduled continuation and selectable 5H estimators](2026-11-06-codex-custom-pause-continuation-estimator-plan.md). Defines Codex-only configuration and template rendering, opt-in scheduling presets with one overlay-computed absolute target time, classic/weighted/continuous-personalized selection, source-aware cache projection, state compatibility and phased acceptance on the v1.6.0 multi-provider baseline. Planning only; no production changes, live messages, schedules, release or installation.
 
 2026-11-03 multi-provider implementation: [implementation, validation and native-access limits](2026-11-03-multi-provider-implementation.md). Independent monitoring/protection, clickable provider logo, preserved show/hide and displayed-provider tray rendering. Target prerelease: `v1.6.0-preview.3`.
 
