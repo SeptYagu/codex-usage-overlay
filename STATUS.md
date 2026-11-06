@@ -1,5 +1,11 @@
 # Status
 
+## Codex customization implementation plan — 2026-11-06 (PLAN ONLY)
+
+- [Implementation plan](docs/handoff/2026-11-06-codex-custom-pause-continuation-estimator-plan.md) specifies independent 5H/Weekly pause messages, an explicitly applied scheduled-continuation preset and classic/weighted/experimental personalized 5H estimation on baseline `ef98b6d` (v1.6.0).
+- Covers existing multi-provider runtime integration, send-time rendering, delivery uncertainty and deduplication, continuous calibration, side-effect-free cache projection, compatible persistence and phased automated/native acceptance. Upgrades retain pure pause messages and the classic estimator by default.
+- Documentation only. Production code, version, saved preferences, estimator history and running applications are unchanged. No messages or schedules were created; release and installation are outside this milestone.
+
 ## v1.6.0 stable release — 2026-11-03
 
 - Reviewed and merged `feat/dsh-auto-connect` as `47db6e7`, adapting its singleton and binding commands to independent background providers. Removed the merged local and remote `tauri-rewrite` branch.
