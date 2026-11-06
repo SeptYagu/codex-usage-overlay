@@ -1,6 +1,6 @@
 # Handoff index
 
-2026-11-06 Quota carousel: [automatic display rotation for connected agents](2026-11-06-quota-carousel-plan.md). Plans an opt-in eight-second carousel, fresh source eligibility, manual/interaction holds and one application-owned display coordinator. Separates runtime display from persisted manual selection so ticks do not write settings, refresh quota or change protection. Documentation only.
+2026-11-06 Quota carousel: [automatic display rotation for connected agents](2026-11-06-quota-carousel-plan.md). Plans an opt-in carousel with a matching 3–30-second settings slider (one-second steps, default eight), fresh source eligibility, manual/interaction holds and one application-owned display coordinator. Separates runtime display from persisted manual selection so ticks do not write settings, refresh quota or change protection. Documentation only.
 
 2026-11-06 Independent settings columns: [common settings and one column per agent](2026-11-06-independent-provider-settings-columns-plan.md). Plans persistent Codex/Claude/DSH columns, independent refresh/notification/sound preferences, schema 3 migration, provider-bound saves and correlated audio events. Coordinates with the Codex customization plan; documentation only, no production or runtime changes.
 

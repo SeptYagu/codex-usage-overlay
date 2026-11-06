@@ -2,7 +2,7 @@
 
 ## Multi-agent quota carousel — 2026-11-06 (PLAN ONLY)
 
-- [Implementation plan](docs/handoff/2026-11-06-quota-carousel-plan.md) defines opt-in display rotation among eligible Codex/Claude/DSH sources, default eight-second dwell, per-provider participation, 30-second manual hold and interaction/visibility pauses.
+- [Implementation plan](docs/handoff/2026-11-06-quota-carousel-plan.md) defines opt-in display rotation among eligible Codex/Claude/DSH sources, a matching settings slider from 3–30 seconds in one-second steps (default eight), per-provider participation, 30-second manual hold and interaction/visibility pauses. Slider saves use existing debounce behavior; only successfully committed intervals change scheduling.
 - Introduces a single runtime display coordinator distinct from persisted manual selection; requires fresh identity-matched cached readings, consistent overlay/tray/refresh targets and zero automatic settings writes or forced quota reads.
 - Coordinates with the independent settings and Codex customization plans. Documentation only; no application/configuration changes, messages, schedules, release or installation.
 
