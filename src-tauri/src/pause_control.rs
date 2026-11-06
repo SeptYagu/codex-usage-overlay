@@ -1717,8 +1717,9 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
         // including a cancelled batch, so a timeout never blocks a retry.
         let mut guard = ReservationGuard::new(state.clone(), keys.clone());
         guard.cycles=AutoPauseController::cycle_keys(&sample.account_id,&thread.id,&triggers);
-        let prompt=if triggers.iter().any(|t|t.quota==QuotaKind::Weekly){sample.settings.auto_pause_weekly_message.clone()}
-            else{crate::pause_message::render_five_hour(&sample.settings.auto_pause_five_hour_message,sample.usage.five_hour_resets_at,unix_now(),&sample.settings.language,&time_zone)};
+        let language=&sample.settings.language;
+        let prompt=if triggers.iter().any(|t|t.quota==QuotaKind::Weekly){crate::pause_message::effective_message(&sample.settings.auto_pause_weekly_message,language)}
+            else{crate::pause_message::render_five_hour(&crate::pause_message::effective_message(&sample.settings.auto_pause_five_hour_message,language),sample.usage.five_hour_resets_at,unix_now(),language,&time_zone)};
 
         lock_controller(state).telemetry.record(thread, &period_id, "requested", None);
         let may_submit=||lock_controller(state).generation==sample.generation;

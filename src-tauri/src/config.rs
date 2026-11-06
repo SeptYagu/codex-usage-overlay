@@ -281,8 +281,10 @@ impl Default for OverlaySettings {
         Self {
             quota_carousel_enabled: false, quota_carousel_interval_seconds: 8,
             five_hour_burn_rate_algorithm: FiveHourBurnRateAlgorithm::Legacy,
-            auto_pause_five_hour_message: crate::pause_message::default_pause("auto"),
-            auto_pause_weekly_message: crate::pause_message::default_pause("auto"),
+            // Left empty so `migrate` fills them from the resolved language
+            // setting, not from the OS locale at construction time.
+            auto_pause_five_hour_message: String::new(),
+            auto_pause_weekly_message: String::new(),
             schema_version: 3, provider_preferences: Default::default(),
             provider: Provider::default(),
             dsh_base_url: String::new(),
@@ -1043,6 +1045,17 @@ mod independent_preferences_tests {
         assert!(!s.for_provider(Provider::Dsh).weekly_reset_notification);
         let mut restored:OverlaySettings=serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
         restored.migrate();assert_eq!(restored.for_provider(Provider::Claude).refresh_interval_seconds,120);
+    }
+    #[test]
+    fn default_pause_messages_follow_the_language_setting_not_the_os_locale() {
+        for (language, expected) in [("zh-CN", "\u{6682}\u{505C}"), ("en-US", "Pause")] {
+            let mut s = OverlaySettings { language: language.into(), ..Default::default() };
+            s.migrate();
+            assert_eq!(s.auto_pause_five_hour_message, expected);
+            assert_eq!(s.auto_pause_weekly_message, expected);
+        }
+        assert_eq!(crate::pause_message::effective_message("", "zh-CN"), "\u{6682}\u{505C}");
+        assert_eq!(crate::pause_message::effective_message("Custom", "zh-CN"), "Custom");
     }
     #[test]
     fn future_schema_is_never_downgraded() {

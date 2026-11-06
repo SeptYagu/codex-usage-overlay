@@ -2385,6 +2385,11 @@ mod auto_pause_tests {
             settings.auto_pause_five_hour_threshold_percent = 5;
             settings.auto_pause_weekly_threshold_percent = 2;
             settings.language = "zh-CN".to_string();
+            // Loading filled the messages from the default "auto" language (the
+            // OS locale); reseed them as a first load under zh-CN would, so the
+            // tests do not depend on the machine's locale.
+            settings.auto_pause_five_hour_message = crate::pause_message::default_pause("zh-CN");
+            settings.auto_pause_weekly_message = crate::pause_message::default_pause("zh-CN");
         }
 
         let transport = Arc::new(ScriptedTransport::new());

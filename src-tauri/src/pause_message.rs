@@ -12,6 +12,12 @@ pub fn default_pause(language: &str) -> String {
     crate::pause_control::pause_message_for_language(language).to_owned()
 }
 
+/// The saved text, or the language's plain pause when it was never filled in
+/// (unmigrated settings), so delivery never sends an empty or invalid prompt.
+pub fn effective_message(text: &str, language: &str) -> String {
+    if valid_message(text) { text.to_owned() } else { default_pause(language) }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Templates { pub pause: String, pub continuation: String }
