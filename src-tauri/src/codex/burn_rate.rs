@@ -237,6 +237,8 @@ pub struct BurnRateTracker {
     /// The last shadow diagnostic. It never reaches the frontend.
     shadow_estimate: FiveHourShadowEstimate,
     affine_enabled: bool,
+    observation_gap: bool,
+    observation_unavailable: bool,
 }
 
 impl BurnRateTracker {
@@ -252,6 +254,7 @@ impl BurnRateTracker {
             evidence_lines,
             shadow_estimate: FiveHourShadowEstimate::default(),
             affine_enabled: config.is_local_codex(),
+            observation_gap:false,observation_unavailable:false,
         };
         // A retained audit event is flushed before any new feedback is
         // processed, so a crash between the learner update and the log append
@@ -277,6 +280,7 @@ impl BurnRateTracker {
             evidence_lines: 0,
             shadow_estimate: FiveHourShadowEstimate::default(),
             affine_enabled: true,
+            observation_gap:false,observation_unavailable:false,
         }
     }
 
@@ -284,6 +288,7 @@ impl BurnRateTracker {
     pub(crate) fn test_snapshot(&self)->serde_json::Value {serde_json::to_value(&self.state).unwrap()}
     pub fn candidates(&self, estimate: &BurnRateEstimate) -> crate::presentation::Candidates {
         let learning=if self.state_dirty || self.state.five_hour_shadow.audit_outbox.is_some(){"persistencePaused"}
+            else if self.observation_gap {"observationGap"} else if self.observation_unavailable {"observationUnavailable"}
             else if self.state.five_hour_shadow.affine.n==0.{"accumulating"}else{"active"};
         crate::presentation::Candidates{legacy:estimate.five_hour_per_hour,weighted:self.shadow_estimate.fixed_weighted_per_hour,
             personalized:self.shadow_estimate.fixed_weighted_per_hour.and_then(|rate|self.state.five_hour_shadow.affine.rate(rate)),learning}
@@ -362,6 +367,8 @@ impl BurnRateTracker {
         // The shadow path needs the pre-accept state, so the transition it
         // observes is the one the production tracker just made.
         let before = self.state.five_hour.clone();
+        self.observation_gap=before.last_observed_at.is_some_and(|at|usage.fetched_at.saturating_sub(at)>90);
+        self.observation_unavailable=valid_used_percent(&usage.five_hour).is_none();
         let acceptance = accept_quota(
             &mut self.state.five_hour,
             &usage.five_hour,

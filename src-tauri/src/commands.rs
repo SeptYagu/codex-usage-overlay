@@ -529,12 +529,6 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
             };
             let (estimate,candidates)=estimate;
             let mut usage = raw.to_ui(estimate.five_hour_per_hour, estimate.weekly_per_hour);
-            if source_settings.provider==Provider::Codex {
-                let settings=state.settings.lock().await;
-                let mut cache=state.presentation.lock().unwrap_or_else(|p|p.into_inner());
-                cache.source=Some(crate::presentation::Sample{usage:usage.clone(),candidates});
-                usage=cache.project(settings.five_hour_burn_rate_algorithm,state.applied_settings_revision.load(Ordering::Acquire),settings.refresh_interval_seconds>90).expect("sample was just stored");
-            }
             // Smart Pause and resume act on Codex sessions only; the Claude
             // guard runs inside Claude Code's hooks instead.
             let codex = state.settings.lock().await.provider == Provider::Codex;
@@ -548,6 +542,12 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
                     .completed_with_recovery(&settings, Some(&usage), std::time::Instant::now(), crate::polling::ReadRecovery { display_only, ..Default::default() });
             }
             state.poll_wake.notify_one();
+            if source_settings.provider==Provider::Codex {
+                let settings=state.settings.lock().await;
+                let mut cache=state.presentation.lock().unwrap_or_else(|p|p.into_inner());
+                cache.source=Some(crate::presentation::Sample{usage:usage.clone(),candidates});
+                usage=cache.project(settings.five_hour_burn_rate_algorithm,state.applied_settings_revision.load(Ordering::Acquire),state.polling.lock().unwrap_or_else(|p|p.into_inner()).healthy_interval_seconds(&settings)>90).expect("sample was just stored");
+            }
             state.config_manager.write_status("ok", None);
             crate::notify::process_usage_success(sink, state, &usage).await;
             // The account identity is read from the raw sample, because the UI
@@ -3073,6 +3073,7 @@ mod auto_pause_tests {
         }
         let status = state.auto_pause.lock().unwrap().status(true);
         assert_eq!(status.confirmed_count, 0);
+        assert!(status.targets.iter().any(|target|target.phase=="unknown" && target.reason.as_deref()==Some("submissionUnknown")));
 
         // A submitted request with no acknowledgement must not be blindly resent.
         transport.set_send_delay_ms(0);

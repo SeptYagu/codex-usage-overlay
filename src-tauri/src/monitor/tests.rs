@@ -563,3 +563,22 @@ async fn algorithm_selection_reprojects_cache_without_reading_training_or_cleari
     assert_eq!(event.presentation.settings_revision,owner.settings_revision.load(Ordering::Acquire));drop(events);
     registry.shutdown();drop(codex);drop(owner);std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn fast_protection_cadence_does_not_report_learning_paused_from_the_normal_interval() {
+    let (owner,dir)=owner();let registry=owner.monitors.get().unwrap();let codex=registry.get(Provider::Codex);let source=Source::default();
+    refresh_usage(&source,&codex).await.unwrap();
+    {let _commit=codex.settings_patch.lock().await;
+        let settings={let mut s=codex.settings.lock().await;s.refresh_interval_seconds=120;s.auto_pause_on_low_quota=true;s.five_hour_burn_rate_algorithm=crate::config::FiveHourBurnRateAlgorithm::Personalized;s.clone()};
+        let mut usage=codex.last_usage.lock().await.clone().unwrap();usage.five_hour_remaining_percent=Some(5);
+        codex.polling.lock().unwrap().completed(&settings,Some(&usage),std::time::Instant::now());
+        codex.presentation.lock().unwrap().source.as_mut().unwrap().candidates.learning="active";
+        crate::presentation::reproject_locked(&source,&codex).await;
+        assert_eq!(codex.presentation.lock().unwrap().metadata.personal_learning_status,Some("active"));
+        codex.presentation.lock().unwrap().source.as_mut().unwrap().candidates.learning="observationGap";
+        crate::presentation::reproject_locked(&source,&codex).await;
+        assert_eq!(codex.presentation.lock().unwrap().metadata.personal_learning_status,Some("observationGap"));
+    }
+    assert_eq!(source.reads.load(Ordering::SeqCst),1);
+    registry.shutdown();drop(codex);drop(owner);std::fs::remove_dir_all(dir).unwrap();
+}

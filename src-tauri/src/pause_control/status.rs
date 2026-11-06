@@ -393,7 +393,7 @@ fn derive_summary(
                 .any(|t| t.active && matches!(t.phase.as_str(), "failed" | "unknown"))
             {
                 status.summary = "needsAttention".into();
-                status.reason = Some(if status.targets.iter().any(|t|t.active && t.phase=="unknown"){"submissionUnknown"}else{"deliveryFailed"}.into());
+                status.reason = Some(if status.targets.iter().any(|t|t.active && t.phase=="unknown"){"submissionUnknown"}else if status.targets.iter().any(|t|t.active && t.reason.as_deref()==Some("ledgerFull")){"ledgerFull"}else{"deliveryFailed"}.into());
             } else if running
                 || status
                     .targets

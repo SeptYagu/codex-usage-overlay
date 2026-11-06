@@ -76,3 +76,19 @@ mod tests {
         let restored:AffineCalibration=serde_json::from_value(serde_json::to_value(&model).unwrap()).unwrap();assert_eq!(restored.rate(36.),model.rate(36.));
     }
 }
+
+#[cfg(test)]
+mod cross_language_tests {
+    use super::*;
+    #[test]
+    fn every_synthetic_origin_matches_the_independent_javascript_trajectory() {
+        let csv=include_str!("../../../tests/fixtures/affine-parity.csv");let mut model=AffineCalibration::default();let mut count=0;
+        for line in csv.lines().skip(1) {
+            let v:Vec<f64>=line.split(',').map(|v|v.parse().unwrap()).collect();
+            let actual=model.rate(v[0]).unwrap();assert!((actual-v[6]).abs()<=1e-9*v[6].abs().max(1.));
+            let f=MaturedOutcome{elapsed_seconds:v[1] as i64,predicted_delta:v[4],observed_delta:v[2],confidence:v[3],published_predicted_delta:None,fixed_predicted_delta:v[4],shadow_predicted_delta:None};
+            model.learn(v[0],&f,v[5] as i64);assert!(model.valid(Some(v[5] as i64)));count+=1;
+        }
+        assert_eq!(count,96);
+    }
+}

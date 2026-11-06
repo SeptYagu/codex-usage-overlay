@@ -33,13 +33,16 @@ pub fn render_with(template: &str, reset: Option<i64>, now: i64, fallback: &str,
     target.and_then(format).map(|at| template.replace("{resume_at}", &at)).unwrap_or_else(|| fallback.into())
 }
 
-pub fn render_five_hour(template: &str, reset: Option<i64>, now: i64, language: &str) -> String {
+pub struct TimeZoneContext { zone:Option<String> }
+impl TimeZoneContext {pub fn system()->Self {Self{zone:iana_time_zone::get_timezone().ok()}}}
+
+pub fn render_five_hour(template: &str, reset: Option<i64>, now: i64, language: &str, context:&TimeZoneContext) -> String {
     render_with(template, reset, now, &default_pause(language), |target| {
-        let zone = iana_time_zone::get_timezone().ok()?;
-        let at = Local.timestamp_opt(target, 0).single()?;
-        // Avoid combining a new OS offset with an old zone name during a zone change.
-        if iana_time_zone::get_timezone().ok()? != zone { return None; }
-        Some(format!("{} ({zone})", at.format("%Y-%m-%d %H:%M:%S %:z")))
+        let zone=context.zone.as_ref()?;
+        if iana_time_zone::get_timezone().ok().as_ref()!=Some(zone){return None;}
+        let at=Local.timestamp_opt(target,0).single()?;
+        if iana_time_zone::get_timezone().ok().as_ref()!=Some(zone){return None;}
+        Some(format!("{} ({zone})",at.format("%Y-%m-%d %H:%M:%S %:z")))
     })
 }
 
@@ -69,5 +72,19 @@ mod tests {
         for locale in ["en-US","zh-CN","zh-Hant"] {
             let t=templates(locale);assert!(valid_message(&t.continuation));assert!(t.continuation.contains("{resume_at}"));assert!(t.continuation.contains("automation_id"));
         }
+    }
+}
+
+#[cfg(test)]
+mod calendar_tests {
+    use super::*;
+    #[test]
+    fn exact_seconds_and_calendar_rollover_are_preserved() {
+        let reset=chrono::DateTime::parse_from_rfc3339("2026-12-31T23:59:20-05:00").unwrap().timestamp();
+        let result=render_with("at {resume_at}",Some(reset),reset-61,"Pause",|target| {
+            Some(chrono::FixedOffset::west_opt(18000).unwrap().timestamp_opt(target,0).single().unwrap().format("%Y-%m-%d %H:%M:%S %:z").to_string())
+        });
+        assert_eq!(result,"at 2027-01-01 00:01:20 -05:00");
+        let invalid=TimeZoneContext{zone:None};assert_eq!(render_five_hour("{resume_at}",Some(reset),reset-61,"en-US",&invalid),"Pause");
     }
 }

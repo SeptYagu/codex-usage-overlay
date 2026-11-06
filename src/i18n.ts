@@ -4,6 +4,8 @@ import { initReactI18next } from 'react-i18next';
 const resources = {
   'en-US': {
     translation: {
+      burnLearning_observationUnavailable: "New learning paused: no current observation",
+
       settingsSaveFailed: "{{target}} settings could not be saved. Saved values have been restored; please retry.",
 
       codexOptions: "Codex options",
@@ -188,14 +190,14 @@ const resources = {
       quotaReadFailures: { timeout: "Timed out", transport: "Connection interrupted", rpc: "Request failed", authentication: "Sign-in required", invalidResponse: "Invalid response", invalidQuota: "Invalid quota data", missingExecutable: "Codex not found", permission: "Access denied", spawn: "Reader startup failed", cancelled: "Read cancelled", notConnected: "No Claude limits yet" },
       protectionSummaries: { off: "Protection off", checking: "Checking protection…", armed: "Protection armed",
         quotaLow: "Quota low — no active chats", pauseRequested: "Pause requested — stopping unconfirmed", needsAttention: "Protection needs attention" },
-      protectionReasons: { submissionUnknown: "A request may have been submitted; no automatic resend.", quotaReadFailed: "Quota read failed; cached values are for display.", quotaReadRetrying: "Retrying quota read; cached values are for display.", quotaStale: "Quota data is stale.",
+      protectionReasons: { ledgerFull: "Delivery history is full; no unsafe eviction or resend.", submissionUnknown: "A request may have been submitted; no automatic resend.", quotaReadFailed: "Quota read failed; cached values are for display.", quotaReadRetrying: "Retrying quota read; cached values are for display.", quotaStale: "Quota data is stale.",
         accountUnknown: "The quota account could not be identified.", quotaUnavailable: "A quota window is unavailable.",
         dshBindingRequired: "Connect the DSH bridge and explicitly select the active subscription account and target sessions.",
         bridgeUnavailable: "The Codex connection is unavailable; pausing cannot be requested.", deliveryFailed: "A pause request failed; see chat details.",
         stoppingUnconfirmed: "Codex accepted or is processing a request; stopping has not been verified.", statusUnavailable: "Protection status is unavailable.",
         resumeStateInvalid: "Saved resume plans need review; automatic execution is disabled.", resumeStateWriteFailed: "Resume plans could not be saved.",
         resumeNeedsReview: "A saved resume plan needs review before work can continue.", resumeUnsupported: "Automatic resume is unavailable for this Codex connection." },
-      protectionPhases: { requested: "Request in progress", accepted: "Request accepted; stopping unconfirmed", failed: "Request failed", interrupted: "Turn interruption verified" },
+      protectionPhases: { unknown: "Submitted outcome unknown; not resent", requested: "Request in progress", accepted: "Request accepted; stopping unconfirmed", failed: "Request failed", interrupted: "Turn interruption verified" },
       resumePhases: { waitingForQuota: "Waiting for quota", ready: "Awaiting final validation", needsReview: "Needs review", submitting: "Resume submitting",
         submissionUnknown: "Resume outcome unknown — review required", completed: "Resumed", cancelled: "Cancelled", expired: "Expired" },
       updateReadyInstallNow: "Version {{version}} ready — install now",
@@ -250,6 +252,8 @@ const resources = {
   },
   'zh-CN': {
     translation: {
+      burnLearning_observationUnavailable: "新学习暂停：缺少有效观察",
+
       settingsSaveFailed: "{{target}} 设置保存失败，已恢复已保存的值，请重试。",
 
       codexOptions: "Codex 专属设置",
@@ -432,14 +436,14 @@ const resources = {
       quotaReadTiming: "上次成功读取：{{milliseconds}} 毫秒 · 第 {{attempt}} 次尝试。",
       quotaReadStages: { discovery: "查找 Codex", spawn: "启动读取进程", initialize: "初始化", quota: "请求额度", parse: "校验额度", refresh: "刷新" },
       quotaReadFailures: { timeout: "超时", transport: "连接中断", rpc: "请求失败", authentication: "需要登录", invalidResponse: "响应无效", invalidQuota: "额度数据无效", missingExecutable: "未找到 Codex", permission: "访问被拒绝", spawn: "读取进程启动失败", cancelled: "读取已取消", notConnected: "尚未收到 Claude 额度" },
-      protectionReasons: { submissionUnknown: "请求可能已经提交，不自动重发。", quotaReadFailed: "额度读取失败，缓存数值仅供显示。", quotaReadRetrying: "正在重试读取额度，缓存数值仅供显示。", quotaStale: "额度数据已过期。",
+      protectionReasons: { ledgerFull: "投递记录已满，已停止新增请求，不会清除有效记录后重发。", submissionUnknown: "请求可能已经提交，不自动重发。", quotaReadFailed: "额度读取失败，缓存数值仅供显示。", quotaReadRetrying: "正在重试读取额度，缓存数值仅供显示。", quotaStale: "额度数据已过期。",
         accountUnknown: "无法识别额度所属账户。", quotaUnavailable: "一个额度窗口不可用。",
         dshBindingRequired: "请连接 DSH 桥，并显式选择活动订阅账户及目标会话。",
         bridgeUnavailable: "Codex 连接不可用，无法请求暂停。", deliveryFailed: "暂停请求失败，请查看会话详情。",
         stoppingUnconfirmed: "Codex 已接收或正在处理请求，尚未确认停止。", statusUnavailable: "无法获取保护状态。",
         resumeStateInvalid: "保存的恢复计划需要检查，自动执行已禁用。", resumeStateWriteFailed: "无法保存恢复计划。",
         resumeNeedsReview: "保存的恢复计划需要检查后才能继续。", resumeUnsupported: "此 Codex 连接不支持自动恢复。" },
-      protectionPhases: { requested: "正在发送请求", accepted: "请求已接收，尚未确认停止", failed: "请求失败", interrupted: "已确认回合中断" },
+      protectionPhases: { unknown: "提交结果未知，不重发", requested: "正在发送请求", accepted: "请求已接收，尚未确认停止", failed: "请求失败", interrupted: "已确认回合中断" },
       resumePhases: { waitingForQuota: "等待额度恢复", ready: "等待最终检查", needsReview: "需要检查", submitting: "正在提交恢复请求",
         submissionUnknown: "恢复结果未知，需要检查", completed: "已恢复", cancelled: "已取消", expired: "已过期" },
       updateReadyInstallNow: "{{version}} 版已就绪，点击立即安装",
@@ -494,6 +498,8 @@ const resources = {
   },
   'zh-Hant': {
     translation: {
+      burnLearning_observationUnavailable: "新學習暫停：缺少有效觀察",
+
       settingsSaveFailed: "{{target}} 設定儲存失敗，已恢復原值，請重試。",
 
       codexOptions: "Codex 專屬設定",
@@ -676,14 +682,14 @@ const resources = {
       quotaReadTiming: "上次成功讀取：{{milliseconds}} 毫秒 · 第 {{attempt}} 次嘗試。",
       quotaReadStages: { discovery: "尋找 Codex", spawn: "啟動讀取程序", initialize: "初始化", quota: "請求額度", parse: "驗證額度", refresh: "重新整理" },
       quotaReadFailures: { timeout: "逾時", transport: "連線中斷", rpc: "請求失敗", authentication: "需要登入", invalidResponse: "回應無效", invalidQuota: "額度資料無效", missingExecutable: "找不到 Codex", permission: "存取遭拒", spawn: "讀取程序啟動失敗", cancelled: "讀取已取消", notConnected: "尚未收到 Claude 額度" },
-      protectionReasons: { submissionUnknown: "請求可能已提交，不自動重發。", quotaReadFailed: "額度讀取失敗，快取數值僅供顯示。", quotaReadRetrying: "正在重試讀取額度，快取數值僅供顯示。", quotaStale: "額度資料已過期。",
+      protectionReasons: { ledgerFull: "投遞紀錄已滿，已停止新請求，不會清除有效紀錄後重發。", submissionUnknown: "請求可能已提交，不自動重發。", quotaReadFailed: "額度讀取失敗，快取數值僅供顯示。", quotaReadRetrying: "正在重試讀取額度，快取數值僅供顯示。", quotaStale: "額度資料已過期。",
         accountUnknown: "無法識別額度所屬帳戶。", quotaUnavailable: "一個額度視窗無法使用。",
         dshBindingRequired: "請連線 DSH 橋接，並明確選擇啟用中的訂閱帳戶及目標工作階段。",
         bridgeUnavailable: "Codex 連線無法使用，無法請求暫停。", deliveryFailed: "暫停請求失敗，請查看工作階段詳情。",
         stoppingUnconfirmed: "Codex 已接收或正在處理請求，尚未確認停止。", statusUnavailable: "無法取得保護狀態。",
         resumeStateInvalid: "已儲存的恢復計畫需要檢查，自動執行已停用。", resumeStateWriteFailed: "無法儲存恢復計畫。",
         resumeNeedsReview: "已儲存的恢復計畫需要檢查後才能繼續。", resumeUnsupported: "此 Codex 連線不支援自動恢復。" },
-      protectionPhases: { requested: "正在傳送請求", accepted: "請求已接收，尚未確認停止", failed: "請求失敗", interrupted: "已確認回合中斷" },
+      protectionPhases: { unknown: "提交結果未知，不重發", requested: "正在傳送請求", accepted: "請求已接收，尚未確認停止", failed: "請求失敗", interrupted: "已確認回合中斷" },
       resumePhases: { waitingForQuota: "等待額度恢復", ready: "等待最終檢查", needsReview: "需要檢查", submitting: "正在提交恢復請求",
         submissionUnknown: "恢復結果未知，需要檢查", completed: "已恢復", cancelled: "已取消", expired: "已過期" },
       updateReadyInstallNow: "{{version}} 版已就緒，點擊立即安裝",

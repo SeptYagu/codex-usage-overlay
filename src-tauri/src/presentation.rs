@@ -39,7 +39,7 @@ impl Cache {
         let source=self.source.as_ref()?;let (usage,effective,reason)=source.project(requested);
         self.metadata=Metadata{presentation_revision:self.metadata.presentation_revision+1,settings_revision,
             requested_algorithm:Some(requested),effective_algorithm:effective,fallback_reason:reason,
-            personal_learning_status:Some(if slow && source.candidates.learning!="persistencePaused" {"observationGap"}else{source.candidates.learning})};
+            personal_learning_status:Some(if slow && matches!(source.candidates.learning,"active"|"accumulating") {"observationGap"}else{source.candidates.learning})};
         self.current=Some(usage.clone());
         Some(usage)
     }
@@ -64,7 +64,7 @@ pub async fn reproject_locked<S:crate::tray::TrayPresentationSink>(sink:&S,state
     let settings=state.settings.lock().await.clone();
     if settings.provider!=crate::config::Provider::Codex {return;}
     let usage=state.presentation.lock().unwrap_or_else(|p|p.into_inner()).project(settings.five_hour_burn_rate_algorithm,
-        state.applied_settings_revision.load(std::sync::atomic::Ordering::Acquire),settings.refresh_interval_seconds>90);
+        state.applied_settings_revision.load(std::sync::atomic::Ordering::Acquire),state.polling.lock().unwrap_or_else(|p|p.into_inner()).healthy_interval_seconds(&settings)>90);
     let Some(usage)=usage else{return;};
     *state.last_usage.lock().await=Some(usage.clone());
     let status=*state.tray_read_status.lock().await;

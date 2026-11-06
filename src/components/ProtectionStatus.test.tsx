@@ -217,3 +217,13 @@ describe('protection status', () => {
     await screen.findByText(label);
   });
 });
+
+it.each(['en-US','zh-CN','zh-Hant'])('explains unknown submissions in %s without claiming accepted or stopped',async locale=>{
+  await i18n.changeLanguage(locale);
+  tauri.invoke.mockResolvedValue(snapshot({summary:'needsAttention',reason:'submissionUnknown',acceptedRequestCount:0,confirmedInterruptionCount:0,
+    targets:[{periodId:'p',active:true,threadId:'chat',hostId:null,turnId:null,phase:'unknown',reason:'submissionUnknown',requestedAt:Math.floor(Date.now()/1000),acceptedAt:null,interruptedAt:null}]}));
+  const view=render(<ProtectionStatusView settings={{...settings,language:locale}}/>);
+  await screen.findByText(i18n.t('protectionReasons.submissionUnknown'));
+  expect(view.container.textContent).toContain(i18n.t('protectionPhases.unknown'));
+  expect(view.container.textContent).not.toContain('protectionPhases.unknown');
+});

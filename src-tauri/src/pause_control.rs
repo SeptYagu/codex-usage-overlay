@@ -536,9 +536,10 @@ pub enum BridgeError {
 pub trait BridgeTransport: Send + Sync {
     fn capabilities(&self) -> status::ControlCapabilities { status::ControlCapabilities::default() }
     fn call_tool_observed<'a>(
-        &'a self, pipe: &'a str, caller: &'a str, tool: &'a str, arguments:Value, started:&'a AtomicBool,
+        &'a self, pipe: &'a str, caller: &'a str, tool: &'a str, arguments:Value, started:&'a AtomicBool, may_submit:&'a (dyn Fn()->bool+Send+Sync),
     )->Pin<Box<dyn Future<Output=Result<ToolCallOutcome,BridgeError>>+Send+'a>> {
         // Unknown transports conservatively treat the invocation as possibly submitted.
+        if !may_submit(){return Box::pin(async{Err(BridgeError::Unavailable("cancelled before submission".into()))});}
         started.store(true,Ordering::Release);self.call_tool(pipe,caller,tool,arguments)
     }
     fn call_tool<'a>(
@@ -558,14 +559,17 @@ pub struct NamedPipeTransport;
 #[cfg(windows)]
 impl BridgeTransport for NamedPipeTransport {
     fn call_tool_observed<'a>(
-        &'a self, pipe:&'a str, caller:&'a str, tool:&'a str, arguments:Value, started:&'a AtomicBool,
+        &'a self, pipe:&'a str, caller:&'a str, tool:&'a str, arguments:Value, started:&'a AtomicBool, may_submit:&'a (dyn Fn()->bool+Send+Sync),
     )->Pin<Box<dyn Future<Output=Result<ToolCallOutcome,BridgeError>>+Send+'a>> {
         Box::pin(async move {
-            let body=serde_json::to_vec(&build_request(tool,arguments,caller)).map_err(|e|BridgeError::Protocol(e.to_string()))?;
+            if !may_submit(){return Err(BridgeError::Unavailable("cancelled before submission".into()));}
+            let request=build_request(tool,arguments,caller);
+            let body=serde_json::to_vec(&request).map_err(|e|BridgeError::Protocol(e.to_string()))?;
             let mut client=open_pipe(pipe).await?;
+            if !may_submit(){return Err(BridgeError::Unavailable("cancelled before submission".into()));}
             started.store(true,Ordering::Release);
             write_frame(&mut client,&body).await?;
-            parse_tool_outcome(&read_frame(&mut client).await?)
+            parse_matching_tool_outcome(&read_frame(&mut client).await?,&request["id"])
         })
     }
     fn call_tool<'a>(
@@ -673,6 +677,13 @@ fn parse_tool_outcome(payload: &[u8]) -> Result<ToolCallOutcome, BridgeError> {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
     Ok(ToolCallOutcome { success, text })
+}
+
+#[cfg(any(windows,test))]
+fn parse_matching_tool_outcome(payload:&[u8],expected:&Value)->Result<ToolCallOutcome,BridgeError>{
+    let value:Value=serde_json::from_slice(payload).map_err(|_|BridgeError::Protocol("malformed response".into()))?;
+    if value.get("id")!=Some(expected){return Err(BridgeError::Protocol("response ID does not match the submitted request".into()));}
+    parse_tool_outcome(payload)
 }
 
 /// The Windows named-pipe path of a pipe name.
@@ -857,6 +868,7 @@ async fn send_pause(
     target: &ActiveThread,
     prompt: &str,
     started: &AtomicBool,
+    may_submit: &(dyn Fn()->bool+Send+Sync),
 ) -> Result<bool, BridgeError> {
     let mut arguments = json!({ "threadId": target.id, "prompt": prompt });
     if let Some(host_id) = target.host_id.as_deref() {
@@ -875,6 +887,7 @@ async fn send_pause(
             "send_message_to_thread",
             arguments,
             started,
+            may_submit,
         ),
     )
     .await
@@ -1303,7 +1316,7 @@ impl AutoPauseController {
     fn reserve_target(&mut self,account:&str,thread:&str,period:&str,triggers:&[Trigger])->Reservation {
         let keys=Self::cycle_keys(account,thread,triggers);
         if keys.iter().all(|k|self.cycle_attempts.contains(k)) {return Reservation::Nothing;}
-        if self.cycle_attempts.len()+keys.iter().filter(|k|!self.cycle_attempts.contains(k)).count()>512 {return Reservation::Nothing;}
+        if self.cycle_attempts.len()+keys.iter().filter(|k|!self.cycle_attempts.contains(k)).count()>512 {return Reservation::Capacity;}
         let result=self.reserve(account,period,triggers);
         if matches!(result,Reservation::Backfilled) {
             for key in keys {if !self.cycle_attempts.contains(&key){self.cycle_attempts.push(key);}}
@@ -1352,6 +1365,7 @@ impl AutoPauseController {
 enum Reservation {
     /// Every quota key of this trigger set is already covered.
     Nothing,
+    Capacity,
     /// A previous confirmed delivery in this active period already covered the
     /// conversation; the remaining keys were recorded without sending again.
     Backfilled,
@@ -1603,6 +1617,7 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
             controller.discovery_override.clone(),
         )
     };
+    let time_zone=crate::pause_message::TimeZoneContext::system();
     let discovery = match override_discovery {
         Some(discovery) => discovery,
         None => discover_bridge().await,
@@ -1694,6 +1709,7 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
             { lock_controller(state).reserve_target(&sample.account_id, &thread.id, &period_id, &triggers) };
         let keys = match reservation {
             Reservation::Nothing | Reservation::Backfilled => continue,
+            Reservation::Capacity => {lock_controller(state).telemetry.record(thread,&period_id,"failed",Some("ledgerFull"));continue;}
             Reservation::Send { keys } => keys,
         };
 
@@ -1702,10 +1718,11 @@ async fn deliver_batch(state: &Arc<AppState>, sample: &PendingSample) {
         let mut guard = ReservationGuard::new(state.clone(), keys.clone());
         guard.cycles=AutoPauseController::cycle_keys(&sample.account_id,&thread.id,&triggers);
         let prompt=if triggers.iter().any(|t|t.quota==QuotaKind::Weekly){sample.settings.auto_pause_weekly_message.clone()}
-            else{crate::pause_message::render_five_hour(&sample.settings.auto_pause_five_hour_message,sample.usage.five_hour_resets_at,unix_now(),&sample.settings.language)};
+            else{crate::pause_message::render_five_hour(&sample.settings.auto_pause_five_hour_message,sample.usage.five_hour_resets_at,unix_now(),&sample.settings.language,&time_zone)};
 
         lock_controller(state).telemetry.record(thread, &period_id, "requested", None);
-        let result=send_pause(transport.as_ref(), &candidate, thread, &prompt,&guard.started).await;
+        let may_submit=||lock_controller(state).generation==sample.generation;
+        let result=send_pause(transport.as_ref(), &candidate, thread, &prompt,&guard.started,&may_submit).await;
         if matches!(result,Ok(false)){guard.started.store(false,Ordering::Release);}
         let confirmed=result.unwrap_or(false);
         if confirmed {
@@ -1808,7 +1825,16 @@ impl Drop for ReservationGuard {
                 if !controller.cycle_attempts.contains(key) {controller.cycle_attempts.push(key.clone());}
             }
         }
-        if !self.confirmed {controller.release(&self.keys);}
+        if !self.confirmed {
+            if self.started.load(Ordering::Acquire) {
+                for target in controller.telemetry.targets.values_mut() {
+                    if self.keys.iter().any(|key|key.thread_id==target.period_id) {
+                        target.phase="unknown".into();target.reason=Some("submissionUnknown".into());
+                    }
+                }
+            }
+            controller.release(&self.keys);
+        }
     }
 }
 
@@ -2856,5 +2882,36 @@ mod windows_protocol_tests {
         )
         .await;
         assert!(result.is_err(), "a silent peer must not produce a result");
+    }
+}
+
+#[cfg(test)]
+mod customization_repair_tests {
+    use super::*;
+    #[test]
+    fn submitted_responses_require_the_original_rpc_id() {
+        let good=br#"{"jsonrpc":"2.0","id":42,"result":{"success":true}}"#;
+        assert!(parse_matching_tool_outcome(good,&json!(42)).unwrap().success);
+        assert!(parse_matching_tool_outcome(good,&json!(43)).is_err());
+        assert!(parse_matching_tool_outcome(br#"{"result":{"success":true}}"#,&json!(42)).is_err());
+    }
+    #[test]
+    fn a_full_cycle_ledger_refuses_new_work_without_evicting_unknown_attempts() {
+        let mut c=AutoPauseController::new();let triggers=vec![Trigger{quota:QuotaKind::FiveHour,resets_at:Some(2000)}];
+        for i in 0..512 {c.cycle_attempts.extend(AutoPauseController::cycle_keys("a",&i.to_string(),&triggers));}
+        let before=c.cycle_attempts.clone();
+        assert!(matches!(c.reserve_target("a","new","new#period",&triggers),Reservation::Capacity));
+        assert_eq!(before,c.cycle_attempts);
+    }
+}
+
+#[cfg(all(test,windows))]
+mod cancelled_transport_tests {
+    use super::*;
+    #[tokio::test]
+    async fn cancelled_native_submission_never_opens_a_pipe_or_marks_it_written() {
+        let started=AtomicBool::new(false);let cancelled=||false;
+        let result=NamedPipeTransport.call_tool_observed("unused-cancelled-test-pipe","caller","send_message_to_thread",json!({}),&started,&cancelled).await;
+        assert!(result.is_err());assert!(!started.load(Ordering::Acquire));
     }
 }
