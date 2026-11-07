@@ -1,9 +1,11 @@
 # Status
 
-## v1.7.0 stable release preparation — 2026-11-07
+## v1.7.0 stable release — 2026-11-07
 
-- Stable release explicitly requested. Version metadata, Windows MSI version and UI version are aligned to 1.7.0; [release notes](docs/releases/v1.7.0.md) cover independent settings, Codex pause/continuation/estimators, quota rotation and the latest delivery/default-language fixes.
-- Version preparation checks passed: frontend 184, production build, packaging 7 and 96 synthetic parity origins. The latest functional source commit d032792 passed GitHub CI. Local Rust dependencies are rebuilding; the tagged release workflow repeats the full Rust/frontend/companion tests before signing and publishing. Native installed/chat/task acceptance remains unperformed and is documented without counting it as passed.
+- [v1.7.0 is published](https://github.com/SeptYagu/codex-usage-overlay/releases/tag/v1.7.0) as a stable, non-draft release and GitHub's latest release. Release commit/tag: `cd4046e` / `v1.7.0`. Version metadata, Windows MSI version and UI version are aligned to 1.7.0; [release notes](docs/releases/v1.7.0.md) cover independent settings, Codex pause/continuation/estimators, quota rotation and the latest delivery/default-language fixes.
+- [CI](https://github.com/SeptYagu/codex-usage-overlay/actions/runs/42342626678) and the [release workflow](https://github.com/SeptYagu/codex-usage-overlay/actions/runs/42342634226) succeeded. Local frontend 184/build, Rust main library 481 + helper 10 (8 existing ignored), packaging 7 and 96 synthetic parity origins pass. CI additionally verifies 16 DSH offline tests.
+- All nine release assets are present: NSIS, MSI, portable ZIP, three updater signatures, companion 0.1.1, latest.json and SHA256SUMS.txt. Downloaded manifest/signature files were checked for version, three matching platform URLs/signatures and signature packet structure; all four published SHA256 entries match GitHub's server-side asset digests. Manifest/checksum file bytes also match their GitHub digests.
+- Native installed-window, mixed-DPI, real audio and live chat/task wake-up acceptance remain unperformed and are documented in the release notes. No local installation or running application replacement was performed.
 
 ## Three-plan implementation — 2026-11-06 (SOURCE COMPLETE)
 
