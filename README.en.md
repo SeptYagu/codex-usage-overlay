@@ -64,7 +64,7 @@ Choose **Claude** under **Provider settings** to configure its connection and pr
 - The capsule starts with the active provider's logo (OpenAI for Codex, Claude for Claude); **Show provider logo** hides it. The marks come from Simple Icons (Claude, CC0) and LobeHub Icons (OpenAI, MIT) and are trademarks of their owners. Credits are not shown for Claude. Burn rate and reset state are kept in separate `claude-` prefixed files, so Claude samples never mix with the Codex history.
 - The helper writes `claude-rate-limits.json` and `claude-guard-state.json`, and the overlay writes `claude-guard.json` and `claude-bridge.json`, all in the runtime directory above. Disconnect before uninstalling; otherwise Claude Code keeps calling the removed helper.
 
-## New main-branch features (not released yet)
+## New in v1.7.0
 
 Settings now has fixed Codex, Claude and DSH columns with independent monitoring, refresh, protection, reset alerts and sounds. Common appearance and update settings remain in a collapsible section.
 

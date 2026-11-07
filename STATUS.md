@@ -1,5 +1,10 @@
 # Status
 
+## v1.7.0 stable release preparation — 2026-11-07
+
+- Stable release explicitly requested. Version metadata, Windows MSI version and UI version are aligned to 1.7.0; [release notes](docs/releases/v1.7.0.md) cover independent settings, Codex pause/continuation/estimators, quota rotation and the latest delivery/default-language fixes.
+- Version preparation checks passed: frontend 184, production build, packaging 7 and 96 synthetic parity origins. The latest functional source commit d032792 passed GitHub CI. Local Rust dependencies are rebuilding; the tagged release workflow repeats the full Rust/frontend/companion tests before signing and publishing. Native installed/chat/task acceptance remains unperformed and is documented without counting it as passed.
+
 ## Three-plan implementation — 2026-11-06 (SOURCE COMPLETE)
 
 - [Implementation and review log](docs/handoff/2026-11-06-three-plan-implementation.md): all three plans have completed implementation, source review and repairs, with each stage committed and pushed.

@@ -62,7 +62,7 @@ Windows 桌面悬浮窗，显示 Codex 配额和 Credit 余额。通过本机 Co
 - 浮窗开头显示当前来源的图标（Codex 为 OpenAI，Claude 为 Claude），可用“显示来源图标”隐藏。图标取自 Simple Icons（Claude，CC0）和 LobeHub Icons（OpenAI，MIT），商标归各自所有者。Claude 不显示 Credit 余额。消耗速率与重置状态保存在以 `claude-` 开头的独立文件中，Claude 样本不会混入 Codex 历史。
 - 助手写入 `claude-rate-limits.json` 和 `claude-guard-state.json`，浮窗写入 `claude-guard.json` 和 `claude-bridge.json`，均位于上述运行目录。卸载前请先断开连接，否则 Claude Code 会继续调用已删除的助手。
 
-## 主分支新增功能（尚未发布）
+## v1.7.0 新增功能
 
 设置窗口展开为 Codex／Claude／DSH 固定三栏，各自保存监控、刷新频率、保护、重置通知和音效；公共外观和更新设置单独折叠。
 
