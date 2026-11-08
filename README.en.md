@@ -64,11 +64,17 @@ Choose **Claude** under **Provider settings** to configure its connection and pr
 - The capsule starts with the active provider's logo (OpenAI for Codex, Claude for Claude); **Show provider logo** hides it. The marks come from Simple Icons (Claude, CC0) and LobeHub Icons (OpenAI, MIT) and are trademarks of their owners. Credits are not shown for Claude. Burn rate and reset state are kept in separate `claude-` prefixed files, so Claude samples never mix with the Codex history.
 - The helper writes `claude-rate-limits.json` and `claude-guard-state.json`, and the overlay writes `claude-guard.json` and `claude-bridge.json`, all in the runtime directory above. Disconnect before uninstalling; otherwise Claude Code keeps calling the removed helper.
 
+## New in v1.8.0
+
+Codex, Claude and DSH each offer independent Classic, Weighted and experimental Personalized 5H burn-rate estimates. The prior Codex choice migrates. Selection reprojects cached readings without another quota read and leaves Weekly estimates and protection unchanged. Claude uses Classic and pauses personal learning when its account identity cannot be verified.
+
+Turning quota rotation on or off now leaves the current capsule's appearance unchanged. A real source switch sizes the window to that source's content. With logos hidden, hover to see the source or check Settings and the tray.
+
 ## New in v1.7.0
 
 Settings now has fixed Codex, Claude and DSH columns with independent monitoring, refresh, protection, reset alerts and sounds. Common appearance and update settings remain in a collapsible section.
 
-Quota rotation is opt-in. Choose participating providers in their columns and adjust the matching interval slider from 3–30 seconds, in one-second steps (default eight). Only monitored providers with fresh, usable cached readings participate. Fewer than two eligible providers means standby. Hover, keyboard focus, dragging, menus, hiding, minimizing and a collapsed dock pause rotation; resuming restarts a full interval, and manual selection holds for 30 seconds. Automatic switches do not save settings, fetch quota or alter protection. Turning rotation off keeps the visible provider. The rotation switch leaves the current capsule unchanged; each switch sizes it to that source's usual content. With logos hidden there is no persistent source label; hover for the source, or check Settings and the tray menu.
+Quota rotation is opt-in. Choose participating providers in their columns and adjust the matching interval slider from 3–30 seconds, in one-second steps (default eight). Only monitored providers with fresh, usable cached readings participate. Fewer than two eligible providers means standby. Hover, keyboard focus, dragging, menus, hiding, minimizing and a collapsed dock pause rotation; resuming restarts a full interval, and manual selection holds for 30 seconds. Automatic switches do not save settings, fetch quota or alter protection. Turning rotation off keeps the visible provider. A source label stays visible during rotation even with logos hidden.
 
 The Codex column has separate 5-hour and Weekly pause messages, saved on blur with a 2,000 UTF-16-unit limit. Weekly takes precedence. Confirmed or uncertain submissions are not automatically repeated for the same account/chat/quota cycle; editing text does not reset this ledger.
 
