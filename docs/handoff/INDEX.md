@@ -1,5 +1,7 @@
 # Handoff index
 
+2026-11-08 Multi-provider 5H prediction and carousel appearance: [implementation review](2026-11-08-multi-provider-estimator-review.md), source commit `f2212ff`. Review found one settings fallback defect to repair before release. The [carousel appearance plan](2026-11-08-carousel-overlay-appearance-plan.md) records the v1.7.0 baseline and was implemented in `f2212ff`.
+
 2026-11-06 Three-plan implementation: [source, review and repair milestones](2026-11-06-three-plan-implementation.md). All three source/review/repair stages are complete and separately pushed. Final frontend 184/build, Rust 478 + 10, DSH 16, packaging 6, parity 96 and Edge 634 + 252 + 200 pass; native installed acceptance remains separate. No release or installation.
 
 2026-11-06 Quota carousel: [automatic display rotation for connected agents](2026-11-06-quota-carousel-plan.md). Plans an opt-in carousel with a matching 3–30-second settings slider (one-second steps, default eight), fresh source eligibility, manual/interaction holds and one application-owned display coordinator. Separates runtime display from persisted manual selection so ticks do not write settings, refresh quota or change protection. Documentation only.
