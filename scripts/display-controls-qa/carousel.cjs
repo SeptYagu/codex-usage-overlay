@@ -34,7 +34,6 @@ const {chromium}=require(process.argv[2]||'playwright');
       }
       for(const [width,height] of [[1320,800],[760,500]]){
         await page.setViewportSize({width,height});await page.evaluate(()=>window.qa.render({language:'zh-CN',quotaCarouselEnabled:true},null,false,'settings'));
-        await page.locator('details.settings-common').evaluate(el=>el.open=true);
         const slider=page.getByRole('slider',{name:'轮播间隔'});if(await slider.getAttribute('min')!=='3'||await slider.getAttribute('max')!=='30'||await slider.getAttribute('step')!=='1')throw Error('Slider contract changed');
         await slider.scrollIntoViewIfNeeded();if(!await slider.isVisible())throw Error('Slider unreachable');
         if(width===1320&&dpr===1&&theme==='dark')await page.screenshot({path:'output/carousel-qa/settings-zh-dark.png'});count++;

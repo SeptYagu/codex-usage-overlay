@@ -41,19 +41,25 @@ async function mount(overrides: Partial<OverlaySettings> = {}) {
   const onPatchSettings = vi.fn();
   const view = render(<SettingsView settings={{ ...DEFAULT_SETTINGS, ...overrides }} onPatchSettings={onPatchSettings} />);
   await act(async () => {});
-  const panel = (provider: string) => within(view.container.querySelector(`[data-provider-settings="${provider}"]`)! as HTMLElement);
+  const panel = (provider: string) => {
+    fireEvent.click(view.getByRole('tab', { name: i18n.t(provider === 'codex' ? 'providerCodex' : provider === 'claude' ? 'providerClaude' : 'providerDsh') }));
+    return within(view.container.querySelector(`[data-provider-settings="${provider}"]`)! as HTMLElement);
+  };
   return { ...view, panel, onPatchSettings };
 }
 
-describe('independent provider columns', () => {
-  it('mounts every provider, keeps common settings once and has no provider-edit selector', async () => {
+describe('settings tabs', () => {
+  it('shows one settings page at a time with unique control ids', async () => {
     const view = await mount();
-    expect(view.container.querySelectorAll('[data-provider-settings]')).toHaveLength(3);
+    expect(view.getAllByRole('tab')).toHaveLength(4);
+    expect(view.container.querySelectorAll('[data-provider-settings]')).toHaveLength(0);
     expect(view.queryByLabelText('Provider settings')).toBeNull();
     expect(view.container.querySelectorAll('[data-common-settings]')).toHaveLength(1);
     const ids = [...view.container.querySelectorAll('[id]')].map(el => el.id);
     expect(new Set(ids).size).toBe(ids.length);
-    expect(view.container.querySelectorAll('input[type="range"]')).toHaveLength(9);
+    view.panel('dsh');
+    expect(view.container.querySelectorAll('[data-common-settings]')).toHaveLength(0);
+    expect(view.container.querySelectorAll('[data-provider-settings]')).toHaveLength(1);
   });
   it('writes refresh only to the initiating provider even when the overlay shows another', async () => {
     const { panel, onPatchSettings } = await mount({provider: 'dsh'});
@@ -70,11 +76,11 @@ describe('independent provider columns', () => {
     const { panel, onPatchSettings } = await mount({autoPauseOnLowQuota:true});
     const threshold = panel('codex').getByRole('slider', {name:'5-hour quota threshold'}) as HTMLInputElement;
     expect(threshold.min).toBe('1');
-    expect((panel('dsh').getByRole('slider', {name:'5-hour quota threshold'}) as HTMLInputElement).min).toBe('0');
     fireEvent.change(threshold, {target:{value:'9'}});
     expect(onPatchSettings).toHaveBeenCalledWith({providerPreferences:{codex:{fiveHourThresholdPercent:9}}}, true);
+    expect((panel('dsh').getByRole('slider', {name:'5-hour quota threshold'}) as HTMLInputElement).min).toBe('0');
   });
-  it('disables protection controls for a disabled source without hiding other columns', async () => {
+  it('disables protection controls for a disabled source without hiding other tabs', async () => {
     const {panel} = await mount({providerPreferences:{codex:{monitorEnabled:false,protectionEnabled:false,fiveHourThresholdPercent:5,weeklyThresholdPercent:2}}});
     expect((panel('codex').getByRole('checkbox',{name:'Pause Codex when quota runs low'}) as HTMLInputElement).disabled).toBe(true);
     expect(panel('claude').getByRole('checkbox',{name:'Monitor this provider'})).toBeTruthy();
@@ -88,11 +94,10 @@ describe('independent provider columns', () => {
     expect(tauri.invoke.mock.calls.filter(([name])=>name==='get_notification_status')).toHaveLength(1);
     expect(tauri.invoke.mock.calls.filter(([name])=>name==='is_installed_version')).toHaveLength(1);
   });
-  it.each(['en-US','zh-CN','zh-Hant'])('keeps all providers and unique labels in %s', async locale => {
+  it.each(['en-US','zh-CN','zh-Hant'])('keeps all provider tabs in %s', async locale => {
     await i18n.changeLanguage(locale);
     const view = await mount();
-    for (const key of ['providerCodex','providerClaude','providerDsh']) expect(view.getByRole('heading',{name:i18n.t(key)})).toBeTruthy();
-    expect(view.getByText(i18n.t('commonSettings'))).toBeTruthy();
+    for (const key of ['commonSettings','providerCodex','providerClaude','providerDsh']) expect(view.getByRole('tab',{name:i18n.t(key)})).toBeTruthy();
   });
 });
 
@@ -101,7 +106,7 @@ it('keeps carousel participation separate and saves every slider second through 
   const slider=getByRole('slider',{name:'Rotation interval'}) as HTMLInputElement;
   expect([slider.min,slider.max,slider.step,slider.value]).toEqual(['3','30','1','9']);
   fireEvent.change(slider,{target:{value:'11'}});expect(onPatchSettings).toHaveBeenLastCalledWith({quotaCarouselIntervalSeconds:11},true);
+  fireEvent.click(getByRole('checkbox',{name:'Automatically rotate quotas'}));expect(onPatchSettings).toHaveBeenLastCalledWith({quotaCarouselEnabled:false});
   fireEvent.click(panel('claude').getByRole('checkbox',{name:'Include in quota rotation'}));
   expect(onPatchSettings).toHaveBeenLastCalledWith({providerPreferences:{claude:{carouselIncluded:false}}});
-  fireEvent.click(getByRole('checkbox',{name:'Automatically rotate quotas'}));expect(onPatchSettings).toHaveBeenLastCalledWith({quotaCarouselEnabled:false});
 });

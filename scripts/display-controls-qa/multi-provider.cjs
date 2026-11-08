@@ -50,30 +50,32 @@ const fs = require('node:fs');
                     await page.setViewportSize(size);
                     await page.evaluate(language => window.qa.render({ language, provider: 'codex' }, null, false, 'settings'), language);
                     for (const provider of ['codex', 'claude', 'dsh']) {
+                        await page.locator(`#settings-tab-${provider}`).click();
                         await page.locator(`[data-provider-settings="${provider}"]`).scrollIntoViewIfNeeded();
                         const metrics = await page.evaluate(provider => {
                             const grid = document.querySelector(`[data-provider-settings="${provider}"]`);
                             // Controls inside details become reachable by opening
                             // the disclosure, rather than scrolling a closed one.
                             for (const details of grid.querySelectorAll('details')) details.open = true;
-                            const overflow = [...grid.children].some(column => column.scrollWidth > column.clientWidth);
+                            const panel = document.querySelector('.settings-content');
+                            const overflow = grid.scrollWidth > grid.clientWidth;
                             const inaccessible = [];
                             const accessible = [...grid.querySelectorAll('input,select,button')].every(control => {
-                                const column = grid;
+                                const column = panel;
                                 control.scrollIntoView({ block: 'nearest' });
                                 const r = control.getBoundingClientRect(), c = column.getBoundingClientRect();
                                 const fits = r.left >= c.left - 1 && r.right <= c.right + 1 && r.top >= c.top - 1 && r.bottom <= c.bottom + 1;
                                 if (!fits) inaccessible.push({ label: control.getAttribute('aria-label') || control.id || control.tagName, top: r.top, bottom: r.bottom, columnTop: c.top, columnBottom: c.bottom });
                                 return fits;
                             });
-                            for (const column of grid.children) column.scrollTop = 0;
+                            panel.scrollTop = 0;
                             const ids = [...document.querySelectorAll('[id]')].map(el=>el.id);
-                            return { display: document.querySelector('[aria-pressed=true]')?.closest('[data-provider-settings]')?.getAttribute('data-provider-settings'), configured: grid.getAttribute('data-provider-settings'), duplicateIds:ids.length!==new Set(ids).size, columns:document.querySelectorAll('[data-provider-settings]').length,
+                            return { display: document.querySelector('[aria-pressed=true]')?.closest('[data-provider-settings]')?.getAttribute('data-provider-settings') ?? null, configured: grid.getAttribute('data-provider-settings'), duplicateIds:ids.length!==new Set(ids).size, columns:document.querySelectorAll('[data-provider-settings]').length,
                                 overflow, accessible, inaccessible, rootScroll: document.documentElement.scrollHeight > innerHeight,
                                 missingTranslation: /monitorHealth\.|displayedProviderHint|monitorProvider|usageProviderHint/.test(grid.textContent) };
                         }, provider);
                         const item = { settings: true, colorScheme, dpr, language, provider, size, ...metrics }; results.push(item);
-                        if (metrics.display !== 'codex' || metrics.configured !== provider || metrics.columns !== 3 || metrics.duplicateIds || metrics.overflow || !metrics.accessible || metrics.missingTranslation) failures.push(item);
+                        if (metrics.display !== (provider === 'codex' ? 'codex' : null) || metrics.configured !== provider || metrics.columns !== 1 || metrics.duplicateIds || metrics.overflow || !metrics.accessible || metrics.missingTranslation) failures.push(item);
                         if (dpr === 1 && size.width >= 960) await page.screenshot({ path: `output/multi-provider-qa/settings-${language}-${provider}-${size.width}-${colorScheme}.png` });
                     }
                 }

@@ -159,7 +159,7 @@ pub const TRAY_ID: &str = "main-tray";
 /// Label of the tray popup webview window.
 pub const TRAY_MENU_WINDOW_LABEL: &str = "tray-menu";
 const SETTINGS_DEFAULT_WIDTH: f64 = 960.0;
-const SETTINGS_DEFAULT_HEIGHT: f64 = 620.0;
+const SETTINGS_DEFAULT_HEIGHT: f64 = 700.0;
 const SETTINGS_MIN_WIDTH: f64 = 760.0;
 const SETTINGS_MIN_HEIGHT: f64 = 500.0;
 const SETTINGS_MAX_WIDTH: f64 = 1600.0;

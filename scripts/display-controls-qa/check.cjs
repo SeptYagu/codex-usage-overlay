@@ -65,16 +65,15 @@ const fs = require('node:fs');
                     await page.setViewportSize(size);
                     await page.evaluate(({ language, edgeHide }) => window.qa.render({ language, autoEdgeHide: edgeHide, showPercentageGrid: true }, null, false, 'settings'), { language, edgeHide });
                     const m = await page.evaluate(() => {
-                        document.querySelector('.settings-common').open = true;
                         const column = document.querySelector('[data-common-settings]');
-                        const bounds = column.getBoundingClientRect();
+                        const panel = document.querySelector('.settings-content');
                         const accessible = [...column.querySelectorAll('input, select')].every(control => {
                             control.scrollIntoView({ block: 'nearest' });
                             const r = control.getBoundingClientRect();
-                            const bounds = column.getBoundingClientRect();
+                            const bounds = panel.getBoundingClientRect();
                             return r.left >= bounds.left - 1 && r.right <= bounds.right + 1 && r.top >= bounds.top - 1 && r.bottom <= bounds.bottom + 1;
                         });
-                        column.scrollTop = 0;
+                        panel.scrollTop = 0;
                         const hint = document.getElementById('percentage-grid-hint');
                         const descriptions = [...document.querySelectorAll('[aria-describedby]')].every(control =>
                             control.getAttribute('aria-describedby').split(' ').every(id => document.getElementById(id)?.textContent.length > 0));

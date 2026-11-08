@@ -20,24 +20,41 @@ interface SettingsViewProps {
   onPatchSettings: (patch: SettingsPatch, debounce?: boolean) => void;
 }
 
+const settingsTabs = [
+  { id: 'common', label: 'commonSettings' },
+  { id: 'codex', label: 'providerCodex', provider: 'codex' },
+  { id: 'claude', label: 'providerClaude', provider: 'claude' },
+  { id: 'dsh', label: 'providerDsh', provider: 'dsh' },
+] as const;
+type SettingsTab = typeof settingsTabs[number]['id'];
+
 export const SettingsView = ({ settings, onPatchSettings, saveErrors = [], display }: SettingsViewProps) => {
   const { t } = useTranslation();
   const monitors = useProviderMonitors();
   const [isInstalled, setIsInstalled] = useState(false);
   const [notificationStatus, setNotificationStatus] = useState<string>('loading');
+  const [activeTab, setActiveTab] = useState<SettingsTab>('common');
   useEffect(() => {
     invoke<boolean>('is_installed_version').then(setIsInstalled).catch(() => {});
     invoke<string>('get_notification_status').then(setNotificationStatus).catch(() => setNotificationStatus('unavailable'));
   }, []);
   useEffect(() => { getCurrentWindow().setTitle(t('windowSettings')).catch(console.error); }, [t, settings.language]);
   const shared = { savedSettings: settings, savePatch: onPatchSettings, monitors, isInstalled, notificationStatus };
+  const activePage = settingsTabs.find(page => page.id === activeTab)!;
+  const provider = 'provider' in activePage ? activePage.provider : null;
   return <div className="settings-shell bg-[#F5F6F8] dark:bg-slate-900 text-slate-800 dark:text-slate-100 font-sans select-none">
     <header className="flex shrink-0 justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-3">
       <h2 className="text-base font-bold">{t('windowSettings')}</h2><span className="text-xs font-mono">v{APP_VERSION}</span>
     </header>
-    <details className="settings-common shrink-0 rounded-lg border border-slate-200 dark:border-slate-700 p-3">
-      <summary className="cursor-pointer font-semibold text-sm">{t('commonSettings')}</summary>
-      <div className="space-y-2 mt-3" data-carousel-settings>
+    <nav role="tablist" aria-label={t('windowSettings')} className="settings-tab-list shrink-0 flex gap-2 border-b border-slate-200 dark:border-slate-700">
+      {settingsTabs.map((tab, index) => <button key={tab.id} type="button" role="tab" id={`settings-tab-${tab.id}`} aria-controls="settings-tab-panel" aria-selected={activeTab === tab.id} tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => setActiveTab(tab.id)} onKeyDown={event => {
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? settingsTabs.length - 1 : event.key === 'ArrowRight' ? (index + 1) % settingsTabs.length : event.key === 'ArrowLeft' ? (index - 1 + settingsTabs.length) % settingsTabs.length : -1;
+        if (next >= 0) { event.preventDefault(); setActiveTab(settingsTabs[next].id); document.getElementById(`settings-tab-${settingsTabs[next].id}`)?.focus(); }
+      }} className={`shrink-0 rounded-t-lg px-4 py-2 text-sm font-semibold ${activeTab === tab.id ? 'bg-white dark:bg-slate-800 text-cyan-700 dark:text-cyan-300 border border-b-0 border-slate-200 dark:border-slate-700' : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-100'}`}>{t(tab.label)}</button>)}
+    </nav>
+    <main id="settings-tab-panel" role="tabpanel" aria-labelledby={`settings-tab-${activeTab}`} tabIndex={0} className="settings-content rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/30">
+    {activeTab === 'common' ? <section className="p-4">
+      <div className="space-y-2" data-carousel-settings>
         <label className="flex items-center justify-between text-sm font-semibold">{t('quotaCarouselEnabled')}<input type="checkbox" className="accent-cyan-500" checked={settings.quotaCarouselEnabled??false} onChange={e=>onPatchSettings({quotaCarouselEnabled:e.target.checked})}/></label>
         <div className="flex justify-between text-sm"><label htmlFor="carousel-interval">{t('quotaCarouselInterval')}</label><span className="font-mono text-cyan-600">{settings.quotaCarouselIntervalSeconds??8} {t('seconds')}</span></div>
         <input id="carousel-interval" type="range" min="3" max="30" step="1" value={settings.quotaCarouselIntervalSeconds??8} onChange={e=>onPatchSettings({quotaCarouselIntervalSeconds:Number(e.target.value)},true)} className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500" />
@@ -46,16 +63,14 @@ export const SettingsView = ({ settings, onPatchSettings, saveErrors = [], displ
         {display?.carouselEnabled && <p role="status" className="text-xs text-cyan-600">{t(`carouselStatus_${display.status}`)} · {display.candidates.length} {t('carouselSources')}</p>}
       </div>
       <SettingsPanel {...shared} common configurationProvider={settings.provider} />
-    </details>
-    <main className="settings-provider-grid">
-      {(['codex', 'claude', 'dsh'] as Provider[]).map(provider => <section key={provider} data-provider-settings={provider} aria-label={t(provider === 'codex' ? 'providerCodex' : provider === 'claude' ? 'providerClaude' : 'providerDsh')} className="settings-provider-column rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/30">
+    </section> : provider && <section key={provider} data-provider-settings={provider} aria-label={t(activePage.label)} className="settings-provider-column">
         <header className="flex items-center justify-between gap-2 p-3 border-b border-slate-200 dark:border-slate-700">
-          <h3 className="font-semibold text-sm">{t(provider === 'codex' ? 'providerCodex' : provider === 'claude' ? 'providerClaude' : 'providerDsh')}</h3>
+          <h3 className="font-semibold text-sm">{t(activePage.label)}</h3>
           <button type="button" aria-pressed={(display?.effectiveProvider ?? settings.provider) === provider} disabled={!monitors[provider]?.available} onClick={() => onPatchSettings({provider})} className="text-xs rounded border px-2 py-1 disabled:opacity-50">{t((display?.effectiveProvider ?? settings.provider) === provider ? 'currentlyDisplayed' : 'displayThisProvider')}</button>
         </header>
         <label className="flex items-center justify-between gap-2 p-3 text-xs">{t('carouselIncluded')}<input type="checkbox" className="accent-cyan-500" checked={providerPreference(settings,provider).carouselIncluded??true} onChange={e=>onPatchSettings({providerPreferences:{[provider]:{carouselIncluded:e.target.checked}}})}/></label>
         <SettingsPanel {...shared} configurationProvider={provider} />
-      </section>)}
+      </section>}
     </main>
     {saveErrors.length>0 && <div role="alert" className="text-xs text-rose-600 shrink-0">{saveErrors.join(' · ')}</div>}
     <footer className="shrink-0 text-center text-xs text-slate-400">{t('feedback')} <span className="select-text">septwind@agent.qq.com</span></footer>
@@ -109,7 +124,7 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
   const fiveHourThreshold = dsh ? settings.dshFiveHourThresholdPercent : settings.autoPauseFiveHourThresholdPercent;
   const weeklyThreshold = dsh ? settings.dshWeeklyThresholdPercent : settings.autoPauseWeeklyThresholdPercent;
 
-  if (common) return <div data-common-settings className="grid gap-4 md:grid-cols-2 max-h-72 overflow-y-auto pt-4">
+  if (common) return <div data-common-settings className="grid gap-4 md:grid-cols-2 pt-4">
     <div className="space-y-2">          <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
             <label htmlFor="overlay-layout" className="text-sm font-medium">{t('overlayLayout')}</label>
             <select

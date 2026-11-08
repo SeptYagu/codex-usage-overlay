@@ -97,6 +97,7 @@ describe('settings synchronization', () => {
 
   it('keeps quota notifications independent and patches sound mode by field', async () => {
     const view = render(<App />);
+    fireEvent.click(await screen.findByRole('tab', {name:'Local Codex'}));
     await screen.findByRole('heading', {name:'Local Codex'});
     const codex = within(view.container.querySelector('[data-provider-settings="codex"]')! as HTMLElement);
     const fiveHour = await codex.findByRole('checkbox', { name: '5-hour quota reset notification Enable notification' });
@@ -147,6 +148,7 @@ describe('settings synchronization', () => {
 
   it('selects, previews, stops, and clears a custom sound path', async () => {
     const view = render(<App />);
+    fireEvent.click(await screen.findByRole('tab', {name:'Local Codex'}));
     await screen.findByRole('heading', {name:'Local Codex'});
     const codex = within(view.container.querySelector('[data-provider-settings="codex"]')! as HTMLElement);
     const mode = await codex.findByRole('combobox', { name: 'Weekly quota reset notification Alert sound' });
