@@ -12,7 +12,7 @@ export function providerPreference(settings: OverlaySettings, provider: Provider
 export function settingsForProvider(settings: OverlaySettings, provider: Provider): OverlaySettings {
   const preference = providerPreference(settings, provider);
   return { ...settings, provider,
-    fiveHourBurnRateAlgorithm: preference.fiveHourBurnRateAlgorithm ?? settings.fiveHourBurnRateAlgorithm ?? 'legacy',
+    fiveHourBurnRateAlgorithm: preference.fiveHourBurnRateAlgorithm ?? (provider === 'codex' ? settings.fiveHourBurnRateAlgorithm ?? 'legacy' : 'legacy'),
     refreshIntervalSeconds: preference.refreshIntervalSeconds ?? settings.refreshIntervalSeconds,
     fiveHourResetNotification: preference.fiveHourResetNotification ?? settings.fiveHourResetNotification,
     weeklyResetNotification: preference.weeklyResetNotification ?? settings.weeklyResetNotification,

@@ -4,6 +4,23 @@ import { mergeSettingsPatch, mergePendingPatches, settingsForProvider } from './
 import { mergeMonitorSnapshot } from './hooks/useProviderMonitors';
 
 describe('independent provider settings', () => {
+  it('keeps a legacy top-level Codex algorithm out of other providers', () => {
+    const settings = { ...DEFAULT_SETTINGS, fiveHourBurnRateAlgorithm: 'weighted' as const,
+      providerPreferences: {
+        codex: { monitorEnabled: true, protectionEnabled: false, fiveHourThresholdPercent: 5, weeklyThresholdPercent: 2 },
+        claude: { monitorEnabled: true, protectionEnabled: false, fiveHourThresholdPercent: 5, weeklyThresholdPercent: 2 },
+        dsh: { monitorEnabled: true, protectionEnabled: false, fiveHourThresholdPercent: 0, weeklyThresholdPercent: 0 },
+      } };
+    expect(settingsForProvider(settings, 'codex').fiveHourBurnRateAlgorithm).toBe('weighted');
+    expect(settingsForProvider(settings, 'claude').fiveHourBurnRateAlgorithm).toBe('legacy');
+    expect(settingsForProvider(settings, 'dsh').fiveHourBurnRateAlgorithm).toBe('legacy');
+    const edited = mergeSettingsPatch(settings, { providerPreferences: {
+      claude: { fiveHourBurnRateAlgorithm: 'personalized' }, dsh: { fiveHourBurnRateAlgorithm: 'weighted' },
+    } });
+    expect(settingsForProvider(edited, 'codex').fiveHourBurnRateAlgorithm).toBe('weighted');
+    expect(settingsForProvider(edited, 'claude').fiveHourBurnRateAlgorithm).toBe('personalized');
+    expect(settingsForProvider(edited, 'dsh').fiveHourBurnRateAlgorithm).toBe('weighted');
+  });
   it('merges partial changes without dropping other providers or their thresholds', () => {
     const settings = { ...DEFAULT_SETTINGS, providerPreferences: {
       codex: { monitorEnabled: true, protectionEnabled: true, fiveHourThresholdPercent: 7, weeklyThresholdPercent: 3 },
