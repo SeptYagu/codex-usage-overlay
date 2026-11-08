@@ -24,7 +24,13 @@ pub fn read_usage(dir: &Path, now: i64) -> Result<ClaudeSample, ReadFailure> {
     }
     let snapshot = shared::read_snapshot(dir)
         .ok_or_else(|| ReadFailure::new(ReadStage::Parse, FailureKind::InvalidResponse))?;
-    Ok(sample(&snapshot, now))
+    let identity = shared::account_identity();
+    if snapshot.account_id.is_some() && identity.is_some() && snapshot.account_id != identity {
+        return Err(ReadFailure::new(ReadStage::Parse, FailureKind::InvalidResponse));
+    }
+    let mut result = sample(&snapshot, now);
+    if identity.is_none() { result.usage.account_id = None; }
+    Ok(result)
 }
 
 /// The status text for a failed Claude read. `ReadFailure`'s own text names
@@ -47,7 +53,7 @@ pub fn sample(snapshot: &shared::Snapshot, now: i64) -> ClaudeSample {
     };
     ClaudeSample {
         usage: RawCodexUsage {
-            account_id: None,
+            account_id: snapshot.account_id.clone(),
             five_hour: window(snapshot.five_hour, FIVE_HOUR_MINS),
             weekly: window(snapshot.seven_day, SEVEN_DAY_MINS),
             credits_display: "—".into(),

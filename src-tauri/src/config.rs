@@ -52,6 +52,7 @@ impl Provider {
 pub struct ProviderPreference {
     pub monitor_enabled: bool,
     pub carousel_included: bool,
+    pub five_hour_burn_rate_algorithm: FiveHourBurnRateAlgorithm,
     pub protection_enabled: bool,
     pub five_hour_threshold_percent: u32,
     pub weekly_threshold_percent: u32,
@@ -66,7 +67,7 @@ pub struct ProviderPreference {
     present_fields: std::collections::BTreeSet<String>,
 }
 impl Default for ProviderPreference {
-    fn default() -> Self { Self { monitor_enabled: true, carousel_included: true, protection_enabled: false,
+    fn default() -> Self { Self { monitor_enabled: true, carousel_included: true, five_hour_burn_rate_algorithm: FiveHourBurnRateAlgorithm::Legacy, protection_enabled: false,
         five_hour_threshold_percent: 5, weekly_threshold_percent: 2,
         refresh_interval_seconds: 60, five_hour_reset_notification: true, weekly_reset_notification: true,
         five_hour_sound_mode: SoundMode::Windows, weekly_sound_mode: SoundMode::Windows,
@@ -86,6 +87,7 @@ impl<'de> Deserialize<'de> for ProviderPreference {
             }
         }; }
         field!("carouselIncluded", carousel_included);
+        field!("fiveHourBurnRateAlgorithm", five_hour_burn_rate_algorithm);
         field!("monitorEnabled", monitor_enabled); field!("protectionEnabled", protection_enabled);
         field!("fiveHourThresholdPercent", five_hour_threshold_percent); field!("weeklyThresholdPercent", weekly_threshold_percent);
         field!("refreshIntervalSeconds", refresh_interval_seconds);
@@ -125,6 +127,20 @@ pub fn source_key(settings: &OverlaySettings) -> String {
             format!("dsh-{hash:016x}")
         }
     }
+}
+
+/// A DSH transport address can change on reconnect without changing the
+/// subscription account. Estimator history follows the verified instance and
+/// account, while UI delivery keeps using the connection-specific source key.
+fn estimator_source_key(settings: &OverlaySettings) -> String {
+    if settings.provider != Provider::Dsh || settings.dsh_instance_id.is_empty() || settings.dsh_account_id.is_empty() {
+        return source_key(settings);
+    }
+    let identity = serde_json::to_string(&(settings.dsh_instance_id.as_str(), settings.dsh_account_id.as_str())).unwrap_or_default();
+    let hash = identity.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("dsh-burn-{hash:016x}")
 }
 
 pub fn same_source(left: &OverlaySettings, right: &OverlaySettings) -> bool {
@@ -285,7 +301,7 @@ impl Default for OverlaySettings {
             // setting, not from the OS locale at construction time.
             auto_pause_five_hour_message: String::new(),
             auto_pause_weekly_message: String::new(),
-            schema_version: 3, provider_preferences: Default::default(),
+            schema_version: 4, provider_preferences: Default::default(),
             provider: Provider::default(),
             dsh_base_url: String::new(),
             dsh_instance_id: String::new(),
@@ -327,7 +343,7 @@ impl Default for OverlaySettings {
 
 impl OverlaySettings {
     pub fn migrate(&mut self) {
-        if self.schema_version > 3 { return; }
+        if self.schema_version > 4 { return; }
         if !(3..=30).contains(&self.quota_carousel_interval_seconds){self.quota_carousel_interval_seconds=8;}
         if !crate::pause_message::valid_message(&self.auto_pause_five_hour_message) { self.auto_pause_five_hour_message=crate::pause_message::default_pause(&self.language); }
         if !crate::pause_message::valid_message(&self.auto_pause_weekly_message) { self.auto_pause_weekly_message=crate::pause_message::default_pause(&self.language); }
@@ -353,6 +369,9 @@ impl OverlaySettings {
                 if provider == Provider::Dsh { p.five_hour_threshold_percent = 0; p.weekly_threshold_percent = 0; }
                 p
             });
+            if self.schema_version < 4 && provider == Provider::Codex {
+                preference.five_hour_burn_rate_algorithm = self.five_hour_burn_rate_algorithm;
+            }
             if inherit {
                 macro_rules! inherit { ($json:literal, $name:ident) => {
                     if !preference.present_fields.contains($json) { preference.$name = self.$name.clone(); }
@@ -371,7 +390,7 @@ impl OverlaySettings {
             preference.five_hour_threshold_percent = preference.five_hour_threshold_percent.clamp(if provider == Provider::Dsh {0} else {1}, 15);
             preference.weekly_threshold_percent = preference.weekly_threshold_percent.clamp(if provider == Provider::Dsh {0} else {1}, 10);
         }
-        self.schema_version = 3;
+        self.schema_version = 4;
     }
     pub fn preference(&self, provider: Provider) -> ProviderPreference {
         self.provider_preferences.get(provider.key()).cloned().unwrap_or_else(|| {
@@ -379,6 +398,7 @@ impl OverlaySettings {
         })
     }
     pub fn mirror_display_preferences(&mut self) {
+        self.five_hour_burn_rate_algorithm = self.preference(Provider::Codex).five_hour_burn_rate_algorithm;
         let displayed = self.preference(self.provider);
         self.auto_pause_on_low_quota = displayed.monitor_enabled && displayed.protection_enabled;
         self.refresh_interval_seconds = displayed.refresh_interval_seconds;
@@ -401,8 +421,8 @@ impl OverlaySettings {
         let preference = self.preference(provider);
         scoped.provider = provider;
         scoped.quota_carousel_enabled=false;scoped.quota_carousel_interval_seconds=8;
+        scoped.five_hour_burn_rate_algorithm=preference.five_hour_burn_rate_algorithm;
         if provider != Provider::Codex {
-            scoped.five_hour_burn_rate_algorithm=FiveHourBurnRateAlgorithm::Legacy;
             scoped.auto_pause_five_hour_message=String::new();scoped.auto_pause_weekly_message=String::new();
         }
         scoped.refresh_interval_seconds = preference.refresh_interval_seconds;
@@ -466,6 +486,7 @@ pub struct ConfigManager {
     /// Provider runtimes bind this once; cloning or changing a legacy root
     /// manager cannot redirect an in-flight provider write.
     bound_namespace: Option<String>,
+    bound_estimator_namespace: Option<String>,
 }
 
 impl ConfigManager {
@@ -478,18 +499,19 @@ impl ConfigManager {
         let runtime_dir = std::env::var_os("CODEX_OVERLAY_TEST_RUNTIME_DIR")
             .filter(|value| !value.is_empty()).map(PathBuf::from).unwrap_or(runtime_dir);
         let _ = fs::create_dir_all(&runtime_dir);
-        Self { runtime_dir, namespace: Arc::default(), bound_namespace: None }
+        Self { runtime_dir, namespace: Arc::default(), bound_namespace: None, bound_estimator_namespace: None }
     }
 
     #[cfg(test)]
     pub fn with_runtime_dir(runtime_dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(&runtime_dir);
-        Self { runtime_dir, namespace: Arc::default(), bound_namespace: None }
+        Self { runtime_dir, namespace: Arc::default(), bound_namespace: None, bound_estimator_namespace: None }
     }
 
     pub fn for_source(&self, settings: &OverlaySettings) -> Self {
         let key = if settings.provider == Provider::Codex { String::new() } else { source_key(settings) };
-        Self { runtime_dir: self.runtime_dir.clone(), namespace: Arc::default(), bound_namespace: Some(key) }
+        let estimator_key = if settings.provider == Provider::Codex { String::new() } else { estimator_source_key(settings) };
+        Self { runtime_dir: self.runtime_dir.clone(), namespace: Arc::default(), bound_namespace: Some(key), bound_estimator_namespace: Some(estimator_key) }
     }
 
     pub fn is_local_codex(&self) -> bool {
@@ -518,6 +540,14 @@ impl ConfigManager {
         let namespace = self.bound_namespace.clone().unwrap_or_else(|| self.namespace.lock().unwrap_or_else(|p| p.into_inner()).clone());
         if namespace.is_empty() { self.runtime_dir.join(name) }
         else { self.runtime_dir.join(format!("{namespace}-{name}")) }
+    }
+
+    fn estimator_path(&self, name: &str) -> PathBuf {
+        match &self.bound_estimator_namespace {
+            Some(namespace) if namespace.is_empty() => self.runtime_dir.join(name),
+            Some(namespace) => self.runtime_dir.join(format!("{namespace}-{name}")),
+            None => self.provider_path(name),
+        }
     }
 
     pub fn settings_path(&self) -> PathBuf {
@@ -553,6 +583,10 @@ impl ConfigManager {
     }
 
     pub fn burn_rate_state_path(&self) -> PathBuf {
+        self.estimator_path("burn-rate-state.json")
+    }
+
+    pub fn legacy_burn_rate_state_path(&self) -> PathBuf {
         self.provider_path("burn-rate-state.json")
     }
 
@@ -561,7 +595,7 @@ impl ConfigManager {
     /// It is diagnostic evidence for the local learner, not telemetry: it is
     /// never uploaded or transmitted.
     pub fn shadow_evidence_path(&self) -> PathBuf {
-        self.provider_path("burn-rate-shadow-evidence.jsonl")
+        self.estimator_path("burn-rate-shadow-evidence.jsonl")
     }
 
     pub fn load_settings(&self) -> OverlaySettings {
@@ -584,7 +618,7 @@ impl ConfigManager {
         let path = self.settings_path();
         let disk_version = fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .and_then(|v| v.get("schemaVersion").and_then(|v| v.as_u64()));
-        if settings.schema_version > 3 || disk_version.is_some_and(|v| v > 3) {
+        if settings.schema_version > 4 || disk_version.is_some_and(|v| v > 4) {
             return Err("Settings were created by a newer application; refusing to overwrite them".into());
         }
         let tmp = path.with_extension("json.tmp");
@@ -1024,7 +1058,7 @@ mod independent_preferences_tests {
             }
         })).unwrap();
         settings.migrate();
-        assert_eq!(settings.schema_version,3);
+        assert_eq!(settings.schema_version,4);
         assert_eq!(settings.preference(Provider::Codex).refresh_interval_seconds,47);
         assert_eq!(settings.preference(Provider::Codex).five_hour_sound_path,None);
         assert!(!settings.preference(Provider::Codex).weekly_reset_notification);
@@ -1045,6 +1079,40 @@ mod independent_preferences_tests {
         assert!(!s.for_provider(Provider::Dsh).weekly_reset_notification);
         let mut restored:OverlaySettings=serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
         restored.migrate();assert_eq!(restored.for_provider(Provider::Claude).refresh_interval_seconds,120);
+    }
+    #[test]
+    fn v3_codex_algorithm_migrates_and_each_provider_keeps_its_own_choice() {
+        let mut settings: OverlaySettings = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 3, "fiveHourBurnRateAlgorithm": "weighted",
+            "providerPreferences": {"codex": {}, "claude": {}, "dsh": {}}
+        })).unwrap();
+        settings.migrate();
+        assert_eq!(settings.preference(Provider::Codex).five_hour_burn_rate_algorithm, FiveHourBurnRateAlgorithm::Weighted);
+        assert_eq!(settings.preference(Provider::Claude).five_hour_burn_rate_algorithm, FiveHourBurnRateAlgorithm::Legacy);
+        settings.provider_preferences.get_mut("claude").unwrap().five_hour_burn_rate_algorithm = FiveHourBurnRateAlgorithm::Personalized;
+        settings.provider_preferences.get_mut("dsh").unwrap().five_hour_burn_rate_algorithm = FiveHourBurnRateAlgorithm::Weighted;
+        settings.mirror_display_preferences();
+        let mut restored: OverlaySettings = serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        restored.migrate();
+        assert_eq!(restored.for_provider(Provider::Codex).five_hour_burn_rate_algorithm, FiveHourBurnRateAlgorithm::Weighted);
+        assert_eq!(restored.for_provider(Provider::Claude).five_hour_burn_rate_algorithm, FiveHourBurnRateAlgorithm::Personalized);
+        assert_eq!(restored.for_provider(Provider::Dsh).five_hour_burn_rate_algorithm, FiveHourBurnRateAlgorithm::Weighted);
+    }
+    #[test]
+    fn dsh_estimator_history_follows_account_across_transport_changes() {
+        let root = ConfigManager::with_runtime_dir(std::env::temp_dir().join(format!("overlay-estimator-path-{}", std::process::id())));
+        let mut settings = OverlaySettings::default();
+        settings.provider = Provider::Dsh;
+        settings.dsh_instance_id = "instance-a".into();
+        settings.dsh_account_id = "account-a".into();
+        settings.dsh_base_url = "http://127.0.0.1:8000".into();
+        let first = root.for_source(&settings);
+        settings.dsh_base_url = "http://127.0.0.1:9000".into();
+        let reconnected = root.for_source(&settings);
+        assert_eq!(first.burn_rate_state_path(), reconnected.burn_rate_state_path());
+        assert_eq!(first.shadow_evidence_path(), reconnected.shadow_evidence_path());
+        settings.dsh_account_id = "account-b".into();
+        assert_ne!(first.burn_rate_state_path(), root.for_source(&settings).burn_rate_state_path());
     }
     #[test]
     fn default_pause_messages_follow_the_language_setting_not_the_os_locale() {

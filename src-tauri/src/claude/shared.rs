@@ -59,6 +59,8 @@ pub struct Snapshot {
     pub seven_day: Option<WindowSnapshot>,
     pub captured_at: i64,
     #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
     pub claude_version: Option<String>,
 }
 
@@ -83,7 +85,29 @@ pub fn parse_statusline(input: &Value, now: i64) -> Option<Snapshot> {
         .and_then(Value::as_str)
         .filter(|v| safe_version(v))
         .map(str::to_string);
-    Some(Snapshot { schema_version: SCHEMA_VERSION, five_hour, seven_day, captured_at: now, claude_version })
+    Some(Snapshot { schema_version: SCHEMA_VERSION, five_hour, seven_day, captured_at: now, account_id: None, claude_version })
+}
+
+/// Reads only the non-secret account UUID from Claude Code's global metadata.
+/// Missing or unfamiliar metadata leaves historical estimators unavailable.
+pub fn account_identity() -> Option<String> {
+    let path = dirs::home_dir()?.join(".claude.json");
+    let metadata = fs::metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 { return None; }
+    let raw = fs::read_to_string(path).ok()?;
+    account_identity_from_config(&serde_json::from_str::<Value>(&raw).ok()?)
+}
+
+fn account_identity_from_config(config: &Value) -> Option<String> {
+    let account = &config["oauthAccount"];
+    let id = account["accountUuid"].as_str().filter(|s| valid_uuid(s))?;
+    let organization = account["organizationUuid"].as_str().filter(|s| valid_uuid(s));
+    Some(format!("{id}:{}", organization.unwrap_or("")))
+}
+
+fn valid_uuid(value: &str) -> bool {
+    value.len() == 36 && value.bytes().enumerate().all(|(i, c)|
+        if matches!(i, 8 | 13 | 18 | 23) { c == b'-' } else { c.is_ascii_hexdigit() })
 }
 
 fn parse_window(value: &Value) -> Option<WindowSnapshot> {
@@ -175,6 +199,7 @@ pub fn should_write(previous: Option<&Snapshot>, next: &Snapshot) -> bool {
         previous.five_hour != next.five_hour
             || previous.seven_day != next.seven_day
             || previous.claude_version != next.claude_version
+            || previous.account_id != next.account_id
             || next.captured_at.saturating_sub(previous.captured_at) >= REWRITE_SECS
     })
 }
@@ -455,6 +480,18 @@ mod tests {
         assert_eq!(partial.seven_day, Some(WindowSnapshot { used_percent: 5.0, resets_at: None }));
         let unsafe_version = json!({ "version": "x; rm -rf", "rate_limits": { "five_hour": { "used_percentage": 1 } } });
         assert_eq!(parse_statusline(&unsafe_version, NOW).unwrap().claude_version, None);
+    }
+
+    #[test]
+    fn account_identity_accepts_only_valid_account_uuids() {
+        let config = json!({"oauthAccount": {
+            "accountUuid": "12345678-1234-1234-1234-123456789abc",
+            "organizationUuid": "abcdefab-cdef-abcd-efab-cdefabcdefab"
+        }});
+        assert_eq!(account_identity_from_config(&config).as_deref(),
+            Some("12345678-1234-1234-1234-123456789abc:abcdefab-cdef-abcd-efab-cdefabcdefab"));
+        assert_eq!(account_identity_from_config(&json!({"oauthAccount":{"accountUuid":"invalid"}})), None);
+        assert_eq!(account_identity_from_config(&json!({"oauthAccount":{"organizationUuid":"abcdefab-cdef-abcd-efab-cdefabcdefab"}})), None);
     }
 
     #[test]

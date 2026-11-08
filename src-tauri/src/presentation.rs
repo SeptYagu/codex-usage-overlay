@@ -30,7 +30,7 @@ impl Sample {
         let selected=options.into_iter().find(|(_,v)|v.is_some_and(|v|v.is_finite() && v>=0.));
         let mut usage=self.usage.clone();usage.five_hour_burn_rate_per_hour=selected.and_then(|(_,v)|v);
         let effective=selected.map(|(a,_)|a);
-        let reason=if effective==Some(requested){None}else{Some(match effective{None=>"unavailable",Some(Algorithm::Weighted)=>"personalizedUnavailable",_=>"weightedUnavailable"})};
+        let reason=if effective==Some(requested){None}else if c.learning=="identityUnavailable" {Some("identityUnavailable")} else {Some(match effective{None=>"unavailable",Some(Algorithm::Weighted)=>"personalizedUnavailable",_=>"weightedUnavailable"})};
         (usage,effective,reason)
     }
 }
@@ -62,7 +62,6 @@ mod tests {
 /// Caller holds this runtime's settings_patch commit gate. No reader/learner is touched.
 pub async fn reproject_locked<S:crate::tray::TrayPresentationSink>(sink:&S,state:&std::sync::Arc<crate::commands::AppState>) {
     let settings=state.settings.lock().await.clone();
-    if settings.provider!=crate::config::Provider::Codex {return;}
     let usage=state.presentation.lock().unwrap_or_else(|p|p.into_inner()).project(settings.five_hour_burn_rate_algorithm,
         state.applied_settings_revision.load(std::sync::atomic::Ordering::Acquire),state.polling.lock().unwrap_or_else(|p|p.into_inner()).healthy_interval_seconds(&settings)>90);
     let Some(usage)=usage else{return;};

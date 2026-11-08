@@ -197,6 +197,7 @@ pub fn parse_usage(body: &Value, now: i64) -> Option<Snapshot> {
         five_hour,
         seven_day,
         captured_at: now,
+        account_id: None,
         claude_version: None,
     })
 }
@@ -215,6 +216,7 @@ fn status_failure(status: u16, retry_after: Option<u64>) -> ReadFailure {
 }
 
 pub async fn fetch(now: i64) -> Result<Snapshot, ReadFailure> {
+    let account_before = shared::account_identity();
     let path = credentials_path().ok_or_else(|| sign_in_required(ReadStage::Discovery))?;
     let token = access_token(&path, now)?;
     let client = crate::update_channel::http_client(TIMEOUT)
@@ -242,7 +244,10 @@ pub async fn fetch(now: i64) -> Result<Snapshot, ReadFailure> {
         .json()
         .await
         .map_err(|_| ReadFailure::new(ReadStage::Parse, FailureKind::InvalidResponse))?;
-    parse_usage(&body, now).ok_or_else(|| ReadFailure::new(ReadStage::Parse, FailureKind::InvalidQuota))
+    let mut snapshot = parse_usage(&body, now).ok_or_else(|| ReadFailure::new(ReadStage::Parse, FailureKind::InvalidQuota))?;
+    let account_after = shared::account_identity();
+    if account_before == account_after { snapshot.account_id = account_after; }
+    Ok(snapshot)
 }
 
 #[cfg(test)]
@@ -314,6 +319,7 @@ mod tests {
             five_hour: Some(WindowSnapshot { used_percent: used, resets_at: None }),
             seven_day: None,
             captured_at: NOW,
+            account_id: None,
             claude_version: None,
         }
     }

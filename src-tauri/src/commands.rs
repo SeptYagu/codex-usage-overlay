@@ -548,7 +548,7 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<AppState
                     .completed_with_recovery(&settings, Some(&usage), std::time::Instant::now(), crate::polling::ReadRecovery { display_only, ..Default::default() });
             }
             state.poll_wake.notify_one();
-            if source_settings.provider==Provider::Codex {
+            {
                 let settings=state.settings.lock().await;
                 let mut cache=state.presentation.lock().unwrap_or_else(|p|p.into_inner());
                 cache.source=Some(crate::presentation::Sample{usage:usage.clone(),candidates});
@@ -1100,6 +1100,7 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "provider" => matches!(value.as_str(), Some("codex" | "claude" | "dsh")),
             "providerPreferences" => value.as_object().is_some_and(|providers| !providers.is_empty() && providers.iter().all(|(provider, fields)| {
                 matches!(provider.as_str(), "codex" | "claude" | "dsh") && fields.as_object().is_some_and(|fields| !fields.is_empty() && fields.iter().all(|(key, value)| match key.as_str() {
+                    "fiveHourBurnRateAlgorithm" => matches!(value.as_str(),Some("legacy"|"weighted"|"personalized")),
                     "monitorEnabled" | "protectionEnabled" | "carouselIncluded" => value.is_boolean(),
                     "fiveHourResetNotification" | "weeklyResetNotification" => value.is_boolean(),
                     "refreshIntervalSeconds" => value.as_u64().is_some_and(|v| (15..=3600).contains(&v)),
@@ -1367,6 +1368,10 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         let previous_settings = settings.clone();
         let mut next = settings.clone();
         merge_settings_patch(&mut next, &patch)?;
+        if changes.contains_key("fiveHourBurnRateAlgorithm") {
+            next.migrate();
+            next.provider_preferences.get_mut("codex").unwrap().five_hour_burn_rate_algorithm = next.five_hour_burn_rate_algorithm;
+        }
         reconcile_update_preferences(&mut next, changes);
         if state.monitors.get().is_some() {
             next.migrate();
@@ -1431,10 +1436,13 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     if let Some(registry) = state.monitors.get() {
         registry.synchronize(state, &envelope.settings).await;
         crate::display::settings_committed(sink,state,&envelope.settings,changes.contains_key("provider")).await;
-        if changes.contains_key("fiveHourBurnRateAlgorithm") {
-            let codex=registry.get(Provider::Codex);
-            let _commit=codex.settings_patch.lock().await;
-            crate::presentation::reproject_locked(sink,&codex).await;
+        for provider in Provider::ALL {
+            if changes.contains_key("fiveHourBurnRateAlgorithm") && provider == Provider::Codex
+                || changes.get("providerPreferences").and_then(|v|v.get(provider.key())).and_then(|v|v.get("fiveHourBurnRateAlgorithm")).is_some() {
+                let runtime=registry.get(provider);
+                let _commit=runtime.settings_patch.lock().await;
+                crate::presentation::reproject_locked(sink,&runtime).await;
+            }
         }
         envelope.source_generation = registry.get(envelope.settings.provider).source_generation.load(Ordering::Acquire);
     } else {

@@ -30,7 +30,6 @@ window.qa = { render: async (settings, edge = null, missing = false, view = 'ove
             ? <TrayMenuView settings={s} onPatchSettings={() => { }}/>
             : <OverlayView settings={s} usage={missing ? null : sample} isLoading={missing}
                 monitors={['multi','carousel'].includes(fixture) ? monitors : {}}
-                display={fixture==='carousel'?{revision:1,settingsRevision:0,effectiveProvider:s.provider,manualProvider:'codex',sourceKey:s.provider,sourceGeneration:0,carouselEnabled:true,intervalSeconds:8,candidates:order.map(provider=>({provider,sourceKey:provider,sourceGeneration:0})),pauseReasons:[],status:'rotating'}:undefined}
                 onCycleProvider={fixture === 'multi' ? async () => {
                     await window.qa.render({ ...settings, provider: order[(order.indexOf(s.provider) + 1) % 3] }, edge, missing, view, fixture);
                 } : undefined}

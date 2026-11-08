@@ -291,7 +291,6 @@ export const App: React.FC = () => {
       isLoading={monitor ? monitor.health === 'checking' : isLoading}
       dockState={dockState ?? undefined}
       monitors={monitors}
-      display={display ?? undefined}
       onCycleProvider={async () => {
         try { applySavedSettings(await invoke<SettingsEnvelope>('cycle_display_provider')); }
         catch (error) { console.error('Could not switch displayed provider:', error); }

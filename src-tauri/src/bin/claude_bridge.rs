@@ -61,7 +61,8 @@ fn statusline() {
     let dir = shared::runtime_dir();
     let stored = shared::read_snapshot(&dir);
     let snapshot = match shared::parse_statusline(&input, now) {
-        Some(next) => {
+        Some(mut next) => {
+            next.account_id = shared::account_identity();
             if shared::should_write(stored.as_ref(), &next) {
                 if let Err(error) = shared::write_json_atomic(&dir.join(shared::SNAPSHOT_FILE), &next) {
                     eprintln!("Could not store the Claude rate limits: {error}");

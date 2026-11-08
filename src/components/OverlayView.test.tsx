@@ -440,10 +440,14 @@ it('cycles through available providers on the logo without beginning a drag', as
   expect(tauri.invoke).toHaveBeenCalledWith('show_overlay_menu');
 });
 
-it('identifies carousel sources with the logo hidden and correlates hover and focus pauses',async()=>{
+it('keeps the capsule unchanged with rotation on and the logo hidden, and correlates hover and focus pauses',async()=>{
   const view=render(<OverlayView settings={{...DEFAULT_SETTINGS,quotaCarouselEnabled:true,showProviderLogo:false,language:'en-US'}} usage={usage} isLoading={false}/>);
   await act(async()=>{});const capsule=view.container.querySelector('.overlay-shell > .overlay-capsule')!;
-  expect(within(capsule as HTMLElement).getByText('Local Codex')).toBeTruthy();expect(view.queryByRole('button')).toBeNull();
+  expect(capsule.querySelector('.overlay-source-label')).toBeNull();expect(view.queryByRole('button')).toBeNull();
+  expect(capsule.getAttribute('title')).toContain('Local Codex');
+  const baseline=render(<OverlayView settings={{...DEFAULT_SETTINGS,quotaCarouselEnabled:false,showProviderLogo:false,language:'en-US'}} usage={usage} isLoading={false}/>);
+  expect(capsule.innerHTML).toBe(baseline.container.querySelector('.overlay-shell > .overlay-capsule')?.innerHTML);
+  baseline.unmount();
   fireEvent.mouseEnter(capsule);expect(tauri.invoke).toHaveBeenCalledWith('set_display_interaction',{reason:'hover',active:true});
   fireEvent.focus(capsule);expect(tauri.invoke).toHaveBeenCalledWith('set_display_interaction',{reason:'focus',active:true});
   fireEvent.mouseLeave(capsule);expect(tauri.invoke).toHaveBeenCalledWith('set_display_interaction',{reason:'hover',active:false});

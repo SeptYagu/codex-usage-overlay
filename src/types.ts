@@ -24,6 +24,7 @@ export interface CodexUsage {
 export type Provider = 'codex' | 'dsh' | 'claude';
 
 export interface ProviderPreference {
+  fiveHourBurnRateAlgorithm?: FiveHourBurnRateAlgorithm;
   carouselIncluded?: boolean;
   monitorEnabled: boolean;
   protectionEnabled: boolean;

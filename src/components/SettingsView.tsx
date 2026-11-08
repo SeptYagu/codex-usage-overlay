@@ -7,6 +7,7 @@ import { useProviderMonitors } from '../hooks/useProviderMonitors';
 import { APP_VERSION } from '../version';
 import { useTranslation } from 'react-i18next';
 import { CodexOptions } from './CodexOptions';
+import { BurnRateOptions } from './BurnRateOptions';
 import { SoundPicker } from './SoundPicker';
 import { ProtectionStatusView } from './ProtectionStatus';
 import { ClaudeConnectionView } from './ClaudeConnection';
@@ -75,6 +76,7 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
   const preference = providerPreference(savedSettings, configurationProvider);
   const onPatchSettings = (patch: SettingsPatch, debounce = false) => {
     const fields: Record<string, keyof ProviderPreference> = {
+      fiveHourBurnRateAlgorithm: 'fiveHourBurnRateAlgorithm',
       refreshIntervalSeconds: 'refreshIntervalSeconds', fiveHourResetNotification: 'fiveHourResetNotification', weeklyResetNotification: 'weeklyResetNotification',
       fiveHourSoundMode: 'fiveHourSoundMode', weeklySoundMode: 'weeklySoundMode', fiveHourSoundPath: 'fiveHourSoundPath', weeklySoundPath: 'weeklySoundPath',
       autoPauseOnLowQuota: 'protectionEnabled', autoPauseFiveHourThresholdPercent: 'fiveHourThresholdPercent',
@@ -428,7 +430,8 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
             {!claude && <ProtectionStatusView settings={settings} onPatchSettings={onPatchSettings} />}
           </div>
 
-          {configurationProvider === 'codex' && <CodexOptions settings={settings} usage={monitors.codex?.usage}
+          <BurnRateOptions provider={configurationProvider} algorithm={settings.fiveHourBurnRateAlgorithm??'legacy'} usage={monitors[configurationProvider]?.usage} onPatchSettings={onPatchSettings} />
+          {configurationProvider === 'codex' && <CodexOptions settings={settings}
             disabled={autoPauseDisabled} onPatchSettings={onPatchSettings} />}
           <section aria-labelledby={`${configurationProvider}-reset-notifications-title`} className="space-y-2.5">
             <h3 id={`${configurationProvider}-reset-notifications-title`} className="text-sm font-semibold">{t('notificationSection')}</h3>

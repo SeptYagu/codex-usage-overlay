@@ -16,17 +16,20 @@ const {chromium}=require(process.argv[2]||'playwright');
       const context=await browser.newContext({viewport:{width:2200,height:1000},deviceScaleFactor:dpr,colorScheme:theme});const page=await context.newPage();
       await page.goto('http://127.0.0.1:1427/scripts/display-controls-qa/index.html');await page.waitForFunction(()=>window.qa);
       for(const language of ['en-US','zh-CN','zh-Hant'])for(const overlayLayout of ['grouped','stacks'])for(const showProviderLogo of [true,false]){
-        const sizes=[];
-        for(const provider of ['codex','claude','dsh','codex']){
-          await page.evaluate(s=>window.qa.render(s,null,false,'overlay','carousel'),{provider,language,overlayLayout,showProviderLogo,quotaCarouselEnabled:true,scalePercent:175});
-          const m=await page.evaluate(()=>{
-            const capsule=document.querySelector('.overlay-shell > .overlay-capsule'),r=capsule.getBoundingClientRect();
-            return {width:r.width,height:r.height,label:capsule.querySelector('.overlay-source-label')?.textContent,
-              clipped:[...capsule.querySelectorAll('span,button')].some(el=>{const b=el.getBoundingClientRect();return b.left<r.left-.2||b.right>r.right+.2||b.bottom>r.bottom+.2;})};
-          });
-          if(m.clipped||!m.label)throw Error(JSON.stringify({dpr,theme,language,overlayLayout,showProviderLogo,provider,...m}));sizes.push(m);count++;
+        for(const provider of ['codex','claude','dsh']){
+          const sizes=[];
+          for(const quotaCarouselEnabled of [false,true]){
+            await page.evaluate(s=>window.qa.render(s,null,false,'overlay','carousel'),{provider,language,overlayLayout,showProviderLogo,quotaCarouselEnabled,scalePercent:175});
+            const m=await page.evaluate(()=>{
+              const capsule=document.querySelector('.overlay-shell > .overlay-capsule'),r=capsule.getBoundingClientRect();
+              const stable=capsule.cloneNode(true);stable.querySelectorAll('.overlay-countdown').forEach(el=>el.textContent='COUNTDOWN');
+              return {width:r.width,height:r.height,markup:stable.innerHTML,label:!!capsule.querySelector('.overlay-source-label'),
+                clipped:[...capsule.querySelectorAll('span,button')].some(el=>{const b=el.getBoundingClientRect();return b.left<r.left-.2||b.right>r.right+.2||b.bottom>r.bottom+.2;})};
+            });
+            if(m.clipped||m.label)throw Error(JSON.stringify({dpr,theme,language,overlayLayout,showProviderLogo,provider,quotaCarouselEnabled,...m}));sizes.push(m);count++;
+          }
+          if(Math.abs(sizes[0].width-sizes[1].width)>1||Math.abs(sizes[0].height-sizes[1].height)>1||sizes[0].markup!==sizes[1].markup)throw Error('Carousel toggle changes capsule: '+JSON.stringify({provider,sizes}));
         }
-        if(Math.max(...sizes.map(m=>m.width))-Math.min(...sizes.map(m=>m.width))>1||Math.max(...sizes.map(m=>m.height))-Math.min(...sizes.map(m=>m.height))>1)throw Error('Carousel size jumps: '+JSON.stringify(sizes));
         if(dpr===1&&theme==='dark'&&language==='zh-CN'&&overlayLayout==='grouped'&&!showProviderLogo)await page.screenshot({path:'output/carousel-qa/no-logo-zh-dark.png'});
       }
       for(const [width,height] of [[1320,800],[760,500]]){

@@ -237,23 +237,28 @@ pub struct BurnRateTracker {
     /// The last shadow diagnostic. It never reaches the frontend.
     shadow_estimate: FiveHourShadowEstimate,
     affine_enabled: bool,
+    local_codex: bool,
     observation_gap: bool,
     observation_unavailable: bool,
 }
 
 impl BurnRateTracker {
     pub fn load(config: &ConfigManager) -> Self {
-        let state = fs::read_to_string(config.burn_rate_state_path())
+        let current = config.burn_rate_state_path();
+        let legacy = config.legacy_burn_rate_state_path();
+        let migrated = !current.is_file() && current != legacy && legacy.is_file();
+        let state = fs::read_to_string(if migrated { &legacy } else { &current })
             .ok()
             .map(|raw| load_state(&raw))
             .unwrap_or_default();
         let evidence_lines = count_evidence_events(&config.shadow_evidence_path());
         let mut tracker = Self {
             state,
-            state_dirty: false,
+            state_dirty: migrated,
             evidence_lines,
             shadow_estimate: FiveHourShadowEstimate::default(),
             affine_enabled: config.is_local_codex(),
+            local_codex: config.is_local_codex(),
             observation_gap:false,observation_unavailable:false,
         };
         // A retained audit event is flushed before any new feedback is
@@ -280,6 +285,7 @@ impl BurnRateTracker {
             evidence_lines: 0,
             shadow_estimate: FiveHourShadowEstimate::default(),
             affine_enabled: true,
+            local_codex: true,
             observation_gap:false,observation_unavailable:false,
         }
     }
@@ -287,11 +293,14 @@ impl BurnRateTracker {
     #[cfg(test)]
     pub(crate) fn test_snapshot(&self)->serde_json::Value {serde_json::to_value(&self.state).unwrap()}
     pub fn candidates(&self, estimate: &BurnRateEstimate) -> crate::presentation::Candidates {
+        if !self.affine_enabled || self.state.account_id.is_none() && !self.local_codex {
+            return crate::presentation::Candidates { legacy:estimate.five_hour_per_hour, weighted:None, personalized:None, learning:"identityUnavailable" };
+        }
         let learning=if self.state_dirty || self.state.five_hour_shadow.audit_outbox.is_some(){"persistencePaused"}
             else if self.observation_gap {"observationGap"} else if self.observation_unavailable {"observationUnavailable"}
             else if self.state.five_hour_shadow.affine.n==0.{"accumulating"}else{"active"};
         crate::presentation::Candidates{legacy:estimate.five_hour_per_hour,weighted:self.shadow_estimate.fixed_weighted_per_hour,
-            personalized:self.shadow_estimate.fixed_weighted_per_hour.and_then(|rate|self.state.five_hour_shadow.affine.rate(rate)),learning}
+            personalized:self.affine_enabled.then(||self.shadow_estimate.fixed_weighted_per_hour.and_then(|rate|self.state.five_hour_shadow.affine.rate(rate))).flatten(),learning}
     }
 
     pub fn save(&mut self, config: &ConfigManager) -> Result<(), String> {
@@ -352,6 +361,7 @@ impl BurnRateTracker {
     }
 
     pub fn accept_usage(&mut self, usage: &RawCodexUsage) -> BurnRateEstimate {
+        self.affine_enabled = self.local_codex || usage.account_id.as_deref().is_some_and(|id| !id.is_empty());
         let mut changed = false;
 
         // The weighted metadata is repaired against the production history
@@ -379,13 +389,11 @@ impl BurnRateTracker {
         let five_hour_per_hour = valid_used_percent(&usage.five_hour)
             .and_then(|_| estimate_rate(&self.state.five_hour, FIVE_HOUR_HORIZON_SECS, 2));
 
-        let shadow = self.process_five_hour_shadow(
-            usage,
-            &before,
-            acceptance,
-            five_hour_per_hour,
-            account_transition,
-        );
+        let shadow = if self.affine_enabled {
+            self.process_five_hour_shadow(usage, &before, acceptance, five_hour_per_hour, account_transition)
+        } else {
+            ShadowPass { state_changed:false, estimate:FiveHourShadowEstimate::default() }
+        };
         changed |= shadow.state_changed;
         self.shadow_estimate = shadow.estimate;
 
@@ -411,7 +419,14 @@ impl BurnRateTracker {
 
     fn accept_account(&mut self, incoming: Option<&str>) -> AccountTransition {
         let Some(incoming) = incoming.filter(|id| !id.is_empty()) else {
-            return AccountTransition::None;
+            if self.local_codex || self.state.account_id.is_none() {
+                return AccountTransition::None;
+            }
+            // An unattributed sample may belong to another account. Drop the
+            // identified baseline before collecting a temporary classic one.
+            self.state.account_id = None;
+            self.reset_account_history();
+            return AccountTransition::Switched;
         };
         if self.state.account_id.as_deref() == Some(incoming) {
             return AccountTransition::None;
@@ -425,6 +440,11 @@ impl BurnRateTracker {
             return AccountTransition::Attributed;
         }
 
+        self.reset_account_history();
+        AccountTransition::Switched
+    }
+
+    fn reset_account_history(&mut self) {
         self.state.five_hour = QuotaRateState::default();
         self.state.weekly = QuotaRateState::default();
         // No personal calibration and no audit identity may cross accounts.
@@ -435,7 +455,6 @@ impl BurnRateTracker {
         self.state.five_hour_shadow.account_generation =
             self.state.five_hour_shadow.account_generation.saturating_add(1);
         self.state.five_hour_shadow.event_sequence = 0;
-        AccountTransition::Switched
     }
 
     /// Runs the shadow pass of one accepted observation.
@@ -1161,6 +1180,28 @@ mod tests {
         assert_eq!(estimate.weekly_per_hour, None);
         assert!(tracker.state.five_hour.crossings.is_empty());
         assert!(tracker.state.weekly.crossings.is_empty());
+    }
+
+    #[test]
+    fn missing_non_codex_identity_isolates_identified_and_temporary_history() {
+        let mut tracker = BurnRateTracker::from_state(BurnRateStateFile::default());
+        tracker.local_codex = false;
+        tracker.accept_usage(&usage(1000, 10.0, 10.0));
+        tracker.accept_usage(&usage(1060, 13.0, 12.0));
+        let mut unknown = usage(1120, 50.0, 50.0);
+        unknown.account_id = None;
+        let estimate = tracker.accept_usage(&unknown);
+        assert_eq!(estimate.five_hour_per_hour, None);
+        assert_eq!(tracker.state.account_id, None);
+        assert_eq!(tracker.candidates(&estimate).learning, "identityUnavailable");
+        assert!(tracker.state.five_hour.crossings.is_empty());
+        unknown.fetched_at = 1180;
+        unknown.five_hour.used_percent = Some(53.0);
+        tracker.accept_usage(&unknown);
+        let restored = tracker.accept_usage(&usage(1240, 14.0, 14.0));
+        assert_eq!(restored.five_hour_per_hour, None);
+        assert_eq!(tracker.state.account_id.as_deref(), Some("acct-a"));
+        assert!(tracker.state.five_hour.crossings.is_empty());
     }
 
     #[test]
