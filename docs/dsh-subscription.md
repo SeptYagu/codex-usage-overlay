@@ -37,7 +37,7 @@ DSH 两个阈值与本机 Codex 分开设置，默认都是 `0%`。开启保护�
 
 ## 本机安全边界
 
-后台用 Desktop 官方 CLI 安装**内嵌、精确字节校验**的无依赖 Host 适配包，开启 `--offline`、`--ignore-scripts`，使用官方 manifest writer 锁和 profile HMR。不手改 ASAR、订阅插件、运行中 manifest 或安装锁；不读取 OAuth、浏览器 Cookie、DSH 签名密钥或本机 Codex auth/log。
+后台用 Desktop 官方 CLI 安装**内嵌、精确字节校验**的无依赖 Host 适配包，开启 `--ignore-scripts`，使用官方 manifest writer 锁和 profile HMR。pnpm 可按现有 profile 的锁文件补齐缓存中缺失的依赖包；即使适配包本身无依赖，强制离线也可能因其他插件的缓存缺口而失败。不手改 ASAR、订阅插件、运行中 manifest 或安装锁；不读取 OAuth、浏览器 Cookie、DSH 签名密钥或本机 Codex auth/log。
 
 适配层只开放四种 RPC：订阅状态、订阅额度、普通会话列表、固定暂停 steer。它创建只绑定 `127.0.0.1` 的临时端口，以随机专用 Bearer 令牌认证；拒绝浏览器 Origin、重复认证头和非白名单方法，不提供 CORS。发现记录和暂存安装目录限制为当前用户及 SYSTEM 可写，路径中的链接或不安全权限会导致失败。
 

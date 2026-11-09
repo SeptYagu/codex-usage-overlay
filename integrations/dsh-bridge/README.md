@@ -24,7 +24,7 @@ node --test test/*.test.js
 
 ## 自动配置与可选手工安装
 
-新版 overlay 内嵌本包。选择 DSH 来源后，后台寻找运行中的 Desktop，通过该安装自带的官方 CLI 执行本地、离线、禁用安装脚本的 `plugin --profile desktop add`。CLI 使用 DSH 自己的 manifest writer 锁，自动将新 bundle 加入选择；默认的 Host HMR 监听 manifest 并加载纯 Host bridge。不要求用户预装本包、寻找文件或粘贴 token。
+新版 overlay 内嵌本包。选择 DSH 来源后，后台寻找运行中的 Desktop，通过该安装自带的官方 CLI 执行本地、禁用安装脚本的 `plugin --profile desktop add`。若现有 profile 的其他依赖不在 pnpm 缓存中，官方安装事务可按锁文件下载缺失的包。CLI 使用 DSH 自己的 manifest writer 锁，自动将新 bundle 加入选择；默认的 Host HMR 监听 manifest 并加载纯 Host bridge。不要求用户预装本包、寻找文件或粘贴 token。
 
 官方 CLI 返回成功**不等于**连接成功；overlay 必须等发现记录、认证握手与订阅数据校验。HMR 被关闭或重组要求重启时，界面提示由用户安全重启，不停止当前 DSH。已经安装但被用户禁用的 bundle 不会被自动重新启用。自动配置只支持 Windows 的默认 Desktop home；不猜测自定义运行环境，也不读凭据。
 

@@ -467,7 +467,6 @@ fn install_args(cli: &Path, package: &Path) -> Result<Vec<OsString>, String> {
         "desktop".into(),
         "add".into(),
         "--ignore-scripts".into(),
-        "--offline".into(),
         "--reporter=silent".into(),
         spec,
     ])
@@ -782,20 +781,19 @@ mod tests {
         assert_eq!(args[0], "--expose-internals");
         assert_eq!(args[1], layout.cli.as_os_str());
         assert_eq!(
-            args[2..9],
+            args[2..8],
             [
                 "plugin",
                 "--profile",
                 "desktop",
                 "add",
                 "--ignore-scripts",
-                "--offline",
                 "--reporter=silent"
             ]
         );
         let mut expected = OsString::from("file:");
         expected.push(&package);
-        assert_eq!(args[9], expected);
+        assert_eq!(args[8], expected);
         assert!(layout_paths(&root.join("not-dsh.exe")).is_err());
         assert!(install_args(Path::new("relative"), &package).is_err());
     }
