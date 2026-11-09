@@ -1,16 +1,16 @@
 # Publishing a Tauri release / 发布 Tauri 版本
 
-GitHub Actions builds release assets from the tagged source. Use locally built packages for verification; published packages come from the workflow. Preview versions are numbered, `X.Y.Z-preview.N`, tagged `vX.Y.Z-preview.N`, and do not replace the latest stable release.
+GitHub Actions builds release assets from the tagged source. The Windows CI run for the source commit is the compilation and automated-check gate; published packages come from the Release workflow. Local builds are optional diagnostics. Preview versions are numbered, `X.Y.Z-preview.N`, tagged `vX.Y.Z-preview.N`, and do not replace the latest stable release.
 
 Generate a Tauri updater key once with `npm run tauri -- signer generate --write-keys <private-key-path>`. Put the public key in `src-tauri/tauri.conf.json` and store the private key as the GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY`. Keep the private key outside the repository. If the key is password-protected, also set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 
-GitHub Actions 从标签对应的源码生成发布附件。本机构建仅用于验证，正式附件由发布流程生成。
+GitHub Actions 从标签对应的源码生成发布附件。先确认源码提交的 Windows CI 成功；本机构建可用于辅助排查，正式附件由发布流程生成。
 
 Each release has its own app version, because `latest.json` carries it and the updater installs only a higher one: `1.5.0-preview.1` < `1.5.0-preview.2` < `1.5.0`. A preview that reused the stable version would never be offered to the previous preview, nor the stable release to it.
 
 1. Update the app version in `package.json`, `package-lock.json` (the root version and the root package entry), `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`, and `src/version.ts`. The last one is the frontend constant behind the settings-window badge and the tray menu, so a release that skips it ships an installer that shows the previous version. `src/version.test.ts` fails when the locations drift apart. The two frontend tests that assert the rendered version (`SettingsView.test.tsx`, `TrayMenuView.test.tsx`) read that constant instead of a hardcoded string, so they need no manual update — keep it that way, a hardcoded version there is a seventh place that silently drifts. Windows Installer accepts only numeric versions, so a preview also sets `bundle.windows.wix.version` in `tauri.conf.json` to `X.Y.Z.N` (`1.6.0-preview.1` → `1.6.0.1`); a stable release removes it or sets `X.Y.Z`. The version test checks this too.
-2. Run `npm test`, `npm run build`, and `cargo test --manifest-path src-tauri/Cargo.toml --locked`.
-3. Complete Windows smoke checks, record any remaining limitations in preview release notes, then commit and push the source branch (`main`).
+2. Commit and push the source branch (`main`), then confirm that its Windows CI run passed `npm test`, `npm run build`, and `cargo test --manifest-path src-tauri/Cargo.toml --locked`. Do not tag a failed or incomplete CI commit.
+3. Complete Windows smoke checks when the environment permits; record any remaining native or installed-package limitations in the release notes before tagging.
 4. Tag that exact commit with `v` plus the app version. Packaging fails when they differ:
 
 ```powershell
