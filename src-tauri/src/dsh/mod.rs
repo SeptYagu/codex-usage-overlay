@@ -454,7 +454,7 @@ async fn connection_status(connection: &Connection) -> ConnectionStatus {
         Err(error) => result.error = Some(error),
     }
     match connection
-        .rpc("session/list", json!({"args":{"request":{}}}))
+        .rpc("session/list", json!({"args":{"_request":{}}}))
         .await
         .and_then(|value| parser::sessions(&value))
     {
@@ -707,7 +707,7 @@ async fn pause_sessions(
             )?;
             parser::active_account(&before, account_id)?;
             let listed = connection
-                .rpc("session/list", json!({"args":{"request":{}}}))
+                .rpc("session/list", json!({"args":{"_request":{}}}))
                 .await?;
             parser::pause_target(&listed, id)?;
             let after = parser::accounts(

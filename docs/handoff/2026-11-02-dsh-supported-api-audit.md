@@ -99,7 +99,7 @@ force 只绕成功 TTL；失败在 retryAt 前仍直接失败（默认 5 秒，�
 
 | Endpoint / method | payload | 语义 |
 |---|---|---|
-| `/api/session/list` / `session/list` | `{args:{request:{}}}` | cold-safe；返回 `{items:[...]}`，不激活 Agent |
+| `/api/session/list` / `session/list` | `{args:{_request:{}}}` | cold-safe；返回 `{items:[...]}`，不激活 Agent；参数名于 v1.8.3 核对修正 |
 | `/api/session/prompt` / `session/prompt` | `{args:{request:{requestId,sessionId,mode:'steer',content:[{type:'text',text:'暂停'}]}}}` | 幂等 requestId；可能恢复冷会话；返回 accepted 只代表消息被接收 |
 | `/api/session/cancel` / `session/cancel` | `{args:{request:{sessionId}}}` | 已存活普通 Agent 的 `cancel({kind:'user'},{keepInbox:true})`；不清 inbox |
 

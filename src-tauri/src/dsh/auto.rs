@@ -376,6 +376,12 @@ pub(crate) async fn reconcile<S: TrayPresentationSink>(
             return;
         }
     };
+    // A live old companion can still answer quota requests. Upgrade only a
+    // bridge previously staged by this overlay, using the existing setup gate.
+    if allow_setup && super::setup::managed_bridge_upgrade_needed().unwrap_or(false) {
+        setup(sink, state, false).await;
+        return;
+    }
     let cached = state.dsh.cached_status();
     let existing = cached.connected
         && cached.instance_id.as_deref() == Some(candidate.id.as_str())
@@ -513,15 +519,22 @@ async fn commit<S: TrayPresentationSink>(
         state.poll_wake.notify_one();
         crate::tray::repaint_tray(sink, state).await;
     }
-    state.dsh_auto.phase(
-        epoch,
-        if next.dsh_account_id.is_empty() {
-            "connected-unbound"
-        } else {
-            "ready"
-        },
-        None,
-    );
+    let restart_required = {
+        let mut control = state.dsh_auto.control.lock().unwrap_or_else(|p| p.into_inner());
+        let required = status.sessions_error && (control.phase == "restart-required"
+            || control.reload_deadline.is_some_and(|deadline| deadline <= std::time::Instant::now()));
+        if required || !status.sessions_error { control.reload_deadline = None; }
+        required
+    };
+    if restart_required {
+        state.dsh_auto.phase(epoch, "restart-required", Some("Restart DSH safely to load the upgraded bridge"));
+    } else {
+        state.dsh_auto.phase(
+            epoch,
+            if next.dsh_account_id.is_empty() { "connected-unbound" } else { "ready" },
+            None,
+        );
+    }
     Ok(())
 }
 

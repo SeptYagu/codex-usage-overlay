@@ -27,8 +27,8 @@ function subscriptionPayload(payload) {
   return Object.hasOwn(payload, 'force') ? { force: payload.force } : {};
 }
 function listPayload(payload) {
-  if (!keysAre(payload, ['args']) || !keysAre(payload.args, ['request']) || !keysAre(payload.args.request, [])) return;
-  return { args: { request: {} } };
+  if (!keysAre(payload, ['args']) || !keysAre(payload.args, ['_request']) || !keysAre(payload.args._request, [])) return;
+  return { args: { _request: {} } };
 }
 function pausePayload(payload) {
   if (!keysAre(payload, ['args']) || !keysAre(payload.args, ['request'])) return;

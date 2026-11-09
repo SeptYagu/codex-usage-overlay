@@ -80,7 +80,7 @@ native 自动连接器读取记录，校验 schema/UUID/严格 loopback origin�
 |---|---|---|
 | `/api/codex-subscription/status` | `codex-subscription/status` | `{}` 或 `{force:boolean}` |
 | `/api/codex-subscription/usage/accounts` | `codex-subscription/usage/accounts` | `{}` 或 `{force:boolean}` |
-| `/api/session/list` | `session/list` | `{args:{request:{}}}` |
+| `/api/session/list` | `session/list` | `{args:{_request:{}}}` |
 | `/api/session/prompt` | `session/prompt` | 见下文，仅固定 steer 文本 |
 
 订阅请求示例（token 仅在 native 内存中组装 header；不要粘贴真实值到终端）：

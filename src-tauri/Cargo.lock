@@ -535,7 +535,7 @@ dependencies = [
 
 [[package]]
 name = "codex-usage-overlay"
-version = "1.8.2"
+version = "1.8.3"
 dependencies = [
  "anyhow",
  "chrono",

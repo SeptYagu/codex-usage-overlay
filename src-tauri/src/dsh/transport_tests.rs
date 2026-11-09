@@ -249,7 +249,7 @@ async fn handle(mut stream: TcpStream, state: Arc<Fixture>) {
             json!({"accounts":[{"id":a,"usage":{"fetchedAt":fetched,"rateLimits":[{"id":"codex","windows":[{"windowSeconds":18000,"usedPercent":90,"remainingPercent":10,"resetsAt":fetched/1000+10000},{"windowSeconds":604800,"usedPercent":60,"remainingPercent":40,"resetsAt":fetched/1000+600000}]}]}},{"id":b,"error":"Fixture account not signed in"}]})
         }
         "session/list" => {
-            assert_eq!(body["payload"], json!({"args":{"request":{}}}));
+            assert_eq!(body["payload"], json!({"args":{"_request":{}}}));
             json!({"items":[{"sessionId":"session-f5409f91-ec39-462d-9964-596e18e2a36c","agentAvailable":true,"running":true,"blank":false,"formatStatus":"current","projections":{"kind":"cached","asOfSeq":1,"values":{"title":"Fixture session","modelSelection":{"lastUsed":{"provider":"openai-codex"},"next":{"provider":"other"}}}}}]})
         }
         "session/prompt" => {

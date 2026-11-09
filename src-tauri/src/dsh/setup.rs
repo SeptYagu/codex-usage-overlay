@@ -124,8 +124,9 @@ pub async fn desktop_available() -> Result<bool, String> {
     }
 }
 
-/// Installs only a new bridge via the official Desktop CLI. Existing disabled
-/// packages are never silently re-enabled. Cancellation kills only our child,
+/// Installs a new bridge or upgrades an older overlay-managed bridge through
+/// the official Desktop CLI. Disabled and custom packages are left alone.
+/// Cancellation kills only our child,
 /// never the running Desktop or a process tree; DSH owns its package-manager lock.
 pub async fn install_bridge() -> Result<SetupOutcome, String> {
     #[cfg(not(windows))]
@@ -147,35 +148,19 @@ pub async fn install_bridge() -> Result<SetupOutcome, String> {
 async fn install_inner() -> Result<SetupOutcome, String> {
     validate_embedded_package()?;
     let layout = discover_layout().await?;
-    // Desktop's resolveDesktopPaths defaults to resolveDshHome()/profiles/desktop.
-    // Never inherit an agent's profile-local DSH_HOME or DSH_PROFILES_HOME into
-    // this separate Desktop CLI. We deliberately support the OS-default Desktop
-    // home only, rather than guessing a custom running process's environment.
-    let default_home = dirs::home_dir()
-        .ok_or("Cannot locate the default DSH Desktop home")?
-        .join(".dsh");
-    let home = validated_desktop_home(
-        &default_home,
-        std::env::var_os("DSH_HOME").as_deref(),
-        std::env::var_os("DSH_PROFILES_HOME").as_deref(),
-    )?;
-    let profile = home.join("profiles").join("desktop");
-    let manifest = profile.join("package.json");
+    let (home, root, package) = managed_paths()?;
+    let manifest = home.join("profiles").join("desktop").join("package.json");
     match read_profile_state(&manifest)? {
-        BridgeState::Selected => return Ok(SetupOutcome { already_installed: true }),
+        BridgeState::Selected if !selected_managed_bridge_outdated(&manifest, &root, &package)? => {
+            return Ok(SetupOutcome { already_installed: true });
+        }
         BridgeState::Disabled => return Err(disabled_error()),
         BridgeState::Inconsistent => return Err("DSH bridge selection is inconsistent; repair it in DSH's plugin manager before retrying".into()),
-        BridgeState::Absent => {}
+        _ => {}
     }
-    let local = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .filter(|p| local_absolute(p))
-        .ok_or("Local application data is unavailable for DSH bridge setup")?;
-    let root = local.join("CodexUsageOverlay").join("dsh-setup");
     ensure_directory(&root)?;
     secure_directory(&root).await?;
     let root_lock = lock_directory(&root)?;
-    let package = root.join(format!("bridge-{}", package_fingerprint()));
     ensure_directory(&package)?;
     secure_directory(&package).await?;
     let package_lock = lock_directory(&package)?;
@@ -211,10 +196,43 @@ async fn install_inner() -> Result<SetupOutcome, String> {
     if !status.success() {
         return Err("DSH's official plugin installer did not complete successfully; inspect its plugin-manager diagnostics in DSH. No installer output was copied".into());
     }
-    match read_profile_state(&manifest)? {
-        BridgeState::Selected => Ok(SetupOutcome { already_installed: false }),
-        BridgeState::Disabled => Err(disabled_error()),
-        _ => Err("DSH's installer exited without selecting the bridge; check DSH's plugin manager before retrying".into()),
+    if selected_managed_bridge_current(&manifest, &root, &package)? {
+        Ok(SetupOutcome { already_installed: false })
+    } else {
+        Err("DSH's installer exited without selecting the current bridge; check DSH's plugin manager before retrying".into())
+    }
+}
+
+fn managed_paths() -> Result<(PathBuf, PathBuf, PathBuf), String> {
+    // Desktop's resolveDesktopPaths defaults to resolveDshHome()/profiles/desktop.
+    // Never inherit an agent's profile-local DSH_HOME or DSH_PROFILES_HOME into
+    // this separate Desktop CLI. We deliberately support the OS-default Desktop
+    // home only, rather than guessing a custom running process's environment.
+    let default_home = dirs::home_dir()
+        .ok_or("Cannot locate the default DSH Desktop home")?
+        .join(".dsh");
+    let home = validated_desktop_home(
+        &default_home,
+        std::env::var_os("DSH_HOME").as_deref(),
+        std::env::var_os("DSH_PROFILES_HOME").as_deref(),
+    )?;
+    let local = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|p| local_absolute(p))
+        .ok_or("Local application data is unavailable for DSH bridge setup")?;
+    let root = local.join("CodexUsageOverlay").join("dsh-setup");
+    let package = root.join(format!("bridge-{}", package_fingerprint()));
+    Ok((home, root, package))
+}
+
+pub fn managed_bridge_upgrade_needed() -> Result<bool, String> {
+    #[cfg(not(windows))]
+    { Ok(false) }
+    #[cfg(windows)]
+    {
+        let (home, root, package) = managed_paths()?;
+        let manifest = home.join("profiles").join("desktop").join("package.json");
+        selected_managed_bridge_outdated(&manifest, &root, &package)
     }
 }
 
@@ -224,12 +242,12 @@ fn same_path(left: &Path, right: &Path) -> bool {
         left.as_os_str()
             .to_string_lossy()
             .trim_end_matches(['\\', '/'])
-            .eq_ignore_ascii_case(
-                right
-                    .as_os_str()
-                    .to_string_lossy()
-                    .trim_end_matches(['\\', '/']),
-            )
+            .replace('/', "\\")
+            .eq_ignore_ascii_case(&right
+                .as_os_str()
+                .to_string_lossy()
+                .trim_end_matches(['\\', '/'])
+                .replace('/', "\\"))
     }
     #[cfg(not(windows))]
     {
@@ -309,6 +327,10 @@ fn classify_manifest(bytes: &[u8]) -> Result<BridgeState, String> {
 }
 
 fn read_profile_state(path: &Path) -> Result<BridgeState, String> {
+    classify_manifest(&read_profile_bytes(path)?)
+}
+
+fn read_profile_bytes(path: &Path) -> Result<Vec<u8>, String> {
     // package.json is public configuration, not a DSH authentication artifact.
     let file = File::open(path).map_err(|_| "The default DSH Desktop profile is unavailable; open DSH Desktop first. Custom DSH homes are not auto-installed")?;
     let metadata = file
@@ -324,7 +346,45 @@ fn read_profile_state(path: &Path) -> Result<BridgeState, String> {
     if bytes.len() as u64 > MAX_MANIFEST {
         return Err("Invalid DSH Desktop profile manifest size".into());
     }
-    classify_manifest(&bytes)
+    Ok(bytes)
+}
+
+fn selected_managed_bridge_package(manifest: &Path, root: &Path) -> Result<Option<PathBuf>, String> {
+    let bytes = read_profile_bytes(manifest)?;
+    if classify_manifest(&bytes)? != BridgeState::Selected {
+        return Ok(None);
+    }
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "Invalid DSH Desktop profile manifest")?;
+    let specs = ["dependencies", "devDependencies", "optionalDependencies"]
+        .into_iter()
+        .filter_map(|field| value.get(field)?.get(BRIDGE_NAME)?.as_str())
+        .collect::<Vec<_>>();
+    if specs.len() != 1 {
+        return Ok(None);
+    }
+    let Some(file) = specs[0].strip_prefix("file:") else {
+        return Ok(None);
+    };
+    let path = Path::new(file);
+    let managed = path.parent().is_some_and(|parent| same_path(parent, root))
+        && path.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name.strip_prefix("bridge-").is_some_and(|fingerprint| {
+                fingerprint.len() == 16 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        });
+    Ok((local_absolute(path) && managed).then(|| path.to_path_buf()))
+}
+
+fn selected_managed_bridge_outdated(manifest: &Path, root: &Path, package: &Path) -> Result<bool, String> {
+    Ok(selected_managed_bridge_package(manifest, root)?
+        .is_some_and(|selected| !same_path(&selected, package)))
+}
+
+fn selected_managed_bridge_current(manifest: &Path, root: &Path, package: &Path) -> Result<bool, String> {
+    Ok(selected_managed_bridge_package(manifest, root)?
+        .is_some_and(|selected| same_path(&selected, package)))
 }
 
 fn layout_paths(executable: &Path) -> Result<Layout, String> {

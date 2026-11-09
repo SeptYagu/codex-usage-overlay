@@ -167,7 +167,7 @@ test('duplicate authorization and host headers cannot bypass admission', async (
 test('allowlist is exact and reconstructs internal envelopes and response rpcId', async (t) => {
   const { record, connection } = await fixture(t);
   const requests = [
-    [statusPath, {}], [usagePath, { force: true }], [listPath, { args: { request: {} } }],
+    [statusPath, {}], [usagePath, { force: true }], [listPath, { args: { _request: {} } }],
     [promptPath, prompt('Pause')], [promptPath, prompt('暂停')], [promptPath, prompt('暫停', randomUUID())],
   ];
   for (const [route, payload] of requests) {
@@ -196,8 +196,8 @@ test('strict schemas prevent arbitrary prompt, route confusion and extra argumen
   const bad = [
     envelope(statusPath, { force: 'true' }), envelope(statusPath, { accountId: randomUUID() }),
     envelope(usagePath, { force: true, token: 'forbidden' }),
-    envelope(listPath, { args: { request: { sessionId: randomUUID() } } }),
-    envelope(listPath, { args: { request: {} }, extra: true }),
+    envelope(listPath, { args: { _request: { sessionId: randomUUID() } } }),
+    envelope(listPath, { args: { _request: {} }, extra: true }),
     { ...envelope(), method: 'session/prompt' }, { ...envelope(), rpcId: '\ninvalid' },
     { ...envelope(), params: {} }, { ...envelope(), type: 'server-response' },
     envelope(promptPath, prompt('do arbitrary work')), envelope(promptPath, prompt('pause')),
