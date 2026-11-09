@@ -72,6 +72,7 @@ pub struct ConnectionStatus {
     pub connection_revision: u64,
     pub accounts: Vec<Account>,
     pub sessions: Vec<Session>,
+    pub sessions_error: bool,
     pub error: Option<String>,
     pub auto_phase: String,
     pub auto_message: Option<String>,
@@ -458,11 +459,9 @@ async fn connection_status(connection: &Connection) -> ConnectionStatus {
         .and_then(|value| parser::sessions(&value))
     {
         Ok(sessions) => result.sessions = sessions,
-        Err(error) => {
-            if result.error.is_none() {
-                result.error = Some(error);
-            }
-        }
+        // Session enumeration is needed only to bind pause targets. Quota
+        // reading remains connected when DSH's optional session API fails.
+        Err(_) => result.sessions_error = true,
     }
     if !connection.alive.load(Ordering::Acquire) {
         result.connected = false;

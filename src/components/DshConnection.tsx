@@ -148,7 +148,7 @@ export function DshConnectionView({ settings }: DshConnectionViewProps) {
   const origin = publicOrigin(status?.origin ?? '');
   const canBind = connected && !!status?.instanceId && Number.isSafeInteger(status.connectionRevision)
     && status.connectionRevision >= 0 && ['ready', 'connected-unbound'].includes(status.autoPhase)
-    && !status.error && !busy && failed !== 'connection';
+    && !status.error && !status.sessionsError && !busy && failed !== 'connection';
 
   const bind = async (nextAccount: string, sessionIds: string[]) => {
     const snapshot = status;
@@ -189,7 +189,7 @@ export function DshConnectionView({ settings }: DshConnectionViewProps) {
 
   const connectionFailed = failed === 'connection' || !!status?.error || status?.autoPhase === 'error';
   const label = connectionFailed ? 'dshAutoFailed' : connected
-    ? selectedSessions.length ? 'dshConnectedBound' : 'dshConnectedReadOnly'
+    ? status?.sessionsError ? 'dshConnected' : selectedSessions.length ? 'dshConnectedBound' : 'dshConnectedReadOnly'
     : phaseLabels[status?.autoPhase ?? ''] ?? 'dshAutoSearching';
 
   return <section role="group" aria-label={t('dshConnection')} className="space-y-2 rounded-lg border border-slate-200 dark:border-slate-700 p-2.5">
@@ -202,6 +202,7 @@ export function DshConnectionView({ settings }: DshConnectionViewProps) {
       <button type="button" disabled={!!busy} onClick={() => { void run('setup'); }} className="rounded-md bg-cyan-600 px-2 py-1 text-xs text-white disabled:opacity-50">{t(busy === 'setup' ? 'dshWorking' : 'dshAutoSetup')}</button>
     </div>}
     {connectionFailed && <p role="alert" className="text-xs text-amber-700 dark:text-amber-300">{t('dshConnectionFailed')}</p>}
+    {connected && status?.sessionsError && <p role="alert" className="text-xs text-amber-700 dark:text-amber-300">{t('dshSessionsUnavailable')}</p>}
     {failed === 'binding' && <p role="alert" className="text-xs text-amber-700 dark:text-amber-300">{t('dshBindingFailed')}</p>}
     {origin && <p className="text-xs break-all text-slate-500 dark:text-slate-400">{origin}</p>}
     <label htmlFor="dsh-account" className="block text-xs font-medium">{t('dshAccount')}</label>
@@ -228,7 +229,7 @@ export function DshConnectionView({ settings }: DshConnectionViewProps) {
         <input type="checkbox" checked onChange={() => { void bind(accountId, selectedSessions.filter(existing => existing !== id)); }} className="accent-cyan-500" />
         <span>{t('dshUnavailableSession', { id })}</span>
       </label>)}
-      {!sessions.length && <p>{t('dshNoSessions')}</p>}
+      {!sessions.length && !status?.sessionsError && <p>{t('dshNoSessions')}</p>}
     </fieldset>
     <p className="text-xs text-slate-500 dark:text-slate-400">{t('dshBindingHint')}</p>
     <details onToggle={event => {

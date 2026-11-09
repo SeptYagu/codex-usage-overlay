@@ -243,6 +243,7 @@ export interface DshConnectionStatus {
   autoRevision: number;
   accounts: Array<{ id: string; label: string; active: boolean }>;
   sessions: Array<{ id: string; title: string; provider: string; busy: boolean }>;
+  sessionsError?: boolean;
   error: string | null;
 }
 
