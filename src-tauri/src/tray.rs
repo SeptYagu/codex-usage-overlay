@@ -240,6 +240,9 @@ pub const TRAY_MENU_CLICK_DEBOUNCE: Duration = Duration::from_millis(280);
 pub const TRAY_MENU_FOCUS_GRACE: Duration = Duration::from_millis(180);
 static TRAY_MENU_GENERATION: AtomicU64 = AtomicU64::new(0);
 static TRAY_MENU_LAYOUT_REVISION: AtomicU64 = AtomicU64::new(0);
+/// The click-opened generation whose first layout already showed the popup.
+/// Later layouts of that generation may resize it but never show it again.
+static TRAY_MENU_SHOWN_GENERATION: AtomicU64 = AtomicU64::new(0);
 static TRAY_MENU_LAYOUT_LOCK: StdMutex<()> = StdMutex::new(());
 /// Right-click debounce state, independent of left overlay gestures.
 static TRAY_MENU_CLICK_GATE: StdMutex<TrayMenuClickGate> = StdMutex::new(TrayMenuClickGate::new());
@@ -759,6 +762,45 @@ pub fn drive_tray_menu_show_sequence<F: FnMut(TrayMenuShowAction)>(
     emit_action(TrayMenuShowAction::ScheduleGraceCheck);
 }
 
+/// What one layout request may do to the popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayMenuLayoutMode {
+    /// The first layout after a tray click: place, show and focus the popup.
+    Open,
+    /// The open popup's content changed size: place it again, nothing more.
+    Resize,
+    /// The popup was closed. Its page keeps rendering in the background, so a
+    /// content change (a protection status update, say) must not reopen it.
+    Skip,
+}
+
+/// Only a tray click starts a generation, so only the first layout of a new
+/// generation may show the popup.
+pub fn plan_tray_menu_layout_mode(generation: u64, shown_generation: u64, visible: bool) -> TrayMenuLayoutMode {
+    if generation != shown_generation {
+        TrayMenuLayoutMode::Open
+    } else if visible {
+        TrayMenuLayoutMode::Resize
+    } else {
+        TrayMenuLayoutMode::Skip
+    }
+}
+
+pub fn drive_tray_menu_layout<F: FnMut(TrayMenuShowAction)>(
+    mode: TrayMenuLayoutMode,
+    placement: &TrayMenuPlacement,
+    mut emit_action: F,
+) {
+    match mode {
+        TrayMenuLayoutMode::Open => drive_tray_menu_show_sequence(placement, emit_action),
+        TrayMenuLayoutMode::Resize => {
+            emit_action(TrayMenuShowAction::SetSize { width: placement.width, height: placement.height });
+            emit_action(TrayMenuShowAction::SetPosition { x: placement.x, y: placement.y });
+        }
+        TrayMenuLayoutMode::Skip => {}
+    }
+}
+
 pub fn layout_tray_menu(
     app: &AppHandle,
     generation: u64,
@@ -777,6 +819,15 @@ pub fn layout_tray_menu(
     }
     TRAY_MENU_LAYOUT_REVISION.store(revision, Ordering::SeqCst);
     let window = app.get_webview_window(TRAY_MENU_WINDOW_LABEL).ok_or("Tray menu window unavailable")?;
+    let mode = plan_tray_menu_layout_mode(
+        generation,
+        TRAY_MENU_SHOWN_GENERATION.load(Ordering::SeqCst),
+        window.is_visible().unwrap_or(false),
+    );
+    if mode == TrayMenuLayoutMode::Skip {
+        // Nothing to place; the next tray click starts a new generation.
+        return Ok(height_logical);
+    }
     let tray = app.tray_by_id(TRAY_ID).ok_or("Tray icon unavailable")?;
     // `tray.rect()` fails while the icon lives in the notification-area overflow
     // flyout. It must degrade to the fallback corner rather than short-circuit the
@@ -854,7 +905,10 @@ pub fn layout_tray_menu(
         }
     }
     let mut show_ops = LiveShowOps { window: &window, app };
-    drive_tray_menu_show_sequence(&placement, |action| {
+    if mode == TrayMenuLayoutMode::Open {
+        TRAY_MENU_SHOWN_GENERATION.store(generation, Ordering::SeqCst);
+    }
+    drive_tray_menu_layout(mode, &placement, |action| {
         execute_tray_menu_show_action(&mut show_ops, action);
     });
     Ok(placement.height_logical)
@@ -1837,6 +1891,35 @@ mod tests {
                 TrayMenuShowAction::ScheduleGraceCheck,
             ]
         );
+    }
+
+    #[test]
+    fn a_closed_menu_never_reopens_itself_when_its_content_changes_size() {
+        let placement = TrayMenuPlacement { x: 100, y: 200, width: 300, height: 400, height_logical: 400.0 };
+        let run = |generation: u64, shown: u64, visible: bool| {
+            let mut actions = Vec::new();
+            drive_tray_menu_layout(plan_tray_menu_layout_mode(generation, shown, visible), &placement, |a| actions.push(a));
+            actions
+        };
+        let shows = |actions: &[TrayMenuShowAction]| actions.iter().any(|a| matches!(a, TrayMenuShowAction::Show | TrayMenuShowAction::SetFocus));
+
+        // A tray click starts generation 3: its first layout shows the popup.
+        assert_eq!(plan_tray_menu_layout_mode(3, 2, false), TrayMenuLayoutMode::Open);
+        assert!(shows(&run(3, 2, false)));
+        // The open popup's content changes size: it is placed again, not refocused.
+        assert_eq!(
+            run(3, 3, true),
+            vec![
+                TrayMenuShowAction::SetSize { width: 300, height: 400 },
+                TrayMenuShowAction::SetPosition { x: 100, y: 200 },
+            ]
+        );
+        // After the popup closes, a status change (e.g. auto-pause) relayouts the
+        // hidden page with the same generation: nothing may happen.
+        assert_eq!(plan_tray_menu_layout_mode(3, 3, false), TrayMenuLayoutMode::Skip);
+        assert!(run(3, 3, false).is_empty());
+        // Only the next click, generation 4, shows it again.
+        assert!(shows(&run(4, 3, false)));
     }
 
     #[test]
