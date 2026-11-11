@@ -42,38 +42,103 @@ pub trait TrayPresentationSink {
     }
 }
 
-/// The last time the tray icon was registered again, see `present`.
+/// Recovery reuses the existing native window and icon identity. Replacing a
+/// tray from a polling thread can drop its last reference off the owner thread:
+/// DestroyWindow then fails, leaving a window that resurrects an obsolete icon
+/// on the next TaskbarCreated broadcast.
 static TRAY_REREGISTERED: StdMutex<Option<Instant>> = StdMutex::new(None);
 const TRAY_REREGISTER_INTERVAL: Duration = Duration::from_secs(30);
 
 impl TrayPresentationSink for AppHandle {
     fn present(&self, presentation: TrayPresentation) {
-        let Some(tray) = self.tray_by_id(TRAY_ID) else { return };
-        if tray.set_icon(Some(presentation.icon.clone())).is_ok() {
-            update_tray_tooltip(self, &presentation.tooltip);
-            return;
-        }
-        // The shell no longer knows the icon: an add that timed out while the
-        // taskbar was starting, or a lost icon without a TaskbarCreated
-        // broadcast. Every later update fails the same way, so register it
-        // again, throttled while the taskbar is missing altogether.
-        let now = Instant::now();
-        {
+        let app = self.clone();
+        if let Err(error) = self.run_on_main_thread(move || {
+            let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
+            let mut ops = NativeTrayUpdate { tray: &tray, presentation: &presentation };
             let mut last = TRAY_REREGISTERED.lock().unwrap_or_else(|p| p.into_inner());
-            if last.is_some_and(|at| now.saturating_duration_since(at) < TRAY_REREGISTER_INTERVAL) {
-                return;
+            if let Err(error) = repaint_existing_tray(&mut ops, &mut last, Instant::now()) {
+                eprintln!("Could not recover the existing system tray icon: {error}");
             }
-            *last = Some(now);
-        }
-        drop(tray);
-        let _ = self.remove_tray_by_id(TRAY_ID);
-        if let Err(error) = self.create_tray(presentation) {
-            eprintln!("Could not register the tray icon again: {error}");
+        }) {
+            eprintln!("Could not schedule the system tray update: {error}");
         }
     }
 
     fn app_handle(&self) -> Option<&AppHandle> { Some(self) }
 }
+
+/// No create/remove operation is available here: even persistent failures must
+/// keep exactly one native tray window. Calls run together on the main thread.
+trait TrayUpdateOps {
+    fn set_icon(&mut self) -> Result<(), String>;
+    fn set_tooltip(&mut self) -> Result<(), String>;
+    fn recover_in_place(&mut self) -> Result<(), String>;
+}
+
+fn repaint_existing_tray(
+    ops: &mut impl TrayUpdateOps,
+    last_attempt: &mut Option<Instant>,
+    now: Instant,
+) -> Result<(), String> {
+    if ops.set_icon().is_ok() {
+        return ops.set_tooltip();
+    }
+    if last_attempt.is_some_and(|at| now.saturating_duration_since(at) < TRAY_REREGISTER_INTERVAL) {
+        return Ok(());
+    }
+    *last_attempt = Some(now);
+    ops.recover_in_place()?;
+    ops.set_icon()?;
+    ops.set_tooltip()
+}
+
+struct NativeTrayUpdate<'a> {
+    tray: &'a TrayIcon<Wry>,
+    presentation: &'a TrayPresentation,
+}
+
+impl TrayUpdateOps for NativeTrayUpdate<'_> {
+    fn set_icon(&mut self) -> Result<(), String> {
+        self.tray.set_icon(Some(self.presentation.icon.clone())).map_err(|e| e.to_string())
+    }
+
+    fn set_tooltip(&mut self) -> Result<(), String> {
+        let truncated: String = self.presentation.tooltip.chars().take(63).collect();
+        self.tray.set_tooltip(Some(truncated)).map_err(|e| e.to_string())
+    }
+
+    fn recover_in_place(&mut self) -> Result<(), String> {
+        recover_tray_in_place(self.tray)
+    }
+}
+
+#[cfg(windows)]
+fn recover_tray_in_place(tray: &TrayIcon<Wry>) -> Result<(), String> {
+    // tray-icon already handles Explorer restarts using this registered message.
+    // Target only this icon's existing window, never broadcast to other icons.
+    // Its handler removes/adds the SAME (HWND, uID), retaining Tauri's resource
+    // and callbacks. A subsequent set_icon writes the newest presentation.
+    tray.with_inner_tray_icon(|inner| {
+        use windows::core::w;
+        use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{RegisterWindowMessageW, SendMessageW};
+        let message = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
+        if message == 0 {
+            return Err("Could not register the taskbar recovery message".to_string());
+        }
+        unsafe { SendMessageW(HWND(inner.window_handle()), message, Some(WPARAM(0)), Some(LPARAM(0))); }
+        Ok(())
+    }).map_err(|e| e.to_string())?
+}
+
+#[cfg(not(windows))]
+fn recover_tray_in_place(_: &TrayIcon<Wry>) -> Result<(), String> {
+    Err("In-place tray recovery is only supported on Windows".to_string())
+}
+
+#[cfg(test)]
+#[path = "tray_recovery_tests.rs"]
+mod recovery_tests;
 
 pub fn tray_presentation(
     settings: &OverlaySettings,
@@ -1040,13 +1105,6 @@ pub fn plan_settings_geometry(
 ) -> Option<SettingsPlacement> {
     let index = select_work_area(work_areas, geometry)?;
     Some(place_within_work_area(&work_areas[index], geometry))
-}
-
-pub fn update_tray_tooltip(app: &AppHandle, text: &str) {
-    if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let truncated: String = text.chars().take(63).collect();
-        let _ = tray.set_tooltip(Some(truncated));
-    }
 }
 
 pub fn generate_quota_icon(

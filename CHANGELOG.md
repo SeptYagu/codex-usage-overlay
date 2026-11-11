@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.4] - 2026-11-11
+
+### Fixed
+- Recover a missing Windows tray icon in place using its original native window and identity. Background quota updates no longer remove and recreate tray resources, preventing abandoned windows and duplicate icons after Explorer restarts.
+- Serialize tray updates and recovery on the Windows owner thread. Retain the 30-second recovery backoff and repaint the latest quota and tooltip after recovery.
+
 ## [1.6.0] - 2026-11-03
 
 ### Added
