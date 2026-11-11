@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.5] - 2026-11-11
+
+### Fixed
+- Keep a closed tray menu closed. The hidden menu still re-measures itself when its content changes, and that relayout used to show and focus it again, so status changes such as auto-pause acting on low quota popped the menu open. Only a tray click opens it now; an open menu resizes without taking focus again.
+
 ## [1.8.4] - 2026-11-11
 
 ### Fixed
