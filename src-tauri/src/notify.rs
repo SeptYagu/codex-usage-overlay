@@ -304,6 +304,36 @@ fn show_default_notification(app: &AppHandle, title: &str, body: &str) -> Result
         .map_err(|error| error.to_string())
 }
 
+/// Announces a found update from the backend, so a check that finishes right
+/// at launch never depends on the overlay page having registered a listener.
+pub fn show_update_notification(app: &AppHandle, language: &str, version: &str, ready: bool) {
+    let (title, body) = update_notification_copy(language, version, ready);
+    if let Err(error) = show_default_notification(app, title, &body) {
+        eprintln!("Could not show update notification: {error}");
+    }
+}
+
+/// `ready` means the update was downloaded and installs when the app quits.
+pub(crate) fn update_notification_copy(language: &str, version: &str, ready: bool) -> (&'static str, String) {
+    match crate::commands::resolve_locale(language) {
+        "zh-CN" => ("Codex 用量悬浮窗更新", if ready {
+            format!("{version} 版已下载，将在退出时安装。")
+        } else {
+            format!("发现新版本 {version}。")
+        }),
+        "zh-Hant" => ("Codex 用量懸浮窗更新", if ready {
+            format!("{version} 版已下載，將在退出時安裝。")
+        } else {
+            format!("發現新版本 {version}。")
+        }),
+        _ => ("Codex Usage Overlay update", if ready {
+            format!("Version {version} has been downloaded and installs when you quit.")
+        } else {
+            format!("Version {version} is available.")
+        }),
+    }
+}
+
 fn notification_copy(kind: QuotaKind, language: &str) -> (&'static str, &'static str) {
     let locale = crate::commands::resolve_locale(language);
     match (kind, locale) {

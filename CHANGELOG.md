@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- With automatic update checks on, check right at launch instead of 15 seconds later, then every 12 hours as before. A failed check retries after 30 seconds, 2 minutes and 10 minutes before falling back to that interval.
+- Always notify when an automatic check finds an update. With automatic installation on, the notification says the update has been downloaded and installs when you quit, instead of downloading silently. Notifications now come from the app itself, so one found right at launch is not lost while the overlay is still loading.
+
 ## [1.8.5] - 2026-11-11
 
 ### Fixed

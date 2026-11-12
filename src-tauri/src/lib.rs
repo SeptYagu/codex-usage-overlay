@@ -283,17 +283,19 @@ pub fn run() {
                 });
             });
 
-            // Check for stable updates periodically when automatic checks are enabled.
+            // With automatic checks on, check right at launch and then every 12
+            // hours. A failed check (no network yet after sign-in, say) retries
+            // after 30 s, 2 min and 10 min before falling back to that interval.
             let update_handle = app.handle().clone();
             let update_state = app_state_clone.clone();
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(15)).await;
+                let mut failures = 0;
                 loop {
                     let auto_check = update_state.settings.lock().await.auto_check_updates;
-                    if auto_check {
-                        commands::check_and_notify_auto_update(&update_handle, &update_state).await;
-                    }
-                    tokio::time::sleep(Duration::from_secs(12 * 60 * 60)).await;
+                    let checked = !auto_check
+                        || commands::check_and_notify_auto_update(&update_handle, &update_state).await;
+                    failures = if checked { 0 } else { failures + 1 };
+                    tokio::time::sleep(commands::next_update_check_delay(checked, failures)).await;
                 }
             });
 

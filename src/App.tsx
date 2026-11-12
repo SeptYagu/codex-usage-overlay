@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { useTranslation } from 'react-i18next';
 import i18n, { updateLanguage } from './i18n';
 import { CodexUsage, DockStateInfo, OverlaySettings, SettingsEnvelope, DEFAULT_SETTINGS, SettingsPatch } from './types';
@@ -136,21 +135,8 @@ export const App: React.FC = () => {
       });
     }
 
-    const unlistenUpdate = listen<{ version: string }>('update_available', async (event) => {
-      if (windowLabel !== 'main') return;
-      try {
-        let granted = await isPermissionGranted();
-        if (!granted) granted = (await requestPermission()) === 'granted';
-        if (granted) {
-          sendNotification({
-            title: i18n.t('updateNotificationTitle'),
-            body: i18n.t('updateAvailable', { version: event.payload.version }),
-          });
-        }
-      } catch (error) {
-        console.error('Could not show update notification:', error);
-      }
-    });
+    // Update notifications come from the backend, so a check that finishes
+    // before this page has loaded (right at launch) is never lost.
 
     const unlistenDockState = listen<DockStateInfo>('dock_state_changed', (event) => {
       dockStateRevision.current++;
@@ -171,7 +157,6 @@ export const App: React.FC = () => {
       settingsLoadToken.current++;
       unlistenSettings.then((f) => f());
       unlistenUsage.then((f) => f());
-      unlistenUpdate.then((f) => f());
       unlistenDockState.then((f) => f());
     };
   }, [applySavedSettings, loadSettings, windowLabel]);

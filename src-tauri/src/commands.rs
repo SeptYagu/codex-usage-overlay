@@ -2,7 +2,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 #[cfg(windows)]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(test)]
 use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -1198,6 +1197,37 @@ mod settings_patch_tests {
     }
 
     #[test]
+    fn a_failed_update_check_retries_soon_then_falls_back_to_the_regular_interval() {
+        let delays: Vec<_> = (1..=5).map(|failures| next_update_check_delay(false, failures)).collect();
+        assert_eq!(delays, vec![
+            Duration::from_secs(30), Duration::from_secs(120), Duration::from_secs(600),
+            UPDATE_CHECK_INTERVAL, UPDATE_CHECK_INTERVAL,
+        ]);
+        assert_eq!(next_update_check_delay(true, 0), UPDATE_CHECK_INTERVAL);
+        assert_eq!(UPDATE_CHECK_INTERVAL, Duration::from_secs(12 * 60 * 60));
+    }
+
+    #[test]
+    fn each_update_version_is_announced_once_as_available_and_once_as_ready() {
+        let mut last = None;
+        assert!(claim_update_notice(&mut last, "1.8.6", false));
+        assert!(!claim_update_notice(&mut last, "1.8.6", false), "a repeated check must stay quiet");
+        assert!(claim_update_notice(&mut last, "1.8.6", true), "finishing the download is new information");
+        assert!(!claim_update_notice(&mut last, "1.8.6", true));
+        assert!(claim_update_notice(&mut last, "1.8.7", true), "a newer version is announced");
+    }
+
+    #[test]
+    fn update_notifications_are_localized_and_say_when_a_download_installs() {
+        let (title, body) = crate::notify::update_notification_copy("en-US", "1.8.6", true);
+        assert_eq!(title, "Codex Usage Overlay update");
+        assert_eq!(body, "Version 1.8.6 has been downloaded and installs when you quit.");
+        assert_eq!(crate::notify::update_notification_copy("en-US", "1.8.6", false).1, "Version 1.8.6 is available.");
+        assert_eq!(crate::notify::update_notification_copy("zh-CN", "1.8.6", false).1, "发现新版本 1.8.6。");
+        assert_eq!(crate::notify::update_notification_copy("zh-Hant", "1.8.6", true).1, "1.8.6 版已下載，將在退出時安裝。");
+    }
+
+    #[test]
     fn automatic_installation_keeps_update_checks_enabled() {
         let mut settings = OverlaySettings::default();
         settings.auto_check_updates = false;
@@ -1937,25 +1967,58 @@ pub(crate) async fn check_and_store_update(
     Ok(info)
 }
 
-pub(crate) async fn check_and_notify_auto_update(app: &AppHandle, state: &AppState) {
-    if let Ok(Some(update)) = check_and_store_update(app, state).await {
-        if state.settings.lock().await.auto_install_updates {
-            let _ = prepare_update(app, state).await;
-            return;
+/// The regular automatic check, plus quick retries after a failed one (for
+/// example a launch-time check made before the network is up after sign-in).
+pub(crate) const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
+const UPDATE_CHECK_RETRY_DELAYS: [Duration; 3] =
+    [Duration::from_secs(30), Duration::from_secs(2 * 60), Duration::from_secs(10 * 60)];
+
+/// `failures` counts consecutive failed checks, including this one.
+pub(crate) fn next_update_check_delay(checked: bool, failures: usize) -> Duration {
+    if checked || failures == 0 {
+        return UPDATE_CHECK_INTERVAL;
+    }
+    UPDATE_CHECK_RETRY_DELAYS.get(failures - 1).copied().unwrap_or(UPDATE_CHECK_INTERVAL)
+}
+
+/// One notification per version and state: "available" and later "ready"
+/// (downloaded, installs on quit) are announced once each.
+pub(crate) fn claim_update_notice(last: &mut Option<String>, version: &str, ready: bool) -> bool {
+    let key = format!("{}:{version}", if ready { "ready" } else { "available" });
+    if last.as_deref() == Some(key.as_str()) {
+        return false;
+    }
+    *last = Some(key);
+    true
+}
+
+/// Returns whether the check itself succeeded (finding no update counts).
+pub(crate) async fn check_and_notify_auto_update(app: &AppHandle, state: &AppState) -> bool {
+    let update = match check_and_store_update(app, state).await {
+        Ok(Some(update)) => update,
+        Ok(None) => return true,
+        Err(error) => {
+            eprintln!("Automatic update check failed: {error}");
+            return false;
         }
-        let should_notify = {
-            let mut last = state.last_auto_notified_version.lock().await;
-            if last.as_deref() == Some(update.version.as_str()) {
-                false
-            } else {
-                *last = Some(update.version.clone());
-                true
-            }
-        };
-        if should_notify {
+    };
+    let auto_install = state.settings.lock().await.auto_install_updates;
+    // Automatic installation downloads now and installs on quit; the
+    // notification then says so instead of the download staying silent.
+    let ready = auto_install
+        && prepare_update(app, state).await.is_ok()
+        && state.prepared_update.lock().is_ok_and(|prepared| {
+            prepared.as_ref().is_some_and(|package| package.update.version == update.version)
+        });
+    let should_notify = claim_update_notice(&mut *state.last_auto_notified_version.lock().await, &update.version, ready);
+    if should_notify {
+        if !auto_install {
             let _ = app.emit("update_available", &update);
         }
+        let language = state.settings.lock().await.language.clone();
+        crate::notify::show_update_notification(app, &language, &update.version, ready);
     }
+    true
 }
 
 #[tauri::command]
