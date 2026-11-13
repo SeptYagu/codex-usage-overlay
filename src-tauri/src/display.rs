@@ -502,7 +502,7 @@ mod tests {
             let seconds = Duration::from_secs(interval as u64);
             advance(&mut c, now + seconds - Duration::from_millis(1));
             assert_eq!(c.snapshot.effective_provider, Provider::Codex);
-            for (i, p) in [Provider::Claude, Provider::Dsh, Provider::Codex]
+            for (i, p) in [Provider::Claude, Provider::Dsh, Provider::Antigravity, Provider::Codex]
                 .into_iter()
                 .enumerate()
             {
@@ -523,7 +523,7 @@ mod tests {
         advance(&mut c, now + Duration::from_secs(29));
         assert_eq!(c.snapshot.effective_provider, Provider::Dsh);
         advance(&mut c, now + Duration::from_secs(30));
-        assert_eq!(c.snapshot.effective_provider, Provider::Codex);
+        assert_eq!(c.snapshot.effective_provider, Provider::Antigravity);
     }
     #[test]
     fn overlapping_pause_reasons_and_resume_restart_the_full_interval() {

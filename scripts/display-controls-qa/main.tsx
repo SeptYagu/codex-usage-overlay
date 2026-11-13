@@ -12,11 +12,12 @@ const usage = { fiveHourRemainingPercent: 69, fiveHourBurnRatePerHour: 16.8, wee
 window.qa = { render: async (settings, edge = null, missing = false, view = 'overlay', fixture = 'normal') => {
         await i18n.changeLanguage(settings.language);
         const s = { ...DEFAULT_SETTINGS, ...settings };
-        const order = ['codex', 'claude', 'dsh'];
+        const order = ['codex', 'claude', 'dsh', 'antigravity'];
         const samples = {
             codex: usage,
             claude: { ...usage, fiveHourRemainingPercent: 41, weekRemainingPercent: 38, hasCredits: false },
             dsh: { ...usage, fiveHourRemainingPercent: 23, weekRemainingPercent: 12 },
+            antigravity: { ...usage, fiveHourRemainingPercent: 55, weekRemainingPercent: 48, hasCredits: false },
         };
         const monitors = Object.fromEntries(order.map(provider => [provider, {
             provider, sourceKey: provider, sourceGeneration: 0, revision: 1, monitorEnabled: true,
@@ -31,7 +32,7 @@ window.qa = { render: async (settings, edge = null, missing = false, view = 'ove
             : <OverlayView settings={s} usage={missing ? null : sample} isLoading={missing}
                 monitors={['multi','carousel'].includes(fixture) ? monitors : {}}
                 onCycleProvider={fixture === 'multi' ? async () => {
-                    await window.qa.render({ ...settings, provider: order[(order.indexOf(s.provider) + 1) % 3] }, edge, missing, view, fixture);
+                    await window.qa.render({ ...settings, provider: order[(order.indexOf(s.provider) + 1) % 4] }, edge, missing, view, fixture);
                 } : undefined}
                 dockState={edge ? { docked: true, expanded: false, hidden: false, edge } : undefined}/>);
         await document.fonts.ready;

@@ -273,7 +273,7 @@ fn show_quota_reset(
 ) -> Result<(), String> {
     let (base_title, body) = notification_copy(kind, language);
     let provider = state.runtime_provider.map(|p| p.key()).unwrap_or("codex");
-    let provider = match provider { "claude" => "Claude", "dsh" => "DSH", _ => "Codex" };
+    let provider = match provider { "claude" => "Claude", "dsh" => "DSH", "antigravity" => "Antigravity", _ => "Codex" };
     let title = format!("{provider} — {base_title}");
     let title = title.as_str();
     match sound_mode {

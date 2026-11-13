@@ -1,7 +1,7 @@
 [package]
 name = "codex-usage-overlay"
 default-run = "codex-usage-overlay"
-version = "1.8.5"
+version = "1.9.0-preview.1"
 description = "A lightweight Windows overlay for OpenAI Codex usage"
 authors = ["Justin"]
 edition = "2021"
@@ -70,6 +70,10 @@ path = "src/bin/portable_updater.rs"
 [[bin]]
 name = "claude-usage-bridge"
 path = "src/bin/claude_bridge.rs"
+
+[[bin]]
+name = "antigravity-usage-bridge"
+path = "src/bin/antigravity_bridge.rs"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

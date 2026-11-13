@@ -5,7 +5,7 @@ import { DisplayState } from '../types';
 
 export function mergeDisplayState(current:DisplayState|null,next:DisplayState):DisplayState|null {
   if (!next || !Number.isSafeInteger(next.revision) || next.revision<0
-    || !['codex','claude','dsh'].includes(next.effectiveProvider)
+    || !['codex','claude','dsh','antigravity'].includes(next.effectiveProvider)
     || typeof next.sourceKey!=='string' || !Number.isSafeInteger(next.sourceGeneration)
     || !Array.isArray(next.candidates) || !Array.isArray(next.pauseReasons)) return current;
   return current&&current.revision>=next.revision?current:next;

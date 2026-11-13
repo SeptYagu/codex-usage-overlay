@@ -11,6 +11,7 @@ try {
     foreach ($relative in @('README.md', 'README.en.md', 'src-tauri\target\release\codex-usage-overlay.exe',
         'src-tauri\target\release\codex-usage-updater.exe',
         'src-tauri\target\release\claude-usage-bridge.exe',
+        'src-tauri\target\release\antigravity-usage-bridge.exe',
         'src-tauri\target\release\bundle\nsis\codex-usage-overlay_1.2.1_x64-setup.exe',
         'src-tauri\target\release\bundle\msi\codex-usage-overlay_1.2.1_x64_en-US.msi')) {
         [IO.File]::WriteAllText((Join-Path $fixtureRoot $relative), "test fixture: $relative")

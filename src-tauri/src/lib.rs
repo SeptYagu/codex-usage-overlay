@@ -1,5 +1,6 @@
 #[cfg(windows)]
 mod audio;
+mod antigravity;
 mod claude;
 mod codex;
 mod commands;
@@ -34,6 +35,9 @@ pub fn run() {
     if let Err(error) = config_manager.save_settings_checked(&initial_settings) { eprintln!("Could not save migrated settings: {error}"); }
     if let Err(error) = claude::install::write_guard_config(config_manager.runtime_dir(), &initial_settings.for_provider(config::Provider::Claude)) {
         eprintln!("Could not write the Claude guard preferences: {error}");
+    }
+    if let Err(error) = antigravity::install::write_guard_config(config_manager.runtime_dir(), &initial_settings.for_provider(config::Provider::Antigravity)) {
+        eprintln!("Could not write the Antigravity guard preferences: {error}");
     }
 
     let app_state = Arc::new(AppState::new(config_manager.clone(), initial_settings.clone()));
@@ -170,6 +174,9 @@ pub fn run() {
             commands::claude_connection_status,
             commands::claude_connect,
             commands::claude_disconnect,
+            commands::antigravity_connection_status,
+            commands::antigravity_connect,
+            commands::antigravity_disconnect,
         ])
         .setup(move |app| {
             // Setup system tray

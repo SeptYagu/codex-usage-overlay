@@ -42,7 +42,12 @@ async function mount(overrides: Partial<OverlaySettings> = {}) {
   const view = render(<SettingsView settings={{ ...DEFAULT_SETTINGS, ...overrides }} onPatchSettings={onPatchSettings} />);
   await act(async () => {});
   const panel = (provider: string) => {
-    fireEvent.click(view.getByRole('tab', { name: i18n.t(provider === 'codex' ? 'providerCodex' : provider === 'claude' ? 'providerClaude' : 'providerDsh') }));
+    fireEvent.click(view.getByRole('tab', { name: i18n.t(
+      provider === 'codex' ? 'providerCodex'
+        : provider === 'claude' ? 'providerClaude'
+          : provider === 'antigravity' ? 'providerAntigravity'
+            : 'providerDsh',
+    ) }));
     return within(view.container.querySelector(`[data-provider-settings="${provider}"]`)! as HTMLElement);
   };
   return { ...view, panel, onPatchSettings };
@@ -51,7 +56,7 @@ async function mount(overrides: Partial<OverlaySettings> = {}) {
 describe('settings tabs', () => {
   it('shows one settings page at a time with unique control ids', async () => {
     const view = await mount();
-    expect(view.getAllByRole('tab')).toHaveLength(4);
+    expect(view.getAllByRole('tab')).toHaveLength(5);
     expect(view.container.querySelectorAll('[data-provider-settings]')).toHaveLength(0);
     expect(view.queryByLabelText('Provider settings')).toBeNull();
     expect(view.container.querySelectorAll('[data-common-settings]')).toHaveLength(1);
@@ -97,7 +102,12 @@ describe('settings tabs', () => {
   it.each(['en-US','zh-CN','zh-Hant'])('keeps all provider tabs in %s', async locale => {
     await i18n.changeLanguage(locale);
     const view = await mount();
-    for (const key of ['commonSettings','providerCodex','providerClaude','providerDsh']) expect(view.getByRole('tab',{name:i18n.t(key)})).toBeTruthy();
+    for (const key of ['commonSettings','providerCodex','providerClaude','providerDsh','providerAntigravity']) expect(view.getByRole('tab',{name:i18n.t(key)})).toBeTruthy();
+  });
+  it('updates Antigravity quota pool selection from the Antigravity settings tab', async () => {
+    const { panel, onPatchSettings } = await mount({ antigravityPool: 'auto' });
+    fireEvent.change(panel('antigravity').getByRole('combobox', { name: 'Quota pool' }), { target: { value: 'argon' } });
+    expect(onPatchSettings).toHaveBeenCalledWith({ antigravityPool: 'argon' }, false);
   });
 });
 

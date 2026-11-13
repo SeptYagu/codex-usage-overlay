@@ -44,6 +44,8 @@ describe('provider snapshot ordering', () => {
   it('retains background caches and rejects late bootstrap or invalidated-source updates', () => {
     const first = mergeMonitorSnapshot({}, snapshot);
     const background = mergeMonitorSnapshot(first, { ...snapshot, provider: 'codex', sourceKey: 'codex', revision: 6 });
+    const antigravity = mergeMonitorSnapshot(background, { ...snapshot, provider: 'antigravity', sourceKey: 'antigravity-auto', revision: 7 });
+    expect(antigravity.antigravity?.sourceKey).toBe('antigravity-auto');
     expect(background.claude).toBe(snapshot);
     expect(background.codex?.sourceKey).toBe('codex');
     expect(mergeMonitorSnapshot(background, { ...snapshot, revision: 4 })).toBe(background);

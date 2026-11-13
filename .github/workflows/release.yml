@@ -56,9 +56,11 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --locked
           if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
           # NSIS and MSI ship every Cargo binary that exists at bundle time, so the
-          # Claude bridge is built first.
+          # bridge helpers are built first.
           cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin claude-usage-bridge
           if ($LASTEXITCODE -ne 0) { throw 'Claude bridge helper build failed.' }
+          cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin antigravity-usage-bridge
+          if ($LASTEXITCODE -ne 0) { throw 'Antigravity bridge helper build failed.' }
           npm run tauri -- build --ci --bundles nsis,msi
           if ($LASTEXITCODE -ne 0) { throw 'Tauri release build failed.' }
           cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin codex-usage-updater

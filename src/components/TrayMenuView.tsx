@@ -291,7 +291,7 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
   return (
     <div className="overflow-y-auto bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 p-2.5 font-sans select-none" style={{ maxHeight: maxCssHeight }}>
       <div ref={menuRef} role="menu" aria-label={t('menuSettings')} className="space-y-0.5">
-        {display?.carouselEnabled&&<div className="tray-menu-item text-xs text-slate-500" role="status">{t(settings.provider==='codex'?'providerCodex':settings.provider==='claude'?'providerClaude':'providerDsh')} · {t(`carouselStatus_${display.status}`)}</div>}
+        {display?.carouselEnabled&&<div className="tray-menu-item text-xs text-slate-500" role="status">{t(settings.provider==='codex'?'providerCodex':settings.provider==='claude'?'providerClaude':settings.provider==='antigravity'?'providerAntigravity':'providerDsh')} · {t(`carouselStatus_${display.status}`)}</div>}
         <ProtectionStatusView settings={settings} compact />
         <button className="tray-menu-item" role="menuitem" onClick={() => runMenuAction(() => invoke('toggle_overlay_window'))}>
           {t('menuToggleOverlay')}

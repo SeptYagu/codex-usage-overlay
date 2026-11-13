@@ -60,15 +60,20 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
   const scale = settings.scalePercent / 100;
   const layout = settings.overlayLayout === 'stacks' ? 'stacks' : 'grouped';
   const collapsed = Boolean(dockState?.docked && !dockState.expanded);
-  // Claude has no credit balance.
+  // Claude has no credit balance; Antigravity shows credits only when reported.
   const claude = settings.provider === 'claude';
-  const showCredits = settings.showCredits && !claude;
+  const showCredits = settings.showCredits && ((settings.provider !== 'claude' && settings.provider !== 'antigravity') || Boolean(usage?.hasCredits));
   const showLogo = settings.showProviderLogo;
   const [switching, setSwitching] = useState(false);
-  const order: Provider[] = ['codex', 'claude', 'dsh'];
-  const nextProvider = [1, 2].map(offset => order[(order.indexOf(settings.provider) + offset) % 3])
+  const order: Provider[] = ['codex', 'claude', 'dsh', 'antigravity'];
+  const nextProvider = [1, 2, 3].map(offset => order[(order.indexOf(settings.provider) + offset) % 4])
     .find(provider => monitors[provider]?.available && monitors[provider]?.monitorEnabled);
-  const providerLabel = (provider: Provider) => t(provider === 'claude' ? 'providerClaude' : provider === 'dsh' ? 'providerDsh' : 'providerCodex');
+  const providerLabel = (provider: Provider) => t(
+    provider === 'claude' ? 'providerClaude'
+      : provider === 'dsh' ? 'providerDsh'
+        : provider === 'antigravity' ? 'providerAntigravity'
+          : 'providerCodex'
+  );
   const logoHint = nextProvider ? t('switchProviderHint', { current: providerLabel(settings.provider), next: providerLabel(nextProvider) })
     : t('singleProviderHint', { current: providerLabel(settings.provider) });
 
@@ -321,7 +326,7 @@ function CapsuleReadings({settings,usage,isLoading}:{settings:OverlaySettings;us
         <div className="overlay-meta-row"><span className="overlay-countdown">{quota.countdown}</span>{settings.showBurnRate&&<span className="overlay-burn-rate" title={quota.key==='five'?burnRatePresentation(usage,t):undefined}>{quota.burn}</span>}</div>
       </div>
     </React.Fragment>)}
-    {settings.showCredits&&settings.provider!=='claude'&&<>
+    {settings.showCredits&&((settings.provider!=='claude'&&settings.provider!=='antigravity')||Boolean(usage?.hasCredits))&&<>
       {layout==='grouped'&&<span aria-hidden="true" className="overlay-divider"/>}
       <div className="overlay-credit" role="group" aria-label={t('creditsLabel')}><div className="overlay-reading"><span className="overlay-label">{layout==='stacks'?t('creditsLabel'):'CR'}</span><span className="overlay-value">{credit}</span></div>{layout==='stacks'&&<span className="overlay-countdown">{t('balanceLabel')}</span>}</div>
     </>}

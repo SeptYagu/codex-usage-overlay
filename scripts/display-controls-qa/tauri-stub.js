@@ -28,6 +28,7 @@ export const invoke = async (cmd, args) => {
     if (cmd === 'get_monitor_snapshots') return [];
     if (cmd === 'dsh_connection_status') return { connected: false, instanceId: null, accounts: [], sessions: [], error: null };
     if (cmd === 'claude_connection_status') return { statusLine: false, hooks: false, bridgeAvailable: true, settingsPath: null, snapshotCapturedAt: null, error: null };
+    if (cmd === 'antigravity_connection_status') return { statusLine: false, hooks: false, bridgeAvailable: true, settingsPath: null, hooksPath: null, snapshotCapturedAt: null, blockedCount: 0, lastBlockedAt: null, error: null };
     if (cmd === 'is_installed_version') return true;
     if (cmd === 'get_notification_status') return 'enabled';
     if (cmd === 'get_auto_pause_status') return protection;

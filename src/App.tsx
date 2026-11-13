@@ -13,6 +13,24 @@ import { useDisplayState } from './hooks/useDisplayState';
 import { useProviderMonitors } from './hooks/useProviderMonitors';
 import { mergeSettingsPatch, mergePendingPatches, settingsForProvider } from './providerSettings';
 
+function errorTargetsForPatch(patch: SettingsPatch): string[] {
+  const targets = Object.keys(patch.providerPreferences ?? {});
+  if (!targets.length) {
+    if (patch.antigravityPool !== undefined) {
+      targets.push('antigravity');
+    } else if (
+      patch.autoPauseFiveHourMessage !== undefined
+      || patch.autoPauseWeeklyMessage !== undefined
+      || patch.fiveHourBurnRateAlgorithm !== undefined
+    ) {
+      targets.push('codex');
+    } else {
+      targets.push('common');
+    }
+  }
+  return targets;
+}
+
 export const App: React.FC = () => {
   const { t } = useTranslation();
   const [windowLabel] = useState<string>(() => getCurrentWindow().label);
@@ -179,14 +197,12 @@ export const App: React.FC = () => {
         const envelope = await invoke<SettingsEnvelope>('patch_settings', { patch });
         pendingPatches.current = pendingPatches.current.filter((item) => item !== patch);
         applySavedSettings(envelope);
-        const targets=Object.keys(patch.providerPreferences??{});
-        if(!targets.length)targets.push(patch.autoPauseFiveHourMessage!==undefined||patch.autoPauseWeeklyMessage!==undefined||patch.fiveHourBurnRateAlgorithm!==undefined?'codex':'common');
+        const targets = errorTargetsForPatch(patch);
         setSaveErrors(current=>{const next={...current};for(const target of targets)delete next[target];return next;});
       } catch (err) {
         pendingPatches.current = pendingPatches.current.filter((item) => item !== patch);
         console.error('Save settings error:', err);
-        const targets=Object.keys(patch.providerPreferences??{});
-        if(!targets.length)targets.push(patch.autoPauseFiveHourMessage!==undefined||patch.autoPauseWeeklyMessage!==undefined||patch.fiveHourBurnRateAlgorithm!==undefined?'codex':'common');
+        const targets = errorTargetsForPatch(patch);
         setSaveErrors(current=>({...current,...Object.fromEntries(targets.map(target=>[target,i18n.t('settingsSaveFailed',{target:target==='common'?i18n.t('commonSettings'):target})]))}));
         if(confirmedSettings.current)applySavedSettings(confirmedSettings.current);
         try {

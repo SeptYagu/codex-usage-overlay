@@ -175,14 +175,17 @@ impl AutoPauseStatus {
 
     pub fn tooltip(&self, language: &str) -> &'static str {
         let zh = crate::commands::resolve_locale(language);
-        if self.provider == Provider::Claude {
+        if matches!(self.provider, Provider::Claude | Provider::Antigravity) {
             match (zh, self.summary.as_str()) {
                 ("zh-CN", "armed") => return "额度保护：就绪",
                 ("zh-Hant", "armed") => return "額度保護：就緒",
                 (_, "armed") => return "Quota guard: armed",
-                ("zh-CN", "quotaLow") => return "额度不足：拦截 Claude Code 新请求",
-                ("zh-Hant", "quotaLow") => return "額度不足：攔截 Claude Code 新請求",
-                (_, "quotaLow") => return "Quota low: blocking new Claude Code requests",
+                ("zh-CN", "quotaLow") if self.provider == Provider::Claude => return "额度不足：拦截 Claude Code 新请求",
+                ("zh-Hant", "quotaLow") if self.provider == Provider::Claude => return "額度不足：攔截 Claude Code 新請求",
+                (_, "quotaLow") if self.provider == Provider::Claude => return "Quota low: blocking new Claude Code requests",
+                ("zh-CN", "quotaLow") => return "额度不足：拦截 Antigravity 新请求",
+                ("zh-Hant", "quotaLow") => return "額度不足：攔截 Antigravity 新請求",
+                (_, "quotaLow") => return "Quota low: blocking new Antigravity requests",
                 _ => {}
             }
         }
@@ -254,7 +257,7 @@ pub async fn snapshot(state: &AppState) -> AutoPauseStatus {
     }
     status.provider = settings.provider;
     status.auto_resume_enabled = settings.auto_resume_after_quota_reset && settings.provider == Provider::Codex;
-    if settings.provider == Provider::Claude {
+    if matches!(settings.provider, Provider::Claude | Provider::Antigravity) {
         status.targets.clear();
     }
     status.last_successful_sample_at = usage.as_ref().map(|v| v.fetched_at);
@@ -332,8 +335,8 @@ fn derive_summary(
         status.summary = "off".into();
         return;
     }
-    if status.provider == Provider::Claude {
-        // An old Claude sample is normal while Claude Code is idle, and the
+    if matches!(status.provider, Provider::Claude | Provider::Antigravity) {
+        // An old statusline sample is normal while the CLI is idle, and the
         // hook judges it by its reset time, so only a failed read needs
         // attention.
         status.summary = match usage {

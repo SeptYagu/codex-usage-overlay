@@ -23,8 +23,8 @@ const fs = require('node:fs');
                     await page.setViewportSize({ width: 1600, height: 1000 });
                     await page.evaluate(settings => window.qa.render(settings, null, false, 'overlay', 'multi'), { provider: 'codex', language, overlayLayout, scalePercent });
                     await page.evaluate(() => window.qaInvocations = []);
-                    const order = ['claude', 'dsh', 'codex']; const values = [41, 23, 69];
-                    for (let index = 0; index < 3; index++) {
+                    const order = ['claude', 'dsh', 'antigravity', 'codex']; const values = [41, 23, 55, 69];
+                    for (let index = 0; index < 4; index++) {
                         const logo = page.locator('.overlay-provider');
                         if (index === 0) await logo.click();
                         else { await logo.focus(); await page.keyboard.press(index === 1 ? 'Enter' : 'Space'); }
@@ -42,14 +42,14 @@ const fs = require('node:fs');
                         });
                         const item = { colorScheme, dpr, language, overlayLayout, scalePercent, provider: order[index], ...metrics }; results.push(item);
                         if (!metrics.text.includes(`${values[index]}%`) || metrics.pointer !== 'auto' || metrics.drag || metrics.clipped || /switchProviderHint|singleProviderHint/.test(metrics.label)
-                            || metrics.credits !== (order[index] !== 'claude')) failures.push(item);
+                            || metrics.credits !== (order[index] !== 'claude' && order[index] !== 'antigravity')) failures.push(item);
                     }
                     if (dpr === 1 && scalePercent === 100 && overlayLayout === 'grouped') await page.locator('.overlay-capsule').screenshot({ path: `output/multi-provider-qa/overlay-${language}-${colorScheme}.png` });
                 }
                 for (const size of [{ width:1320,height:800 },{ width: 960, height: 620 }, { width: 760, height: 500 }]) {
                     await page.setViewportSize(size);
                     await page.evaluate(language => window.qa.render({ language, provider: 'codex' }, null, false, 'settings'), language);
-                    for (const provider of ['codex', 'claude', 'dsh']) {
+                    for (const provider of ['codex', 'claude', 'dsh', 'antigravity']) {
                         await page.locator(`#settings-tab-${provider}`).click();
                         await page.locator(`[data-provider-settings="${provider}"]`).scrollIntoViewIfNeeded();
                         const metrics = await page.evaluate(provider => {

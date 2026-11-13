@@ -1,5 +1,7 @@
 # Handoff index
 
+2026-11-13 Antigravity provider support: [Antigravity provider support plan](2026-11-13-antigravity-provider-support-plan.md). Adds zero-credential Antigravity CLI statusline quota capture (`antigravity-usage-bridge.exe`), multi-pool selection (`auto` / `gemini` / `argon` / `3p`) with AI Credits support, `PreInvocation`-only low-quota guard, independent monitor/settings/carousel/tray integration, and release packaging.
+
 2026-11-08 Multi-provider 5H prediction and carousel appearance: [implementation review and repair](2026-11-08-multi-provider-estimator-review.md), source `f2212ff`, review `41b4cd1`, repair `8c25c4a`. The review's one P2 settings fallback defect is closed. The [carousel appearance plan](2026-11-08-carousel-overlay-appearance-plan.md) records the v1.7.0 baseline and was implemented in `f2212ff`.
 
 2026-11-06 Three-plan implementation: [source, review and repair milestones](2026-11-06-three-plan-implementation.md). All three source/review/repair stages are complete and separately pushed. Final frontend 184/build, Rust 478 + 10, DSH 16, packaging 6, parity 96 and Edge 634 + 252 + 200 pass; native installed acceptance remains separate. No release or installation.

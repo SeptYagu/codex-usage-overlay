@@ -16,7 +16,7 @@ const {chromium}=require(process.argv[2]||'playwright');
       const context=await browser.newContext({viewport:{width:2200,height:1000},deviceScaleFactor:dpr,colorScheme:theme});const page=await context.newPage();
       await page.goto('http://127.0.0.1:1427/scripts/display-controls-qa/index.html');await page.waitForFunction(()=>window.qa);
       for(const language of ['en-US','zh-CN','zh-Hant'])for(const overlayLayout of ['grouped','stacks'])for(const showProviderLogo of [true,false]){
-        for(const provider of ['codex','claude','dsh']){
+        for(const provider of ['codex','claude','dsh','antigravity']){
           const sizes=[];
           for(const quotaCarouselEnabled of [false,true]){
             await page.evaluate(s=>window.qa.render(s,null,false,'overlay','carousel'),{provider,language,overlayLayout,showProviderLogo,quotaCarouselEnabled,scalePercent:175});

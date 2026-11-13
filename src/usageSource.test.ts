@@ -23,6 +23,9 @@ describe('usage source isolation', () => {
     for (const patch of [{ dshBaseUrl: 'http://other.test' }, { dshInstanceId: 'other' }, { dshAccountId: 'other' }, { dshSessionIds: ['other'] }, { provider: 'codex' as const }]) {
       expect(sourceBinding({ ...settings, ...patch })).not.toBe(sourceBinding(settings));
     }
+    expect(sourceBinding({ ...DEFAULT_SETTINGS, provider: 'antigravity', antigravityPool: 'argon' })).not.toBe(
+      sourceBinding({ ...DEFAULT_SETTINGS, provider: 'antigravity', antigravityPool: 'gemini' }),
+    );
     expect(sourceBinding({ ...settings, showCredits: false })).toBe(sourceBinding(settings));
     expect(sourceBinding({ ...settings, dshSessionIds: ['b', 'a'] })).toBe(sourceBinding({ ...settings, dshSessionIds: ['a', 'b'] }));
   });

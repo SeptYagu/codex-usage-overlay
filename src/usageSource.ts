@@ -8,9 +8,13 @@ export interface UsageSourceScope {
 }
 
 export function sourceBinding(settings: OverlaySettings): string {
-  return JSON.stringify(settings.provider === 'dsh'
-    ? [settings.provider, settings.dshBaseUrl, settings.dshInstanceId, settings.dshAccountId, [...settings.dshSessionIds].sort()]
-    : [settings.provider]);
+  if (settings.provider === 'dsh') {
+    return JSON.stringify([settings.provider, settings.dshBaseUrl, settings.dshInstanceId, settings.dshAccountId, [...settings.dshSessionIds].sort()]);
+  }
+  if (settings.provider === 'antigravity') {
+    return JSON.stringify([settings.provider, settings.antigravityPool ?? 'auto']);
+  }
+  return JSON.stringify([settings.provider]);
 }
 
 export function usageSourceScope(envelope: SettingsEnvelope, settings: OverlaySettings,

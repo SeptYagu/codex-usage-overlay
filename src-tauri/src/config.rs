@@ -31,20 +31,37 @@ fn recover_message<'de,D:serde::Deserializer<'de>>(d:D)->Result<String,D::Error>
     let v=serde_json::Value::deserialize(d)?;Ok(v.as_str().filter(|s|crate::pause_message::valid_message(s)).unwrap_or("").into())
 }
 
+pub use crate::antigravity::shared::PoolKind as AntigravityPool;
+
 /// Whose limits the overlay reads. One provider is active at a time.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Claude,
     Dsh,
+    Antigravity,
     #[default]
     Codex,
 }
 
 impl Provider {
-    pub const ALL: [Self; 3] = [Self::Codex, Self::Claude, Self::Dsh];
-    pub fn index(self) -> u8 { match self { Self::Codex => 0, Self::Claude => 1, Self::Dsh => 2 } }
-    pub fn key(self) -> &'static str { match self { Self::Codex => "codex", Self::Claude => "claude", Self::Dsh => "dsh" } }
+    pub const ALL: [Self; 4] = [Self::Codex, Self::Claude, Self::Dsh, Self::Antigravity];
+    pub fn index(self) -> u8 {
+        match self {
+            Self::Codex => 0,
+            Self::Claude => 1,
+            Self::Dsh => 2,
+            Self::Antigravity => 3,
+        }
+    }
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Dsh => "dsh",
+            Self::Antigravity => "antigravity",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -113,6 +130,7 @@ pub fn source_key(settings: &OverlaySettings) -> String {
     match settings.provider {
         Provider::Codex => "codex".into(),
         Provider::Claude => "claude".into(),
+        Provider::Antigravity => format!("antigravity-{}", settings.antigravity_pool.key()),
         Provider::Dsh => {
             let identity = serde_json::to_string(&(
                 settings.dsh_base_url.trim().trim_end_matches('/'),
@@ -150,6 +168,7 @@ pub fn same_source(left: &OverlaySettings, right: &OverlaySettings) -> bool {
                 && left.dsh_instance_id == right.dsh_instance_id
                 && left.dsh_account_id == right.dsh_account_id
                 && left.dsh_session_ids == right.dsh_session_ids))
+        && (left.provider != Provider::Antigravity || left.antigravity_pool == right.antigravity_pool)
 }
 
 fn default_carousel_interval() -> u32 { 8 }
@@ -204,6 +223,9 @@ pub struct OverlaySettings {
     /// Off by default: it reads a credential, so it is never armed silently.
     #[serde(default)]
     pub claude_live_polling: bool,
+    /// Which Antigravity quota pool (`auto`, `gemini`, `argon`, `3p`) to display and guard.
+    #[serde(default)]
+    pub antigravity_pool: AntigravityPool,
     /// Whether the capsule shows the active provider's logo.
     #[serde(default = "default_true")]
     pub show_provider_logo: bool,
@@ -311,6 +333,7 @@ impl Default for OverlaySettings {
             dsh_five_hour_threshold_percent: 0,
             dsh_weekly_threshold_percent: 0,
             claude_live_polling: false,
+            antigravity_pool: AntigravityPool::default(),
             show_provider_logo: default_true(),
             overlay_layout: OverlayLayout::default(),
             scale_percent: default_scale(),
@@ -445,6 +468,7 @@ impl OverlaySettings {
             scoped.dsh_five_hour_threshold_percent = 0; scoped.dsh_weekly_threshold_percent = 0;
         }
         if provider != Provider::Claude { scoped.claude_live_polling = false; }
+        if provider != Provider::Antigravity { scoped.antigravity_pool = AntigravityPool::default(); }
         scoped
     }
 }

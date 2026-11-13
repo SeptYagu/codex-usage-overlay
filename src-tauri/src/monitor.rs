@@ -185,12 +185,20 @@ impl Registry {
         {
             eprintln!("Could not update Claude guard preferences: {error}");
         }
+        let antigravity = settings.for_provider(Provider::Antigravity);
+        if let Err(error) = crate::antigravity::install::write_guard_config(
+            owner.config_manager.runtime_dir(),
+            &antigravity,
+        ) {
+            eprintln!("Could not update Antigravity guard preferences: {error}");
+        }
     }
 
     pub fn next(&self, current: Provider) -> Option<Provider> {
         let all = self.all();
-        (1..=3)
-            .map(|offset| Provider::ALL[(current.index() as usize + offset) % 3])
+        let count = Provider::ALL.len();
+        (1..count)
+            .map(|offset| Provider::ALL[(current.index() as usize + offset) % count])
             .find(|p| {
                 *p != current
                     && all[p.index() as usize]

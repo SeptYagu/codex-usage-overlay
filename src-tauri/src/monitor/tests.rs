@@ -81,20 +81,22 @@ async fn background_reads_have_separate_caches_files_and_do_not_repaint_the_sele
     let registry = owner.monitors.get().unwrap();
     let source = Source::default();
     let runtimes = registry.all();
-    let (a, b, c) = tokio::join!(
+    let (a, b, c, d) = tokio::join!(
         refresh_usage(&source, &runtimes[0]),
         refresh_usage(&source, &runtimes[1]),
-        refresh_usage(&source, &runtimes[2])
+        refresh_usage(&source, &runtimes[2]),
+        refresh_usage(&source, &runtimes[3])
     );
     assert_eq!(
         [
             a.unwrap().five_hour_remaining_percent,
             b.unwrap().five_hour_remaining_percent,
-            c.unwrap().five_hour_remaining_percent
+            c.unwrap().five_hour_remaining_percent,
+            d.unwrap().five_hour_remaining_percent
         ],
-        [Some(90), Some(70), Some(50)]
+        [Some(90), Some(70), Some(50), Some(30)]
     );
-    assert_eq!(source.reads.load(Ordering::SeqCst), 3);
+    assert_eq!(source.reads.load(Ordering::SeqCst), 4);
     assert_eq!(
         source.frames.lock().unwrap().len(),
         1,
@@ -104,7 +106,7 @@ async fn background_reads_have_separate_caches_files_and_do_not_repaint_the_sele
         .iter()
         .map(|r| r.config_manager.burn_rate_state_path())
         .collect();
-    assert_eq!(paths.len(), 3);
+    assert_eq!(paths.len(), 4);
     assert!(paths.iter().all(|p| p.is_file()));
     assert_eq!(registry.next(Provider::Codex), Some(Provider::Claude));
     let before: Vec<_> = runtimes
@@ -116,7 +118,7 @@ async fn background_reads_have_separate_caches_files_and_do_not_repaint_the_sele
             )
         })
         .collect();
-    for provider in [Provider::Claude, Provider::Dsh, Provider::Codex] {
+    for provider in [Provider::Claude, Provider::Dsh, Provider::Antigravity, Provider::Codex] {
         crate::commands::apply_settings_patch(
             &source,
             &owner,
@@ -130,6 +132,7 @@ async fn background_reads_have_separate_caches_files_and_do_not_repaint_the_sele
             Provider::Codex => "90%",
             Provider::Claude => "70%",
             Provider::Dsh => "50%",
+            Provider::Antigravity => "30%",
         }));
         let remaining = 90.0 - provider.index() as f64 * 20.0;
         assert_eq!(
@@ -154,10 +157,16 @@ async fn background_reads_have_separate_caches_files_and_do_not_repaint_the_sele
     }
     assert_eq!(
         source.reads.load(Ordering::SeqCst),
-        3,
+        4,
         "display selection must not fetch"
     );
-    let (one, two, three) = tokio::join!(
+    let (one, two, three, four) = tokio::join!(
+        crate::commands::apply_settings_patch(
+            &source,
+            &owner,
+            serde_json::json!({"cycleProvider":true}),
+            false
+        ),
         crate::commands::apply_settings_patch(
             &source,
             &owner,
@@ -181,11 +190,12 @@ async fn background_reads_have_separate_caches_files_and_do_not_repaint_the_sele
         [
             one.unwrap().settings.provider,
             two.unwrap().settings.provider,
-            three.unwrap().settings.provider
+            three.unwrap().settings.provider,
+            four.unwrap().settings.provider
         ],
-        [Provider::Claude, Provider::Dsh, Provider::Codex]
+        [Provider::Claude, Provider::Dsh, Provider::Antigravity, Provider::Codex]
     );
-    assert_eq!(source.reads.load(Ordering::SeqCst), 3);
+    assert_eq!(source.reads.load(Ordering::SeqCst), 4);
     registry.shutdown();
     drop(runtimes);
     drop(owner);
@@ -344,7 +354,7 @@ async fn account_rebinding_replaces_only_its_source_and_keeps_control_status_rev
             tokio::time::timeout(std::time::Duration::from_secs(2), registry.snapshots())
                 .await
                 .expect("a pending DSH action must not block other providers' snapshots");
-        assert_eq!(snapshots.len(), 3);
+        assert_eq!(snapshots.len(), 4);
     }
     old.dsh_control.lock().unwrap().accepted = 9;
     let before = crate::pause_control::status::snapshot(&old).await;
@@ -604,25 +614,25 @@ async fn carousel_ticks_publish_effective_cache_selection_without_writes_reads_o
     let saved=std::fs::read(owner.config_manager.runtime_dir().join("settings.json")).unwrap();
     let baseline:Vec<_>=registry.all().into_iter().map(|s|(s.settings_revision.load(Ordering::Acquire),s.source_generation.load(Ordering::Acquire),std::fs::read(s.config_manager.burn_rate_state_path()).unwrap())).collect();
     let now=std::time::Instant::now();let revision=owner.settings_revision.load(Ordering::Acquire);
-    for (offset,provider) in [(9,Provider::Claude),(18,Provider::Dsh),(27,Provider::Codex)] {
+    for (offset,provider) in [(9,Provider::Claude),(18,Provider::Dsh),(27,Provider::Antigravity),(36,Provider::Codex)] {
         let snapshot=crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(offset),false).await;
         assert_eq!(snapshot.effective_provider,provider);assert_eq!(crate::display::effective(&owner),provider);
-        assert_eq!(snapshot.manual_provider,Provider::Codex);assert_eq!(snapshot.candidates.len(),3);
+        assert_eq!(snapshot.manual_provider,Provider::Codex);assert_eq!(snapshot.candidates.len(),4);
         assert!(registry.get(provider).is_displayed());
-        assert!(source.frames.lock().unwrap().last().unwrap().tooltip.contains(match provider{Provider::Claude=>"Claude",Provider::Dsh=>"DSH",_=>"Codex"}));
+        assert!(source.frames.lock().unwrap().last().unwrap().tooltip.contains(match provider{Provider::Claude=>"Claude",Provider::Dsh=>"DSH",Provider::Antigravity=>"Antigravity",_=>"Codex"}));
     }
-    assert_eq!(owner.settings_revision.load(Ordering::Acquire),revision);assert_eq!(source.reads.load(Ordering::Acquire),3);
+    assert_eq!(owner.settings_revision.load(Ordering::Acquire),revision);assert_eq!(source.reads.load(Ordering::Acquire),4);
     assert_eq!(std::fs::read(owner.config_manager.runtime_dir().join("settings.json")).unwrap(),saved);
     for (s,before) in registry.all().iter().zip(baseline){assert_eq!(s.settings_revision.load(Ordering::Acquire),before.0);assert_eq!(s.source_generation.load(Ordering::Acquire),before.1);assert_eq!(std::fs::read(s.config_manager.burn_rate_state_path()).unwrap(),before.2);}
     assert_eq!(source.display_events.lock().unwrap().last().unwrap().effective_provider,Provider::Codex);
-    let events=source.display_events.lock().unwrap().len();crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(28),false).await;assert_eq!(source.display_events.lock().unwrap().len(),events);
+    let events=source.display_events.lock().unwrap().len();crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(37),false).await;assert_eq!(source.display_events.lock().unwrap().len(),events);
     let _=std::fs::remove_dir_all(dir);
 }
 #[tokio::test]
 async fn carousel_filters_selected_fresh_identity_bound_sources_and_retains_transient_cached_readings() {
     let (owner,dir)=owner();let source=Source::default();let registry=owner.monitors.get().unwrap();
     for state in registry.all(){refresh_usage(&source,&state).await.unwrap();}
-    crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselEnabled":true,"providerPreferences":{"dsh":{"carouselIncluded":false}}}),false).await.unwrap();
+    crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselEnabled":true,"providerPreferences":{"dsh":{"carouselIncluded":false},"antigravity":{"carouselIncluded":false}}}),false).await.unwrap();
     let claude=registry.get(Provider::Claude);claude.reader.lock().unwrap().failure=Some(crate::codex::reader::ReadFailure::timeout(crate::codex::reader::ReadStage::Quota));
     let now=std::time::Instant::now();let snapshot=crate::display::tick(&source,&owner,now,false).await;assert_eq!(snapshot.candidates.len(),2);
     claude.reader.lock().unwrap().failure=Some(crate::codex::reader::ReadFailure::new(crate::codex::reader::ReadStage::Quota,crate::codex::reader::FailureKind::Authentication));
@@ -631,7 +641,7 @@ async fn carousel_filters_selected_fresh_identity_bound_sources_and_retains_tran
     assert_eq!(crate::display::tick(&source,&owner,now,false).await.candidates.len(),1);
     let codex=registry.get(Provider::Codex);codex.last_usage.lock().await.as_mut().unwrap().fetched_at-=121;
     let snapshot=crate::display::tick(&source,&owner,now,false).await;assert!(snapshot.candidates.is_empty());assert_eq!(snapshot.effective_provider,Provider::Codex);assert_eq!(snapshot.status,"waiting");
-    assert_eq!(source.reads.load(Ordering::Acquire),3);let _=std::fs::remove_dir_all(dir);
+    assert_eq!(source.reads.load(Ordering::Acquire),4);let _=std::fs::remove_dir_all(dir);
 }
 #[tokio::test]
 async fn manual_next_starts_from_effective_page_and_disabling_freezes_it_in_one_save() {
@@ -642,11 +652,11 @@ async fn manual_next_starts_from_effective_page_and_disabling_freezes_it_in_one_
     assert_eq!(crate::display::effective(&owner),Provider::Claude);
     let saved=crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"cycleProvider":true}),false).await.unwrap();assert_eq!(saved.settings.provider,Provider::Dsh);
     let held=crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(29),false).await;assert_eq!(held.effective_provider,Provider::Dsh);assert_eq!(held.status,"manualHold");
-    crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(31),false).await;assert_eq!(crate::display::effective(&owner),Provider::Codex);
+    crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(31),false).await;assert_eq!(crate::display::effective(&owner),Provider::Antigravity);
     let before=owner.settings_revision.load(Ordering::Acquire);
-    let frozen=crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselEnabled":false}),false).await.unwrap();assert_eq!(frozen.settings.provider,Provider::Codex);assert_eq!(frozen.revision,before+1);
-    assert_eq!(owner.config_manager.load_settings().provider,Provider::Codex);
-    assert_eq!(crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(60),false).await.effective_provider,Provider::Codex);
+    let frozen=crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselEnabled":false}),false).await.unwrap();assert_eq!(frozen.settings.provider,Provider::Antigravity);assert_eq!(frozen.revision,before+1);
+    assert_eq!(owner.config_manager.load_settings().provider,Provider::Antigravity);
+    assert_eq!(crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(60),false).await.effective_provider,Provider::Antigravity);
     let unchanged=std::fs::read(owner.config_manager.runtime_dir().join("settings.json")).unwrap();
     assert!(crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselIntervalSeconds":2}),false).await.is_err());assert_eq!(std::fs::read(owner.config_manager.runtime_dir().join("settings.json")).unwrap(),unchanged);
     let _=std::fs::remove_dir_all(dir);

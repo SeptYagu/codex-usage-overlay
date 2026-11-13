@@ -250,6 +250,7 @@ impl UsageSource for AppHandle {
         let settings = state.settings.lock().await.clone();
         match settings.provider {
             Provider::Claude => return read_claude_usage(state, generation).await,
+            Provider::Antigravity => return read_antigravity_usage(state, &settings, generation).await,
             Provider::Dsh => return read_dsh_usage(state, &settings, generation).await,
             Provider::Codex => {}
         }
@@ -336,6 +337,30 @@ async fn read_claude_usage(state: &AppState, generation: u64) -> Result<RawCodex
             status.phase = "error";
             status.failure = Some(error.clone());
             Err(crate::claude::source::describe(&error))
+        }
+    }
+}
+
+async fn read_antigravity_usage(state: &AppState, settings: &OverlaySettings, generation: u64) -> Result<RawCodexUsage, String> {
+    let now = reader::unix_now();
+    let dir = state.config_manager.runtime_dir();
+    let result = crate::antigravity::source::read_usage(dir, settings.antigravity_pool, now);
+    let _source_commit = state.settings_patch.lock().await;
+    if state.source_generation.load(Ordering::Acquire) != generation {
+        return Err("Usage source changed during the read".into());
+    }
+    let mut status = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+    status.observation = None;
+    match result {
+        Ok(sample) => {
+            status.failure = None;
+            status.phase = if sample.stale { "stale" } else { "success" };
+            Ok(sample.usage)
+        }
+        Err(error) => {
+            status.phase = "error";
+            status.failure = Some(error.clone());
+            Err(crate::antigravity::source::describe(&error))
         }
     }
 }
@@ -1096,9 +1121,10 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             "autoPauseWeeklyThresholdPercent" => value.as_u64().is_some_and(|n| (1..=10).contains(&n)),
             "refreshIntervalSeconds" => value.as_u64().is_some_and(|n| (15..=3600).contains(&n)),
             "language" => matches!(value.as_str(), Some("auto" | "en-US" | "zh-CN" | "zh-Hant")),
-            "provider" => matches!(value.as_str(), Some("codex" | "claude" | "dsh")),
+            "provider" => matches!(value.as_str(), Some("codex" | "claude" | "dsh" | "antigravity")),
+            "antigravityPool" => matches!(value.as_str(), Some("auto" | "gemini" | "argon" | "3p")),
             "providerPreferences" => value.as_object().is_some_and(|providers| !providers.is_empty() && providers.iter().all(|(provider, fields)| {
-                matches!(provider.as_str(), "codex" | "claude" | "dsh") && fields.as_object().is_some_and(|fields| !fields.is_empty() && fields.iter().all(|(key, value)| match key.as_str() {
+                matches!(provider.as_str(), "codex" | "claude" | "dsh" | "antigravity") && fields.as_object().is_some_and(|fields| !fields.is_empty() && fields.iter().all(|(key, value)| match key.as_str() {
                     "fiveHourBurnRateAlgorithm" => matches!(value.as_str(),Some("legacy"|"weighted"|"personalized")),
                     "monitorEnabled" | "protectionEnabled" | "carouselIncluded" => value.is_boolean(),
                     "fiveHourResetNotification" | "weeklyResetNotification" => value.is_boolean(),
@@ -1486,6 +1512,9 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     if let Err(error) = crate::claude::install::write_guard_config(state.config_manager.runtime_dir(), &envelope.settings) {
         eprintln!("Could not write the Claude guard preferences: {error}");
     }
+    if let Err(error) = crate::antigravity::install::write_guard_config(state.config_manager.runtime_dir(), &envelope.settings) {
+        eprintln!("Could not write the Antigravity guard preferences: {error}");
+    }
 
     // The active period bookkeeping follows the switch. A session that comes
     // back while the switch is off must not reuse the period identity of its
@@ -1507,7 +1536,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
             *state.claude_live.lock().unwrap_or_else(|p| p.into_inner()) = Default::default();
         }
         if provider_changed || changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota" | "claudeLivePolling"
-            | "autoPauseFiveHourThresholdPercent" | "autoPauseWeeklyThresholdPercent"
+            | "antigravityPool" | "autoPauseFiveHourThresholdPercent" | "autoPauseWeeklyThresholdPercent"
             | "dshFiveHourThresholdPercent" | "dshWeeklyThresholdPercent")) {
             polling.request_now(std::time::Instant::now());
         }
@@ -1671,6 +1700,49 @@ pub async fn claude_disconnect(state: State<'_, Arc<AppState>>) -> Result<crate:
     let settings_path = crate::claude::install::claude_settings_path().ok_or("Could not locate the Claude Code settings folder")?;
     crate::claude::install::disconnect(&settings_path, state.config_manager.runtime_dir())?;
     claude_connection_status(state).await
+}
+
+#[tauri::command]
+pub async fn antigravity_connection_status(state: State<'_, Arc<AppState>>) -> Result<crate::antigravity::install::AntigravityConnectionStatus, String> {
+    let settings_path = crate::antigravity::install::cli_settings_path();
+    let hooks_path = crate::antigravity::install::hooks_path();
+    let bridge = crate::antigravity::install::bridge_path();
+    let runtime = crate::monitor::selected(state.inner(), Provider::Antigravity);
+    let runtime_ref = &runtime;
+    let settings = runtime_ref.settings.lock().await.clone();
+    let mut status = crate::antigravity::install::status(
+        settings_path.as_deref(),
+        hooks_path.as_deref(),
+        state.config_manager.runtime_dir(),
+        bridge.as_deref(),
+        settings.antigravity_pool,
+    );
+    if settings.provider == Provider::Antigravity {
+        let failure = runtime_ref.reader.lock().unwrap_or_else(|p| p.into_inner()).failure.clone();
+        status.read_failure = failure.as_ref().map(|f| f.kind);
+        status.read_http_status = failure.and_then(|f| f.http_status);
+    }
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn antigravity_connect(state: State<'_, Arc<AppState>>) -> Result<crate::antigravity::install::AntigravityConnectionStatus, String> {
+    let settings_path = crate::antigravity::install::cli_settings_path().ok_or("Could not locate the Antigravity CLI settings folder")?;
+    let hooks_path = crate::antigravity::install::hooks_path().ok_or("Could not locate the Antigravity hooks folder")?;
+    let bridge = crate::antigravity::install::bridge_path().ok_or("Could not locate the overlay executable")?;
+    crate::antigravity::install::connect(&settings_path, &hooks_path, state.config_manager.runtime_dir(), &bridge)?;
+    let runtime = crate::monitor::selected(state.inner(), Provider::Antigravity);
+    runtime.polling.lock().unwrap_or_else(|p| p.into_inner()).request_now(std::time::Instant::now());
+    runtime.poll_wake.notify_one();
+    antigravity_connection_status(state).await
+}
+
+#[tauri::command]
+pub async fn antigravity_disconnect(state: State<'_, Arc<AppState>>) -> Result<crate::antigravity::install::AntigravityConnectionStatus, String> {
+    let settings_path = crate::antigravity::install::cli_settings_path().ok_or("Could not locate the Antigravity CLI settings folder")?;
+    let hooks_path = crate::antigravity::install::hooks_path().ok_or("Could not locate the Antigravity hooks folder")?;
+    crate::antigravity::install::disconnect(&settings_path, &hooks_path, state.config_manager.runtime_dir())?;
+    antigravity_connection_status(state).await
 }
 
 pub(crate) fn set_main_mouse_passthrough(app: &AppHandle, enabled: bool) -> Result<(), String> {
@@ -2146,20 +2218,10 @@ fn install_verified_bytes(
     std::io::copy(&mut helper_archive, &mut helper_file).map_err(|error| error.to_string())?;
     drop(helper_file);
     drop(helper_archive);
-    // Archives before the Claude provider have no bridge. Claude Code may be
-    // running the current one, so a failed replacement keeps it and the
-    // update continues.
-    if let Ok(mut bridge_archive) = archive.by_name(crate::claude::install::BRIDGE_EXE) {
-        if bridge_archive.size() <= 64 * 1024 * 1024 {
-            let bridge = directory.join(crate::claude::install::BRIDGE_EXE);
-            let staged_bridge = bridge.with_extension("exe.next");
-            let copied = std::fs::File::create(&staged_bridge)
-                .and_then(|mut file| std::io::copy(&mut bridge_archive, &mut file));
-            if copied.is_err() || std::fs::rename(&staged_bridge, &bridge).is_err() {
-                let _ = std::fs::remove_file(&staged_bridge);
-            }
-        }
-    }
+    // Archives before a bridge was added omit that helper; a busy bridge
+    // keeps the current binary and the update continues.
+    replace_optional_bridge(&mut archive, &directory, crate::claude::install::BRIDGE_EXE);
+    replace_optional_bridge(&mut archive, &directory, crate::antigravity::install::BRIDGE_EXE);
 
     let mut command = std::process::Command::new(&staged_helper);
     command
@@ -2178,6 +2240,24 @@ fn install_verified_bytes(
         app.exit(0);
     }
     Ok(())
+}
+
+fn replace_optional_bridge<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    directory: &std::path::Path,
+    bridge_exe: &str,
+) {
+    if let Ok(mut bridge_archive) = archive.by_name(bridge_exe) {
+        if bridge_archive.size() <= 64 * 1024 * 1024 {
+            let bridge = directory.join(bridge_exe);
+            let staged_bridge = bridge.with_extension("exe.next");
+            let copied = std::fs::File::create(&staged_bridge)
+                .and_then(|mut file| std::io::copy(&mut bridge_archive, &mut file));
+            if copied.is_err() || std::fs::rename(&staged_bridge, &bridge).is_err() {
+                let _ = std::fs::remove_file(&staged_bridge);
+            }
+        }
+    }
 }
 
 async fn prepare_update(app: &AppHandle, state: &AppState) -> Result<(), String> {

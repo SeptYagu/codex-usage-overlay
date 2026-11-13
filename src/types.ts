@@ -21,7 +21,8 @@ export interface CodexUsage {
   sourceGeneration?: number;
 }
 
-export type Provider = 'codex' | 'dsh' | 'claude';
+export type AntigravityPool = 'auto' | 'gemini' | 'argon' | '3p';
+export type Provider = 'codex' | 'dsh' | 'claude' | 'antigravity';
 
 export interface ProviderPreference {
   fiveHourBurnRateAlgorithm?: FiveHourBurnRateAlgorithm;
@@ -72,6 +73,7 @@ export interface OverlaySettings {
   dshFiveHourThresholdPercent: number;
   dshWeeklyThresholdPercent: number;
   claudeLivePolling: boolean;
+  antigravityPool?: AntigravityPool;
   showProviderLogo: boolean;
   overlayLayout: 'grouped' | 'stacks';
   scalePercent: number;
@@ -127,6 +129,7 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   dshFiveHourThresholdPercent: 0,
   dshWeeklyThresholdPercent: 0,
   claudeLivePolling: false,
+  antigravityPool: 'auto',
   showProviderLogo: true,
   overlayLayout: 'grouped',
   scalePercent: 175,
@@ -254,6 +257,25 @@ export interface ClaudeConnectionStatus {
   settingsPath: string | null;
   snapshotCapturedAt: number | null;
   claudeVersion: string | null;
+  blockedCount: number;
+  lastBlockedAt: number | null;
+  error: string | null;
+  readFailure: string | null;
+  readHttpStatus: number | null;
+}
+
+export interface AntigravityConnectionStatus {
+  statusLine: boolean;
+  hooks: boolean;
+  bridgeAvailable: boolean;
+  settingsPath: string | null;
+  hooksPath: string | null;
+  snapshotCapturedAt: number | null;
+  antigravityVersion: string | null;
+  activeModelId: string | null;
+  activeModelName: string | null;
+  detectedPool: AntigravityPool | null;
+  effectivePool: AntigravityPool | null;
   blockedCount: number;
   lastBlockedAt: number | null;
   error: string | null;

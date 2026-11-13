@@ -18,13 +18,14 @@ if ($Tag -cne "v$version") { throw 'Tag and app versions must match.' }
 $binary = Join-Path $repositoryRoot 'src-tauri\target\release\codex-usage-overlay.exe'
 $updaterHelper = Join-Path $repositoryRoot 'src-tauri\target\release\codex-usage-updater.exe'
 $claudeBridge = Join-Path $repositoryRoot 'src-tauri\target\release\claude-usage-bridge.exe'
+$antigravityBridge = Join-Path $repositoryRoot 'src-tauri\target\release\antigravity-usage-bridge.exe'
 $installerName = "codex-usage-overlay_${version}_x64-setup.exe"
 $msiName = "codex-usage-overlay_${version}_x64_en-US.msi"
 $installer = Join-Path $repositoryRoot "src-tauri\target\release\bundle\nsis\$installerName"
 $msi = Join-Path $repositoryRoot "src-tauri\target\release\bundle\msi\$msiName"
 $installerSignature = "$installer.sig"
 $msiSignature = "$msi.sig"
-foreach ($source in @($binary, $updaterHelper, $claudeBridge, $installer, $msi, $installerSignature, $msiSignature)) {
+foreach ($source in @($binary, $updaterHelper, $claudeBridge, $antigravityBridge, $installer, $msi, $installerSignature, $msiSignature)) {
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing release build: $source" }
 }
 New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
@@ -40,6 +41,7 @@ $archiveSources = [ordered]@{
     'CodexUsageOverlay.exe' = $binary
     'CodexUsageUpdater.exe' = $updaterHelper
     'claude-usage-bridge.exe' = $claudeBridge
+    'antigravity-usage-bridge.exe' = $antigravityBridge
     'README.md' = (Join-Path $repositoryRoot 'README.md')
     'README.en.md' = (Join-Path $repositoryRoot 'README.en.md')
 }

@@ -11,6 +11,7 @@ import { BurnRateOptions } from './BurnRateOptions';
 import { SoundPicker } from './SoundPicker';
 import { ProtectionStatusView } from './ProtectionStatus';
 import { ClaudeConnectionView } from './ClaudeConnection';
+import { AntigravityConnectionView } from './AntigravityConnection';
 import { DshConnectionView } from './DshConnection';
 
 interface SettingsViewProps {
@@ -25,6 +26,7 @@ const settingsTabs = [
   { id: 'codex', label: 'providerCodex', provider: 'codex' },
   { id: 'claude', label: 'providerClaude', provider: 'claude' },
   { id: 'dsh', label: 'providerDsh', provider: 'dsh' },
+  { id: 'antigravity', label: 'providerAntigravity', provider: 'antigravity' },
 ] as const;
 type SettingsTab = typeof settingsTabs[number]['id'];
 
@@ -120,6 +122,7 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
   // Claude has no credit balance and is protected by Claude Code hooks instead
   // of a Codex pause request.
   const claude = settings.provider === 'claude';
+  const antigravity = settings.provider === 'antigravity';
   const dsh = settings.provider === 'dsh';
   const fiveHourThreshold = dsh ? settings.dshFiveHourThresholdPercent : settings.autoPauseFiveHourThresholdPercent;
   const weeklyThreshold = dsh ? settings.dshWeeklyThresholdPercent : settings.autoPauseWeeklyThresholdPercent;
@@ -356,6 +359,7 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
           </p>
 
           {claude && <ClaudeConnectionView settings={settings} onPatchSettings={onPatchSettings} />}
+          {antigravity && <AntigravityConnectionView settings={settings} onPatchSettings={onPatchSettings} />}
           {dsh && <DshConnectionView settings={settings} onPatchSettings={onPatchSettings} />}
 
           <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
@@ -381,10 +385,10 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
               or, for Claude, lets the Claude Code hooks refuse new requests */}
           <div className="space-y-2.5 rounded-lg border border-slate-200 dark:border-slate-700 p-2.5">
             <label className={toggleRow}>
-              <span className="text-sm font-medium">{t(claude ? 'claudeGuardOnLowQuota' : 'autoPauseOnLowQuota')}</span>
+              <span className="text-sm font-medium">{t(claude ? 'claudeGuardOnLowQuota' : antigravity ? 'antigravityGuardOnLowQuota' : 'autoPauseOnLowQuota')}</span>
               <input
                 type="checkbox"
-                aria-label={t(claude ? 'claudeGuardOnLowQuota' : 'autoPauseOnLowQuota')}
+                aria-label={t(claude ? 'claudeGuardOnLowQuota' : antigravity ? 'antigravityGuardOnLowQuota' : 'autoPauseOnLowQuota')}
                 checked={settings.autoPauseOnLowQuota}
                 disabled={!preference.monitorEnabled}
                 onChange={(e) => onPatchSettings({ autoPauseOnLowQuota: e.target.checked })}
@@ -439,10 +443,10 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
             </div>
 
             <p className="px-1 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-              {t(claude ? 'claudeGuardHint' : dsh ? 'dshPauseHint' : 'autoPauseHint')}
+              {t(claude ? 'claudeGuardHint' : antigravity ? 'antigravityGuardHint' : dsh ? 'dshPauseHint' : 'autoPauseHint')}
             </p>
             {dsh && <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('quotaThresholdZeroHint')}</p>}
-            {!claude && <ProtectionStatusView settings={settings} onPatchSettings={onPatchSettings} />}
+            {!claude && !antigravity && <ProtectionStatusView settings={settings} onPatchSettings={onPatchSettings} />}
           </div>
 
           <BurnRateOptions provider={configurationProvider} algorithm={settings.fiveHourBurnRateAlgorithm??'legacy'} usage={monitors[configurationProvider]?.usage} onPatchSettings={onPatchSettings} />

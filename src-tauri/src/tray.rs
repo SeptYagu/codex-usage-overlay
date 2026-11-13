@@ -154,27 +154,33 @@ pub fn tray_presentation(
     // just as the overlay does. The tooltip separately reports read health.
     let visible_usage = usage;
     let claude = settings.provider == crate::config::Provider::Claude;
+    let antigravity = settings.provider == crate::config::Provider::Antigravity;
     let mut tooltip = match status {
         TrayReadStatus::Pending => "Codex Usage Overlay".to_string(),
-        TrayReadStatus::Error => match (crate::commands::resolve_locale(&settings.language), claude) {
-            ("zh-CN", false) => "Codex 用量读取失败",
-            ("zh-CN", true) => "Claude 用量读取失败",
-            ("zh-Hant", false) => "Codex 用量讀取失敗",
-            ("zh-Hant", true) => "Claude 用量讀取失敗",
-            (_, false) => "Failed to read Codex usage",
-            (_, true) => "Failed to read Claude usage",
+        TrayReadStatus::Error => match (crate::commands::resolve_locale(&settings.language), settings.provider) {
+            ("zh-CN", crate::config::Provider::Claude) => "Claude 用量读取失败",
+            ("zh-CN", crate::config::Provider::Antigravity) => "Antigravity 用量读取失败",
+            ("zh-CN", _) => "Codex 用量读取失败",
+            ("zh-Hant", crate::config::Provider::Claude) => "Claude 用量讀取失敗",
+            ("zh-Hant", crate::config::Provider::Antigravity) => "Antigravity 用量讀取失敗",
+            ("zh-Hant", _) => "Codex 用量讀取失敗",
+            (_, crate::config::Provider::Claude) => "Failed to read Claude usage",
+            (_, crate::config::Provider::Antigravity) => "Failed to read Antigravity usage",
+            (_, _) => "Failed to read Codex usage",
         }.to_string(),
         TrayReadStatus::Success => {
             let percent = |p: Option<u32>| p.map(|p| p.to_string()).unwrap_or_else(|| "--".into());
             let mut parts = Vec::new();
             if claude {
                 parts.push("Claude".to_string());
+            } else if antigravity {
+                parts.push("Antigravity".to_string());
             }
             if settings.show_five_hour_quota {
                 parts.push(format!("5H {}%", percent(visible_usage.and_then(|u| u.five_hour_remaining_percent))));
             }
             parts.push(format!("WK {}%", percent(visible_usage.and_then(|u| u.week_remaining_percent))));
-            if settings.show_credits && !claude {
+            if settings.show_credits && ((!claude && !antigravity) || visible_usage.is_some_and(|u| u.has_credits)) {
                 parts.push(format!("CR {}", visible_usage.map(|u| u.credits_display.as_str()).unwrap_or("—")));
             }
             parts.join(" | ")

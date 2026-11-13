@@ -86,11 +86,11 @@ describe.each(['grouped', 'stacks'] as const)('%s layout', (overlayLayout) => {
     expect(container.querySelectorAll('.overlay-divider').length).toBe(overlayLayout === 'grouped' ? 1 : 0);
   });
 
-  it.each(['codex', 'dsh', 'claude'] as const)('shows the %s logo before the quotas and never a Claude credit group', (provider) => {
+  it.each(['codex', 'dsh', 'claude', 'antigravity'] as const)('shows the %s logo before the quotas and never a Claude credit group', (provider) => {
     const { container, rerender } = render(
       <OverlayView settings={{ ...settings, provider, showProviderLogo: true }} usage={{ ...usage, hasCredits: provider !== 'claude' }} isLoading={false} />,
     );
-    const current = provider === 'claude' ? 'Claude' : provider === 'dsh' ? 'DSH Codex subscription' : 'Local Codex';
+    const current = provider === 'claude' ? 'Claude' : provider === 'dsh' ? 'DSH Codex subscription' : provider === 'antigravity' ? 'Antigravity' : 'Local Codex';
     const logo = screen.getByRole('button', { name: i18n.t('singleProviderHint', { current }) });
     expect(logo.classList.contains('overlay-provider')).toBe(true);
     expect(logo.querySelector('svg')?.getAttribute('data-provider')).toBe(provider);
@@ -101,8 +101,13 @@ describe.each(['grouped', 'stacks'] as const)('%s layout', (overlayLayout) => {
     expect(container.querySelectorAll('.overlay-divider').length)
       .toBe(overlayLayout === 'grouped' ? (provider !== 'claude' ? 3 : 2) : 0);
 
+    if (provider === 'antigravity') {
+      rerender(<OverlayView settings={{ ...settings, provider, showProviderLogo: true }} usage={{ ...usage, hasCredits: false }} isLoading={false} />);
+      expect(screen.queryByRole('group', { name: 'CREDITS' })).toBeNull();
+    }
+
     rerender(<OverlayView settings={{ ...settings, provider, showProviderLogo: false }} usage={usage} isLoading={false} />);
-    expect(screen.queryByRole('img', { name: provider === 'claude' ? 'Claude' : provider === 'dsh' ? 'DSH Codex subscription' : 'Local Codex' })).toBeNull();
+    expect(screen.queryByRole('img', { name: current })).toBeNull();
   });
 
   it.each(['∞', '—', '0'])('preserves credit state %s', (creditsDisplay) => {

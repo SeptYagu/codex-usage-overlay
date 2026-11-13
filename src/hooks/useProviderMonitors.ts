@@ -5,7 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { MonitorSnapshot, Provider } from '../types';
 
 export function mergeMonitorSnapshot(current: Partial<Record<Provider, MonitorSnapshot>>, next: MonitorSnapshot) {
-  if (!next || !['codex', 'claude', 'dsh'].includes(next.provider) || !Number.isSafeInteger(next.revision)
+  if (!next || !['codex', 'claude', 'dsh', 'antigravity'].includes(next.provider) || !Number.isSafeInteger(next.revision)
     || !Number.isSafeInteger(next.sourceGeneration)) return current;
   const old = current[next.provider];
   if (old && (next.sourceGeneration < old.sourceGeneration || next.revision <= old.revision)) return current;
