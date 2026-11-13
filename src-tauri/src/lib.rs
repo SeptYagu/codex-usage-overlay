@@ -39,6 +39,15 @@ pub fn run() {
     if let Err(error) = antigravity::install::write_guard_config(config_manager.runtime_dir(), &initial_settings.for_provider(config::Provider::Antigravity)) {
         eprintln!("Could not write the Antigravity guard preferences: {error}");
     }
+    if let (Some(settings_path), Some(hooks_path), Some(bridge)) = (
+        antigravity::install::cli_settings_path(),
+        antigravity::install::hooks_path(),
+        antigravity::install::bridge_path(),
+    ) {
+        if let Err(error) = antigravity::install::repair_if_needed(&settings_path, &hooks_path, config_manager.runtime_dir(), &bridge) {
+            eprintln!("Could not repair the Antigravity bridge registration: {error}");
+        }
+    }
 
     let app_state = Arc::new(AppState::new(config_manager.clone(), initial_settings.clone()));
     monitor::initialize(&app_state, &initial_settings);

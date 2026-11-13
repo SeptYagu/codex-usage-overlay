@@ -223,6 +223,10 @@ pub struct OverlaySettings {
     /// Off by default: it reads a credential, so it is never armed silently.
     #[serde(default)]
     pub claude_live_polling: bool,
+    /// Whether the Antigravity provider queries `agy -p "/usage"` periodically
+    /// (zero turns / zero tokens) so desktop and IDE sessions see live quotas.
+    #[serde(default = "default_true")]
+    pub antigravity_live_polling: bool,
     /// Which Antigravity quota pool (`auto`, `gemini`, `argon`, `3p`) to display and guard.
     #[serde(default)]
     pub antigravity_pool: AntigravityPool,
@@ -333,6 +337,7 @@ impl Default for OverlaySettings {
             dsh_five_hour_threshold_percent: 0,
             dsh_weekly_threshold_percent: 0,
             claude_live_polling: false,
+            antigravity_live_polling: default_true(),
             antigravity_pool: AntigravityPool::default(),
             show_provider_logo: default_true(),
             overlay_layout: OverlayLayout::default(),
@@ -468,7 +473,10 @@ impl OverlaySettings {
             scoped.dsh_five_hour_threshold_percent = 0; scoped.dsh_weekly_threshold_percent = 0;
         }
         if provider != Provider::Claude { scoped.claude_live_polling = false; }
-        if provider != Provider::Antigravity { scoped.antigravity_pool = AntigravityPool::default(); }
+        if provider != Provider::Antigravity {
+            scoped.antigravity_live_polling = false;
+            scoped.antigravity_pool = AntigravityPool::default();
+        }
         scoped
     }
 }

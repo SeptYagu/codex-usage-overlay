@@ -12,6 +12,7 @@ pub const SNAPSHOT_FILE: &str = "antigravity-rate-limits.json";
 pub const GUARD_FILE: &str = "antigravity-guard.json";
 pub const GUARD_STATE_FILE: &str = "antigravity-guard-state.json";
 pub const BRIDGE_FILE: &str = "antigravity-bridge.json";
+pub const BRIDGE_SHIM_FILE: &str = "antigravity-usage-bridge.cmd";
 /// Every command the overlay writes into Antigravity's configs contains this
 /// marker, so disconnecting removes only the entries it added.
 pub const BRIDGE_MARKER: &str = "antigravity-usage-bridge";
@@ -153,7 +154,7 @@ impl Snapshot {
         .to_ascii_lowercase();
         if haystack.contains("argon") || haystack.contains("orchestrator") {
             PoolKind::Argon
-        } else if ["claude", "gpt", "sonnet", "opus", "haiku"]
+        } else if ["claude", "gpt", "sonnet", "opus", "haiku", "anthropic"]
             .iter()
             .any(|needle| haystack.contains(needle))
         {
@@ -176,6 +177,33 @@ impl Snapshot {
             PoolKind::ThirdParty => self.third_party.clone(),
             PoolKind::Auto => unreachable!("resolve_pool never returns Auto"),
         }
+    }
+
+    /// Updates the snapshot's active model metadata from a hook payload. Clears
+    /// an earlier `active_model_id` if the hook supplies only a new display name
+    /// so `resolve_pool(Auto)` does not stay pinned to a prior model ID.
+    pub fn apply_hook_model(&mut self, input: &Value) -> bool {
+        let (id, name) = parse_hook_model(input);
+        let mut changed = false;
+        if let Some(id) = id {
+            if self.active_model_id.as_deref() != Some(id.as_str()) {
+                self.active_model_id = Some(id);
+                changed = true;
+            }
+            if let Some(name) = name {
+                if self.active_model_name.as_deref() != Some(name.as_str()) {
+                    self.active_model_name = Some(name);
+                    changed = true;
+                }
+            }
+        } else if let Some(name) = name {
+            if self.active_model_name.as_deref() != Some(name.as_str()) || self.active_model_id.is_some() {
+                self.active_model_id = None;
+                self.active_model_name = Some(name);
+                changed = true;
+            }
+        }
+        changed
     }
 }
 
@@ -223,44 +251,58 @@ fn assign_bucket(
     }
 }
 
-fn assign_nested_pool(obj: &Map<String, Value>, target: &mut PoolWindows) {
+fn assign_bucket_list(
+    items: &[Value],
+    now: i64,
+    gemini: &mut PoolWindows,
+    argon: &mut PoolWindows,
+    third_party: &mut PoolWindows,
+    generic: &mut PoolWindows,
+) {
+    for item in items {
+        let Some(obj) = item.as_object() else { continue };
+        let id = ["id", "bucket", "name", "quota_id", "quotaId", "pool"]
+            .iter()
+            .filter_map(|k| obj.get(*k))
+            .find_map(Value::as_str);
+        if let (Some(id), Some(window)) = (id, parse_window(item, now)) {
+            assign_bucket(id, window, gemini, argon, third_party, generic);
+        }
+    }
+}
+
+fn assign_nested_pool(obj: &Map<String, Value>, now: i64, target: &mut PoolWindows) {
     if let Some(w) = ["five_hour", "fiveHour", "5h"]
         .iter()
         .find_map(|k| obj.get(*k))
-        .and_then(parse_window)
+        .and_then(|v| parse_window(v, now))
     {
         target.five_hour = Some(w);
     }
     if let Some(w) = ["weekly", "seven_day", "sevenDay", "7d", "wtu_weekly", "wtuWeekly"]
         .iter()
         .find_map(|k| obj.get(*k))
-        .and_then(parse_window)
+        .and_then(|v| parse_window(v, now))
     {
         target.weekly = Some(w);
     }
 }
 
-fn parse_credits(input: &Value, limits: Option<&Value>) -> (bool, Option<String>, Option<String>) {
-    let raw = ["ai_credits", "aiCredits", "credits"]
-        .iter()
-        .filter_map(|key| input.get(*key).or_else(|| limits.and_then(|l| l.get(*key))))
-        .next();
-    let Some(raw) = raw else {
-        return (false, None, None);
-    };
-    let format_num = |value: f64| -> Option<String> {
-        if !value.is_finite() || value < 0.0 {
-            return None;
-        }
-        if (value - value.round()).abs() < 1e-6 {
-            Some(format!("{}", value.round() as i64))
-        } else {
-            Some(format!("{value:.1}"))
-        }
-    };
+fn format_credit_number(value: f64) -> Option<String> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    if (value - value.round()).abs() < 1e-6 {
+        Some(format!("{}", value.round() as i64))
+    } else {
+        Some(format!("{value:.1}"))
+    }
+}
+
+fn parse_credit_value(raw: &Value) -> (bool, Option<String>, Option<String>) {
     match raw {
         Value::Number(n) => {
-            if let Some(text) = n.as_f64().and_then(format_num) {
+            if let Some(text) = n.as_f64().and_then(format_credit_number) {
                 return (true, Some(text.clone()), Some(text));
             }
         }
@@ -272,11 +314,19 @@ fn parse_credits(input: &Value, limits: Option<&Value>) -> (bool, Option<String>
             }
         }
         Value::Object(map) => {
-            if let Some(num) = ["remaining", "balance", "available", "amount", "value"]
-                .iter()
-                .filter_map(|k| map.get(*k))
-                .find_map(Value::as_f64)
-                .and_then(format_num)
+            if let Some(num) = [
+                "remaining_credits",
+                "remainingCredits",
+                "remaining",
+                "balance",
+                "available",
+                "amount",
+                "value",
+            ]
+            .iter()
+            .filter_map(|k| map.get(*k))
+            .find_map(Value::as_f64)
+            .and_then(format_credit_number)
             {
                 return (true, Some(num.clone()), Some(num));
             }
@@ -296,11 +346,71 @@ fn parse_credits(input: &Value, limits: Option<&Value>) -> (bool, Option<String>
     (false, None, None)
 }
 
+fn parse_credits(input: &Value, limits: Option<&Value>) -> (bool, Option<String>, Option<String>) {
+    let raw = ["ai_credits", "aiCredits", "credits"]
+        .iter()
+        .filter_map(|key| input.get(*key).or_else(|| limits.and_then(|l| l.get(*key))))
+        .next();
+    let Some(raw) = raw else {
+        return (false, None, None);
+    };
+    parse_credit_value(raw)
+}
+
+fn extract_cli_version(input: &Value) -> Option<String> {
+    ["version", "cli_version", "cliVersion"]
+        .iter()
+        .filter_map(|key| input.get(*key))
+        .find_map(Value::as_str)
+        .filter(|v| safe_version(v))
+        .map(str::to_string)
+}
+
+fn extract_account_id(input: &Value) -> Option<String> {
+    first_nonempty_str(&[
+        input.get("account_id"),
+        input.get("accountId"),
+        input.get("email"),
+        input.pointer("/account/id"),
+        input.pointer("/account/email"),
+        input.get("user_email"),
+    ])
+}
+
+fn is_placeholder_model(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    lower.is_empty() || lower == "auto" || lower == "default"
+}
+
+/// Extracts an explicit model identifier/name reported on a `PreInvocation` hook payload.
+pub fn parse_hook_model(input: &Value) -> (Option<String>, Option<String>) {
+    let id = first_nonempty_str(&[
+        input.get("active_model_id"),
+        input.get("activeModelId"),
+        input.get("model_id"),
+        input.get("modelId"),
+        input.pointer("/model/id"),
+    ])
+    .filter(|value| !is_placeholder_model(value));
+    let name = first_nonempty_str(&[
+        input.get("active_model_name"),
+        input.get("activeModelName"),
+        input.get("model_name"),
+        input.get("modelName"),
+        input.pointer("/model/display_name"),
+        input.pointer("/model/displayName"),
+        input.pointer("/model/name"),
+        input.get("model").filter(|v| v.is_string()),
+    ])
+    .filter(|value| !is_placeholder_model(value));
+    (id, name)
+}
+
 /// Extracts all Antigravity quota buckets, active model identity, and optional
 /// AI Credits from the statusline JSON payload. Returns `None` when the input
 /// contains neither usable quota windows nor credits.
 pub fn parse_statusline(input: &Value, now: i64) -> Option<Snapshot> {
-    let limits = ["rate_limits", "rateLimits", "quotas", "limits", "buckets"]
+    let limits = ["rate_limits", "rateLimits", "quota", "quotas", "limits", "buckets"]
         .iter()
         .filter_map(|key| input.get(*key))
         .next();
@@ -314,29 +424,20 @@ pub fn parse_statusline(input: &Value, now: i64) -> Option<Snapshot> {
         match limits {
             Value::Object(map) => {
                 for (key, value) in map {
-                    if let Some(window) = parse_window(value) {
+                    if let Some(window) = parse_window(value, now) {
                         assign_bucket(key, window, &mut gemini, &mut argon, &mut third_party, &mut generic);
                     } else if let Some(nested) = value.as_object() {
                         match normalize_bucket_key(key).as_str() {
-                            "gemini" => assign_nested_pool(nested, &mut gemini),
-                            "argon" | "gemini-argon" => assign_nested_pool(nested, &mut argon),
-                            "3p" | "third-party" | "thirdparty" => assign_nested_pool(nested, &mut third_party),
+                            "gemini" => assign_nested_pool(nested, now, &mut gemini),
+                            "argon" | "gemini-argon" => assign_nested_pool(nested, now, &mut argon),
+                            "3p" | "third-party" | "thirdparty" => assign_nested_pool(nested, now, &mut third_party),
                             _ => {}
                         }
                     }
                 }
             }
             Value::Array(items) => {
-                for item in items {
-                    let Some(obj) = item.as_object() else { continue };
-                    let id = ["id", "bucket", "name", "quota_id", "quotaId", "pool"]
-                        .iter()
-                        .filter_map(|k| obj.get(*k))
-                        .find_map(Value::as_str);
-                    if let (Some(id), Some(window)) = (id, parse_window(item)) {
-                        assign_bucket(id, window, &mut gemini, &mut argon, &mut third_party, &mut generic);
-                    }
-                }
+                assign_bucket_list(items, now, &mut gemini, &mut argon, &mut third_party, &mut generic);
             }
             _ => {}
         }
@@ -358,28 +459,20 @@ pub fn parse_statusline(input: &Value, now: i64) -> Option<Snapshot> {
         input.get("active_model_id"),
         input.get("activeModelId"),
         input.get("model_id"),
+        input.get("modelId"),
         input.pointer("/model/id"),
     ]);
     let active_model_name = first_nonempty_str(&[
         input.get("active_model_name"),
         input.get("activeModelName"),
+        input.get("model_name"),
+        input.get("modelName"),
         input.pointer("/model/display_name"),
         input.pointer("/model/displayName"),
         input.pointer("/model/name"),
     ]);
-    let cli_version = ["version", "cli_version", "cliVersion"]
-        .iter()
-        .filter_map(|key| input.get(*key))
-        .find_map(Value::as_str)
-        .filter(|v| safe_version(v))
-        .map(str::to_string);
-    let account_id = first_nonempty_str(&[
-        input.get("account_id"),
-        input.get("accountId"),
-        input.pointer("/account/id"),
-        input.pointer("/account/email"),
-        input.get("user_email"),
-    ]);
+    let cli_version = extract_cli_version(input);
+    let account_id = extract_account_id(input);
 
     Some(Snapshot {
         schema_version: SCHEMA_VERSION,
@@ -397,12 +490,90 @@ pub fn parse_statusline(input: &Value, now: i64) -> Option<Snapshot> {
     })
 }
 
-fn parse_window(value: &Value) -> Option<WindowSnapshot> {
+/// Parses `agy -p "/usage" --output-format json` output into a quota snapshot.
+/// Rejects responses whose `num_turns` is non-zero or whose command is not
+/// `"usage"`, preventing fallback LLM output from being treated as quota data.
+pub fn parse_usage_command(input: &Value, now: i64) -> Option<Snapshot> {
+    if input.get("num_turns").and_then(Value::as_u64) != Some(0) {
+        return None;
+    }
+    if input.pointer("/command/name").and_then(Value::as_str) != Some("usage") {
+        return None;
+    }
+    let groups = input.pointer("/command/data/groups").and_then(Value::as_array)?;
+
+    let mut gemini = PoolWindows::default();
+    let mut argon = PoolWindows::default();
+    let mut third_party = PoolWindows::default();
+    let mut generic = PoolWindows::default();
+
+    for group in groups {
+        if let Some(buckets) = group.get("buckets").and_then(Value::as_array) {
+            assign_bucket_list(buckets, now, &mut gemini, &mut argon, &mut third_party, &mut generic);
+        }
+    }
+
+    if gemini.five_hour.is_none() {
+        gemini.five_hour = generic.five_hour;
+    }
+    if gemini.weekly.is_none() {
+        gemini.weekly = generic.weekly;
+    }
+
+    if gemini.is_empty() && argon.is_empty() && third_party.is_empty() {
+        return None;
+    }
+
+    let data = input.pointer("/command/data");
+    let account_id = data.and_then(extract_account_id).or_else(|| extract_account_id(input));
+    let cli_version = data.and_then(extract_cli_version).or_else(|| extract_cli_version(input));
+
+    Some(Snapshot {
+        schema_version: SCHEMA_VERSION,
+        gemini,
+        argon,
+        third_party,
+        active_model_id: None,
+        active_model_name: None,
+        credits_display: None,
+        credits_balance: None,
+        has_credits: false,
+        captured_at: now,
+        account_id,
+        cli_version,
+    })
+}
+
+/// Parses `agy -p "/credits" --output-format json` output into `(display, balance)`.
+pub fn parse_credits_command(input: &Value) -> Option<(Option<String>, Option<String>)> {
+    if input.get("num_turns").and_then(Value::as_u64) != Some(0) {
+        return None;
+    }
+    if input.pointer("/command/name").and_then(Value::as_str) != Some("credits") {
+        return None;
+    }
+    let data = input.pointer("/command/data")?;
+    let (has_credits, display, balance) = parse_credit_value(data);
+    has_credits.then_some((display, balance))
+}
+
+fn parse_window(value: &Value, now: i64) -> Option<WindowSnapshot> {
+    if value.get("disabled").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
     let used_percent = ["used_percentage", "usedPercentage", "used_percent", "usedPercent"]
         .iter()
         .filter_map(|key| value.get(*key))
         .find_map(Value::as_f64)
         .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
+        .or_else(|| {
+            ["used_fraction", "usedFraction"]
+                .iter()
+                .filter_map(|key| value.get(*key))
+                .find_map(Value::as_f64)
+                .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                .map(|used| (used * 100.0).clamp(0.0, 100.0))
+        })
         .or_else(|| {
             ["remaining_percentage", "remainingPercentage", "remaining_percent", "remainingPercent"]
                 .iter()
@@ -410,11 +581,27 @@ fn parse_window(value: &Value) -> Option<WindowSnapshot> {
                 .find_map(Value::as_f64)
                 .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
                 .map(|rem| (100.0 - rem).clamp(0.0, 100.0))
+        })
+        .or_else(|| {
+            ["remaining_fraction", "remainingFraction"]
+                .iter()
+                .filter_map(|key| value.get(*key))
+                .find_map(Value::as_f64)
+                .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                .map(|rem| ((1.0 - rem) * 100.0).clamp(0.0, 100.0))
         })?;
     let resets_at = ["resets_at", "resetsAt", "reset_at", "resetAt", "reset_time", "resetTime"]
         .iter()
         .filter_map(|key| value.get(*key))
-        .find_map(parse_timestamp);
+        .find_map(parse_timestamp)
+        .or_else(|| {
+            ["reset_in_seconds", "resetInSeconds"]
+                .iter()
+                .filter_map(|key| value.get(*key))
+                .find_map(Value::as_f64)
+                .filter(|v| v.is_finite() && (0.0..1e10).contains(v))
+                .map(|secs| now.saturating_add(secs.round() as i64))
+        });
     Some(WindowSnapshot { used_percent, resets_at })
 }
 
@@ -626,12 +813,123 @@ impl BridgeConfig {
     }
 }
 
+#[cfg(windows)]
+mod win32 {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::{Path, PathBuf};
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetShortPathNameW(lpsz_long_path: *const u16, lpsz_short_path: *mut u16, cch_buffer: u32) -> u32;
+        fn GetLongPathNameW(lpsz_short_path: *const u16, lpsz_long_path: *mut u16, cch_buffer: u32) -> u32;
+    }
+
+    unsafe fn transform_wide(
+        path: &Path,
+        func: unsafe extern "system" fn(*const u16, *mut u16, u32) -> u32,
+    ) -> Option<PathBuf> {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let len = func(wide.as_ptr(), std::ptr::null_mut(), 0);
+        if len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; len as usize];
+        let written = func(wide.as_ptr(), buf.as_mut_ptr(), len);
+        if written == 0 || written >= len {
+            return None;
+        }
+        Some(PathBuf::from(OsString::from_wide(&buf[..written as usize])))
+    }
+
+    pub fn short_path(path: &Path) -> PathBuf {
+        unsafe { transform_wide(path, GetShortPathNameW) }.unwrap_or_else(|| path.to_path_buf())
+    }
+
+    pub fn long_path(path: &Path) -> Option<PathBuf> {
+        unsafe { transform_wide(path, GetLongPathNameW) }
+    }
+}
+
+/// Resolves a path to its Windows 8.3 short form when available so `cmd /c`
+/// hook and statusline invocations avoid embedded quotes that Go's command
+/// runner escapes on Windows.
+pub fn resolve_execution_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        win32::short_path(path)
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+}
+
+pub fn is_unquoted_safe(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    !text.chars().any(char::is_whitespace) && !text.contains('"')
+}
+
 pub fn bridge_command(bridge: &Path, args: &str) -> String {
-    format!("\"{}\" {args}", bridge.to_string_lossy().replace('\\', "/"))
+    let resolved = resolve_execution_path(bridge);
+    let display = resolved.to_string_lossy();
+    if is_unquoted_safe(&resolved) {
+        format!("{display} {args}")
+    } else {
+        format!("\"{display}\" {args}")
+    }
+}
+
+fn split_command(command: &str) -> Option<(&str, &str)> {
+    let trimmed = command.trim();
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        let (exe, tail) = rest.split_once('"')?;
+        Some((exe, tail.trim()))
+    } else {
+        let (exe, tail) = trimmed.split_once(char::is_whitespace)?;
+        Some((exe, tail.trim()))
+    }
 }
 
 fn is_ours(command: Option<&Value>) -> bool {
-    command.and_then(Value::as_str).is_some_and(|c| c.contains(BRIDGE_MARKER))
+    let Some(cmd) = command.and_then(Value::as_str) else {
+        return false;
+    };
+    if cmd.to_ascii_lowercase().contains(BRIDGE_MARKER) {
+        return true;
+    }
+    let Some((exe, args)) = split_command(cmd) else {
+        return false;
+    };
+    if args != "statusline" && args != "hook invocation" {
+        return false;
+    }
+    #[cfg(windows)]
+    if let Some(expanded) = win32::long_path(Path::new(exe)) {
+        if expanded.to_string_lossy().to_ascii_lowercase().contains(BRIDGE_MARKER) {
+            return true;
+        }
+    }
+    Path::new(exe)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.starts_with("antigr") && lower.contains('~') && lower.ends_with(".exe")
+        })
+}
+
+pub fn needs_repair(settings: &Value, hooks_doc: &Value, bridge: &Path) -> bool {
+    let statusline_broken = is_ours(settings.pointer("/statusLine/command"))
+        && settings.pointer("/statusLine/command").and_then(Value::as_str)
+            != Some(bridge_command(bridge, "statusline").as_str());
+    let hook_cmd = hooks_doc
+        .pointer(&format!("/{HOOK_NAME}/PreInvocation/0/command"))
+        .and_then(Value::as_str);
+    let hooks_broken = hooks_doc.get(HOOK_NAME).is_some()
+        && is_ours(hooks_doc.pointer(&format!("/{HOOK_NAME}/PreInvocation/0/command")))
+        && hook_cmd != Some(bridge_command(bridge, "hook invocation").as_str());
+    statusline_broken || hooks_broken
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -849,5 +1147,101 @@ mod tests {
         assert!(settings.pointer("/statusLine/stack_with_default").is_none());
         disconnect_settings(&mut settings, prev);
         assert_eq!(settings["statusLine"], json!({ "type": "command", "command": "my-line.sh" }));
+    }
+
+    #[test]
+    fn parses_cli_statusline_quota_remaining_fraction_and_reset_in_seconds() {
+        let input = json!({
+            "version": "0.10.1",
+            "email": "user@example.com",
+            "modelName": "gemini-3.1-pro",
+            "quota": {
+                "gemini-5h": { "remaining_fraction": 0.85, "reset_in_seconds": 3600 },
+                "gemini-weekly": { "remaining_fraction": 0.5, "reset_in_seconds": 86_400 },
+                "3p-5h": { "remaining_fraction": 0.9, "reset_in_seconds": 1800, "disabled": true }
+            }
+        });
+        let snap = parse_statusline(&input, NOW).unwrap();
+        assert_eq!(snap.account_id.as_deref(), Some("user@example.com"));
+        assert_eq!(snap.active_model_name.as_deref(), Some("gemini-3.1-pro"));
+        assert!((snap.gemini.five_hour.unwrap().used_percent - 15.0).abs() < 1e-6);
+        assert_eq!(snap.gemini.five_hour.unwrap().resets_at, Some(NOW + 3600));
+        assert!((snap.gemini.weekly.unwrap().used_percent - 50.0).abs() < 1e-6);
+        assert!(snap.third_party.five_hour.is_none());
+    }
+
+    #[test]
+    fn parses_usage_and_credits_commands_and_rejects_llm_fallback() {
+        let usage = json!({
+            "num_turns": 0,
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                { "id": "gemini-weekly", "remaining_fraction": 0.99, "reset_time": "2026-11-20T22:55:49Z" },
+                                { "id": "gemini-5h", "remaining_fraction": 0.97, "reset_time": "2026-11-14T03:55:49Z" }
+                            ]
+                        },
+                        {
+                            "name": "Claude and GPT models",
+                            "buckets": [
+                                { "id": "3p-weekly", "remaining_fraction": 1.0, "reset_time": "2026-11-20T23:06:43Z" },
+                                { "id": "3p-5h", "remaining_fraction": 1.0, "reset_time": "2026-11-14T04:06:43Z" }
+                            ]
+                        },
+                        {
+                            "name": "Gemini 4 Argon",
+                            "buckets": [
+                                { "id": "gemini-argon-wtu-weekly", "remaining_fraction": 0.8, "reset_time": "2026-11-20T23:06:43Z" }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let snap = parse_usage_command(&usage, NOW).unwrap();
+        assert!((snap.gemini.five_hour.unwrap().used_percent - 3.0).abs() < 1e-6);
+        assert!((snap.gemini.weekly.unwrap().used_percent - 1.0).abs() < 1e-6);
+        assert!((snap.argon.weekly.unwrap().used_percent - 20.0).abs() < 1e-6);
+        assert_eq!(snap.third_party.five_hour.unwrap().used_percent, 0.0);
+
+        let llm_fallback = json!({
+            "num_turns": 1,
+            "command": usage["command"]
+        });
+        assert!(parse_usage_command(&llm_fallback, NOW).is_none());
+
+        let wrong_command = json!({
+            "num_turns": 0,
+            "command": { "name": "status", "data": usage["command"]["data"] }
+        });
+        assert!(parse_usage_command(&wrong_command, NOW).is_none());
+
+        let credits = json!({
+            "num_turns": 0,
+            "command": { "name": "credits", "data": { "remaining_credits": 420 } }
+        });
+        assert_eq!(parse_credits_command(&credits), Some((Some("420".into()), Some("420".into()))));
+        assert!(parse_credits_command(&json!({ "num_turns": 1, "command": credits["command"] })).is_none());
+    }
+
+    #[test]
+    fn recognizes_unquoted_windows_short_path_and_quoted_legacy_commands() {
+        assert!(is_ours(Some(&json!(r"C:\PROGRA~1\CODEX-~1\ANTIGR~1.EXE hook invocation"))));
+        assert!(is_ours(Some(&json!(r"C:\PROGRA~1\CODEX-~1\ANTIGR~1.EXE statusline"))));
+        assert!(is_ours(Some(&json!(r#""C:/Program Files/codex-usage-overlay/antigravity-usage-bridge.exe" hook invocation"#))));
+        assert!(!is_ours(Some(&json!("python custom_hook.py"))));
+        let no_spaces = Path::new(r"C:\overlay\antigravity-usage-bridge.exe");
+        assert_eq!(bridge_command(no_spaces, "hook invocation"), r"C:\overlay\antigravity-usage-bridge.exe hook invocation");
+    }
+
+    #[test]
+    fn parses_hook_model_and_ignores_auto_placeholder() {
+        assert_eq!(parse_hook_model(&json!({ "modelName": "Claude Opus 4.6" })), (None, Some("Claude Opus 4.6".into())));
+        assert_eq!(parse_hook_model(&json!({ "modelName": "auto" })), (None, None));
     }
 }

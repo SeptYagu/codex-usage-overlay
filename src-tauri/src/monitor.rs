@@ -99,6 +99,7 @@ impl Registry {
             let urgent = message_changed || old.refresh_interval_seconds != next.refresh_interval_seconds || binding_changed
                 || previous.monitor_enabled.load(Ordering::Acquire) != enabled
                 || old.claude_live_polling != next.claude_live_polling
+                || old.antigravity_live_polling != next.antigravity_live_polling
                 || old.auto_pause_on_low_quota != next.auto_pause_on_low_quota
                 || old.auto_pause_five_hour_threshold_percent
                     != next.auto_pause_five_hour_threshold_percent
@@ -132,7 +133,8 @@ impl Registry {
                     [provider.index() as usize] = replacement;
             } else {
                 let read_changed = previous.monitor_enabled.load(Ordering::Acquire) != enabled
-                    || old.claude_live_polling != next.claude_live_polling;
+                    || old.claude_live_polling != next.claude_live_polling
+                    || old.antigravity_live_polling != next.antigravity_live_polling;
                 if read_changed {
                     previous.source_generation.fetch_add(1, Ordering::AcqRel);
                     previous
@@ -158,6 +160,14 @@ impl Registry {
                 if old.claude_live_polling != next.claude_live_polling {
                     *previous
                         .claude_live
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner()) = Default::default();
+                }
+                if old.antigravity_live_polling != next.antigravity_live_polling
+                    || (provider == Provider::Antigravity && old.show_credits != next.show_credits && next.show_credits)
+                {
+                    *previous
+                        .antigravity_live
                         .lock()
                         .unwrap_or_else(|p| p.into_inner()) = Default::default();
                 }

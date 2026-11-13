@@ -69,6 +69,7 @@ pub struct AppState {
     pub presentation: StdMutex<crate::presentation::Cache>,
     pub applied_settings_revision: AtomicU64,
     pub claude_live: StdMutex<crate::claude::live::LiveState>,
+    pub antigravity_live: StdMutex<crate::antigravity::live::LiveState>,
     pub tray_read_status: Mutex<TrayReadStatus>,
     pub settings: Mutex<OverlaySettings>,
     pub settings_revision: AtomicU64,
@@ -134,6 +135,7 @@ impl AppState {
             presentation: StdMutex::new(Default::default()),
             applied_settings_revision: AtomicU64::new(0),
             claude_live: StdMutex::new(Default::default()),
+            antigravity_live: StdMutex::new(Default::default()),
             tray_read_status: Mutex::new(TrayReadStatus::Pending),
             settings: Mutex::new(settings),
             settings_revision: AtomicU64::new(0),
@@ -344,7 +346,14 @@ async fn read_claude_usage(state: &AppState, generation: u64) -> Result<RawCodex
 async fn read_antigravity_usage(state: &AppState, settings: &OverlaySettings, generation: u64) -> Result<RawCodexUsage, String> {
     let now = reader::unix_now();
     let dir = state.config_manager.runtime_dir();
-    let result = crate::antigravity::source::read_usage(dir, settings.antigravity_pool, now);
+    let result = if settings.antigravity_live_polling {
+        match read_antigravity_live(state, settings.show_credits, now).await {
+            Ok(snapshot) => Ok(crate::antigravity::source::sample(&snapshot, settings.antigravity_pool, now)),
+            Err(failure) => crate::antigravity::source::read_usage(dir, settings.antigravity_pool, now).map_err(|_| failure),
+        }
+    } else {
+        crate::antigravity::source::read_usage(dir, settings.antigravity_pool, now)
+    };
     let _source_commit = state.settings_patch.lock().await;
     if state.source_generation.load(Ordering::Acquire) != generation {
         return Err("Usage source changed during the read".into());
@@ -363,6 +372,70 @@ async fn read_antigravity_usage(state: &AppState, settings: &OverlaySettings, ge
             Err(crate::antigravity::source::describe(&error))
         }
     }
+}
+
+async fn read_antigravity_live(
+    state: &AppState,
+    include_credits: bool,
+    now: i64,
+) -> Result<crate::antigravity::shared::Snapshot, ReadFailure> {
+    use crate::antigravity::live::{self, LiveStep};
+    use crate::antigravity::shared;
+    let dir = state.config_manager.runtime_dir();
+    let step = state
+        .antigravity_live
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .step(std::time::Instant::now());
+    match step {
+        LiveStep::Answer(mut snapshot) => {
+            // Merge active model updates written by PreInvocation hooks between 60s polls
+            // so `Auto` quota pool switches immediately when changing desktop models.
+            if let Some(stored) = shared::read_snapshot(dir) {
+                if stored.active_model_id.is_some() || stored.active_model_name.is_some() {
+                    snapshot.active_model_id = stored.active_model_id;
+                    snapshot.active_model_name = stored.active_model_name;
+                }
+                if snapshot.cli_version.is_none() {
+                    snapshot.cli_version = stored.cli_version;
+                }
+                if snapshot.account_id.is_none() {
+                    snapshot.account_id = stored.account_id;
+                }
+            }
+            return Ok(snapshot);
+        }
+        LiveStep::Failure(failure) => return Err(failure),
+        LiveStep::Request => {}
+    }
+    let result = live::fetch(now, include_credits).await;
+    state
+        .antigravity_live
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .record(std::time::Instant::now(), &result);
+    let mut stored = result?;
+    if let Some(previous) = shared::read_snapshot(dir) {
+        if stored.active_model_id.is_none() && stored.active_model_name.is_none() {
+            stored.active_model_id = previous.active_model_id;
+            stored.active_model_name = previous.active_model_name;
+        }
+        if stored.cli_version.is_none() {
+            stored.cli_version = previous.cli_version;
+        }
+        if stored.account_id.is_none() {
+            stored.account_id = previous.account_id;
+        }
+        if !stored.has_credits && previous.has_credits {
+            stored.has_credits = true;
+            stored.credits_display = previous.credits_display;
+            stored.credits_balance = previous.credits_balance;
+        }
+    }
+    if let Err(error) = shared::write_json_atomic(&dir.join(shared::SNAPSHOT_FILE), &stored) {
+        eprintln!("Could not store the live Antigravity limits: {error}");
+    }
+    Ok(stored)
 }
 
 pub(crate) async fn read_dsh_usage(state: &AppState, settings: &OverlaySettings, generation: u64) -> Result<RawCodexUsage, String> {
@@ -1114,7 +1187,7 @@ fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> Result<&Map
             | "weeklyResetNotification" | "autoEdgeHide" | "mousePassthrough" | "showPercentageGrid"
             | "showFiveHourQuota" | "showBurnRate" | "autoPauseOnLowQuota"
             | "autoResumeAfterQuotaReset" | "includePrereleaseUpdates" | "claudeLivePolling"
-            | "showProviderLogo" | "quotaCarouselEnabled" => value.is_boolean(),
+            | "antigravityLivePolling" | "showProviderLogo" | "quotaCarouselEnabled" => value.is_boolean(),
             "quotaCarouselIntervalSeconds" => value.as_u64().is_some_and(|n|(3..=30).contains(&n)),
             "autoStart" => allow_auto_start && value.is_boolean(),
             "autoPauseFiveHourThresholdPercent" => value.as_u64().is_some_and(|n| (1..=15).contains(&n)),
@@ -1340,13 +1413,14 @@ mod settings_patch_tests {
     #[test]
     fn live_claude_reading_is_opt_in_and_the_logo_is_shown_by_default() {
         let defaults = OverlaySettings::default();
-        assert!(!defaults.claude_live_polling && defaults.show_provider_logo);
-        // An older settings file has neither key.
+        assert!(!defaults.claude_live_polling && defaults.antigravity_live_polling && defaults.show_provider_logo);
+        // An older settings file has none of these keys.
         let upgraded: OverlaySettings = serde_json::from_str("{}").unwrap();
-        assert!(!upgraded.claude_live_polling && upgraded.show_provider_logo);
-        let patch = serde_json::json!({"claudeLivePolling": true, "showProviderLogo": false});
-        assert_eq!(validate_settings_patch(&patch, false).unwrap().len(), 2);
+        assert!(!upgraded.claude_live_polling && upgraded.antigravity_live_polling && upgraded.show_provider_logo);
+        let patch = serde_json::json!({"claudeLivePolling": true, "antigravityLivePolling": false, "showProviderLogo": false});
+        assert_eq!(validate_settings_patch(&patch, false).unwrap().len(), 3);
         assert!(validate_settings_patch(&serde_json::json!({"claudeLivePolling": 1}), false).is_err());
+        assert!(validate_settings_patch(&serde_json::json!({"antigravityLivePolling": "yes"}), false).is_err());
     }
 
     /// Negative control: a patch that is not an object, or that carries a key with no
@@ -1535,8 +1609,14 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
         if changes.contains_key("claudeLivePolling") {
             *state.claude_live.lock().unwrap_or_else(|p| p.into_inner()) = Default::default();
         }
+        if changes.contains_key("antigravityLivePolling")
+            || (changes.get("showCredits").and_then(Value::as_bool) == Some(true)
+                && envelope.settings.provider == Provider::Antigravity)
+        {
+            *state.antigravity_live.lock().unwrap_or_else(|p| p.into_inner()) = Default::default();
+        }
         if provider_changed || changes.keys().any(|key| matches!(key.as_str(), "autoPauseOnLowQuota" | "claudeLivePolling"
-            | "antigravityPool" | "autoPauseFiveHourThresholdPercent" | "autoPauseWeeklyThresholdPercent"
+            | "antigravityLivePolling" | "antigravityPool" | "autoPauseFiveHourThresholdPercent" | "autoPauseWeeklyThresholdPercent"
             | "dshFiveHourThresholdPercent" | "dshWeeklyThresholdPercent")) {
             polling.request_now(std::time::Instant::now());
         }
@@ -1707,6 +1787,9 @@ pub async fn antigravity_connection_status(state: State<'_, Arc<AppState>>) -> R
     let settings_path = crate::antigravity::install::cli_settings_path();
     let hooks_path = crate::antigravity::install::hooks_path();
     let bridge = crate::antigravity::install::bridge_path();
+    if let (Some(sp), Some(hp), Some(br)) = (settings_path.as_deref(), hooks_path.as_deref(), bridge.as_deref()) {
+        let _ = crate::antigravity::install::repair_if_needed(sp, hp, state.config_manager.runtime_dir(), br);
+    }
     let runtime = crate::monitor::selected(state.inner(), Provider::Antigravity);
     let runtime_ref = &runtime;
     let settings = runtime_ref.settings.lock().await.clone();
@@ -1718,7 +1801,25 @@ pub async fn antigravity_connection_status(state: State<'_, Arc<AppState>>) -> R
         settings.antigravity_pool,
     );
     if settings.provider == Provider::Antigravity {
-        let failure = runtime_ref.reader.lock().unwrap_or_else(|p| p.into_inner()).failure.clone();
+        let live_failure = settings
+            .antigravity_live_polling
+            .then(|| {
+                runtime_ref
+                    .antigravity_live
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .failure
+                    .clone()
+            })
+            .flatten();
+        let failure = live_failure.or_else(|| {
+            runtime_ref
+                .reader
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .failure
+                .clone()
+        });
         status.read_failure = failure.as_ref().map(|f| f.kind);
         status.read_http_status = failure.and_then(|f| f.http_status);
     }
@@ -1732,6 +1833,12 @@ pub async fn antigravity_connect(state: State<'_, Arc<AppState>>) -> Result<crat
     let bridge = crate::antigravity::install::bridge_path().ok_or("Could not locate the overlay executable")?;
     crate::antigravity::install::connect(&settings_path, &hooks_path, state.config_manager.runtime_dir(), &bridge)?;
     let runtime = crate::monitor::selected(state.inner(), Provider::Antigravity);
+    {
+        let mut live = runtime.antigravity_live.lock().unwrap_or_else(|p| p.into_inner());
+        if live.failure.is_some() || live.answer.is_none() {
+            *live = Default::default();
+        }
+    }
     runtime.polling.lock().unwrap_or_else(|p| p.into_inner()).request_now(std::time::Instant::now());
     runtime.poll_wake.notify_one();
     antigravity_connection_status(state).await

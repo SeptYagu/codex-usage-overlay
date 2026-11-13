@@ -104,10 +104,13 @@ describe('settings tabs', () => {
     const view = await mount();
     for (const key of ['commonSettings','providerCodex','providerClaude','providerDsh','providerAntigravity']) expect(view.getByRole('tab',{name:i18n.t(key)})).toBeTruthy();
   });
-  it('updates Antigravity quota pool selection from the Antigravity settings tab', async () => {
-    const { panel, onPatchSettings } = await mount({ antigravityPool: 'auto' });
-    fireEvent.change(panel('antigravity').getByRole('combobox', { name: 'Quota pool' }), { target: { value: 'argon' } });
+  it('updates Antigravity quota pool selection and live polling from the Antigravity settings tab', async () => {
+    const { panel, onPatchSettings } = await mount({ antigravityPool: 'auto', antigravityLivePolling: true });
+    const antigravity = panel('antigravity');
+    fireEvent.change(antigravity.getByRole('combobox', { name: 'Quota pool' }), { target: { value: 'argon' } });
     expect(onPatchSettings).toHaveBeenCalledWith({ antigravityPool: 'argon' }, false);
+    fireEvent.click(antigravity.getByRole('checkbox', { name: 'Read limits live via Antigravity CLI (agy /usage)' }));
+    expect(onPatchSettings).toHaveBeenCalledWith({ antigravityLivePolling: false }, false);
   });
 });
 

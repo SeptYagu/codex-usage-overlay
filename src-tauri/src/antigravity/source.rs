@@ -30,7 +30,8 @@ pub fn read_usage(dir: &Path, pool: PoolKind, now: i64) -> Result<AntigravitySam
 
 pub fn describe(failure: &ReadFailure) -> String {
     match failure.kind {
-        FailureKind::NotConnected => failure.to_string(),
+        FailureKind::NotConnected => "尚未收到 Antigravity 额度 / No Antigravity limits received yet".into(),
+        FailureKind::MissingExecutable => "未找到 Antigravity CLI (agy) / Antigravity CLI (agy) not found".into(),
         FailureKind::Authentication => "需要登录 Antigravity / Antigravity login required".into(),
         kind => format!(
             "读取 Antigravity 用量失败 / Antigravity usage read failed ({kind:?}, HTTP {:?})",
@@ -126,5 +127,13 @@ mod tests {
         assert_eq!(tp_sample.usage.weekly.used_percent, Some(30.0));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn describe_uses_antigravity_specific_messages() {
+        let not_connected = describe(&ReadFailure::new(ReadStage::Discovery, FailureKind::NotConnected));
+        assert!(not_connected.contains("Antigravity") && !not_connected.contains("Claude"), "{not_connected}");
+        let missing = describe(&ReadFailure::new(ReadStage::Discovery, FailureKind::MissingExecutable));
+        assert!(missing.contains("agy"), "{missing}");
     }
 }

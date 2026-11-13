@@ -55,6 +55,20 @@ export const AntigravityConnectionView: React.FC<AntigravityConnectionViewProps>
   const time = (seconds: number) => new Date(seconds * 1000).toLocaleString();
   const guardSummary = !settings.autoPauseOnLowQuota ? 'off' : protection?.summary ?? 'checking';
   const pool = settings.antigravityPool ?? 'auto';
+  const live = settings.antigravityLivePolling ?? true;
+  const liveFailure = live && status
+    ? !status.cliAvailable
+      ? t('antigravityCliMissing')
+      : status.readFailure && status.readFailure !== 'notConnected'
+        ? status.readFailure === 'authentication'
+          ? t('antigravityLiveSignIn')
+          : status.readFailure === 'missingExecutable'
+            ? t('antigravityCliMissing')
+            : t('antigravityLiveFailed', {
+                reason: t(`quotaReadFailures.${status.readFailure}`, { defaultValue: t('quotaReadFailures.rpc') }),
+              })
+        : null
+    : null;
   const modelDisplay = status?.activeModelName ?? status?.activeModelId;
 
   return (
@@ -93,6 +107,18 @@ export const AntigravityConnectionView: React.FC<AntigravityConnectionViewProps>
           {t('antigravityConnectHint', { settingsPath: status.settingsPath, hooksPath: status.hooksPath })}
         </p>
       )}
+      <label className="flex items-center justify-between gap-3 text-sm pt-0.5">
+        <span className="font-medium">{t('antigravityLivePolling')}</span>
+        <input
+          type="checkbox"
+          aria-label={t('antigravityLivePolling')}
+          checked={live}
+          onChange={(e) => onPatchSettings({ antigravityLivePolling: e.target.checked })}
+          className="w-4 h-4 rounded text-cyan-600 accent-cyan-500 cursor-pointer"
+        />
+      </label>
+      <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">{t('antigravityLivePollingHint')}</p>
+      {liveFailure && <p role="alert" className="text-xs text-amber-700 dark:text-amber-300">{liveFailure}</p>}
       <div className="flex items-center justify-between gap-2 pt-0.5">
         <label htmlFor="antigravity-pool-select" className="text-sm font-medium">{t('antigravityPoolLabel')}</label>
         <select

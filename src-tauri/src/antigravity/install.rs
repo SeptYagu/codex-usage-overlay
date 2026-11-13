@@ -17,6 +17,7 @@ pub struct AntigravityConnectionStatus {
     pub status_line: bool,
     pub hooks: bool,
     pub bridge_available: bool,
+    pub cli_available: bool,
     pub settings_path: Option<String>,
     pub hooks_path: Option<String>,
     pub snapshot_captured_at: Option<i64>,
@@ -94,6 +95,7 @@ pub fn status(
         status_line: connection.status_line,
         hooks: connection.hooks,
         bridge_available: bridge.is_some_and(Path::is_file),
+        cli_available: super::live::cli_available(),
         settings_path: settings_path.map(|p| p.display().to_string()),
         hooks_path: hooks_file_path.map(|p| p.display().to_string()),
         snapshot_captured_at: snapshot.as_ref().map(|s| s.captured_at),
@@ -108,6 +110,52 @@ pub fn status(
         read_failure: None,
         read_http_status: None,
     }
+}
+
+fn resolve_command_target(runtime_dir: &Path, bridge: &Path) -> Result<PathBuf, String> {
+    let resolved = shared::resolve_execution_path(bridge);
+    let shim_path = runtime_dir.join(shared::BRIDGE_SHIM_FILE);
+    if shared::is_unquoted_safe(&resolved) {
+        let _ = fs::remove_file(&shim_path);
+        return Ok(bridge.to_path_buf());
+    }
+    #[cfg(windows)]
+    {
+        let resolved_shim_dir = shared::resolve_execution_path(runtime_dir);
+        let resolved_shim = resolved_shim_dir.join(shared::BRIDGE_SHIM_FILE);
+        if shared::is_unquoted_safe(&resolved_shim) {
+            fs::create_dir_all(runtime_dir).map_err(|e| e.to_string())?;
+            let script = format!("@echo off\r\n\"{}\" %*\r\n", bridge.display());
+            fs::write(&shim_path, script)
+                .map_err(|error| format!("Could not write {}: {error}", shim_path.display()))?;
+            return Ok(resolved_shim);
+        }
+    }
+    Ok(bridge.to_path_buf())
+}
+
+/// Repairs already-connected bridge commands when upgrading from older versions
+/// (for example switching from quoted Windows paths to unquoted short/shim paths).
+pub fn repair_if_needed(
+    settings_path: &Path,
+    hooks_file_path: &Path,
+    runtime_dir: &Path,
+    bridge: &Path,
+) -> Result<(), String> {
+    if !bridge.is_file() {
+        return Ok(());
+    }
+    let settings = read_json_doc(settings_path, "Antigravity CLI settings")?;
+    let hooks_doc = read_json_doc(hooks_file_path, "Antigravity hooks configuration")?;
+    let current = shared::connection(&settings, &hooks_doc);
+    if !(current.status_line && current.hooks) {
+        return Ok(());
+    }
+    let target = resolve_command_target(runtime_dir, bridge)?;
+    if shared::needs_repair(&settings, &hooks_doc, &target) {
+        connect(settings_path, hooks_file_path, runtime_dir, bridge)?;
+    }
+    Ok(())
 }
 
 fn backup_once(path: &Path) -> Result<(), String> {
@@ -135,15 +183,16 @@ pub fn connect(
     backup_once(settings_path)?;
     backup_once(hooks_file_path)?;
 
+    let target = resolve_command_target(runtime_dir, bridge)?;
     let existing_bridge = read_bridge_config(runtime_dir);
     let preserve_chained = existing_bridge.chained_status_line.is_some();
-    let previous = shared::connect_settings(&mut settings, bridge, preserve_chained)?;
+    let previous = shared::connect_settings(&mut settings, &target, preserve_chained)?;
     if previous.is_some() {
         let config = BridgeConfig { chained_status_line: previous };
         shared::write_json_atomic(&runtime_dir.join(shared::BRIDGE_FILE), &config)
             .map_err(|e| e.to_string())?;
     }
-    shared::connect_hooks(&mut hooks_doc, bridge)?;
+    shared::connect_hooks(&mut hooks_doc, &target)?;
     shared::write_json_atomic(settings_path, &settings)
         .map_err(|error| format!("Could not write {}: {error}", settings_path.display()))?;
     shared::write_json_atomic(hooks_file_path, &hooks_doc)
@@ -168,10 +217,14 @@ pub fn disconnect(settings_path: &Path, hooks_file_path: &Path, runtime_dir: &Pa
             .map_err(|error| format!("Could not write {}: {error}", hooks_file_path.display()))?;
     }
 
-    match fs::remove_file(runtime_dir.join(shared::BRIDGE_FILE)) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
-        _ => Ok(()),
+    for file in [shared::BRIDGE_FILE, shared::BRIDGE_SHIM_FILE] {
+        if let Err(error) = fs::remove_file(runtime_dir.join(file)) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error.to_string());
+            }
+        }
     }
+    Ok(())
 }
 
 /// Mirrors the guard switch, pool selector and thresholds for the `PreInvocation`
@@ -266,6 +319,36 @@ mod tests {
                 locale: "zh-CN".into(),
             }
         );
+        let _ = fs::remove_dir_all(runtime.parent().unwrap());
+    }
+
+    #[test]
+    fn repair_if_needed_rewrites_legacy_quoted_commands() {
+        let (settings_path, hooks_path, runtime, _) = dirs("repair");
+        let spaced_dir = runtime.parent().unwrap().join("Program Filesdir");
+        fs::create_dir_all(&spaced_dir).unwrap();
+        let bridge = spaced_dir.join(BRIDGE_EXE);
+        fs::write(&bridge, b"").unwrap();
+        let legacy_settings = json!({
+            "statusLine": { "type": "command", "command": r#""C:/Program Files/codex-usage-overlay/antigravity-usage-bridge.exe" statusline"#, "stack_with_default": true }
+        });
+        let legacy_hooks = json!({
+            "codex-usage-overlay": {
+                "PreInvocation": [{ "type": "command", "command": r#""C:/Program Files/codex-usage-overlay/antigravity-usage-bridge.exe" hook invocation"#, "timeout": 10 }]
+            }
+        });
+        fs::write(&settings_path, serde_json::to_string_pretty(&legacy_settings).unwrap()).unwrap();
+        fs::write(&hooks_path, serde_json::to_string_pretty(&legacy_hooks).unwrap()).unwrap();
+
+        repair_if_needed(&settings_path, &hooks_path, &runtime, &bridge).unwrap();
+        let updated_settings: Value = serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let updated_hooks: Value = serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        let status_cmd = updated_settings.pointer("/statusLine/command").and_then(Value::as_str).unwrap();
+        let hook_cmd = updated_hooks.pointer("/codex-usage-overlay/PreInvocation/0/command").and_then(Value::as_str).unwrap();
+        assert!(!status_cmd.contains('"'), "unexpected quotes in statusLine: {status_cmd}");
+        assert!(!hook_cmd.contains('"'), "unexpected quotes in hook: {hook_cmd}");
+        assert!(status_cmd.ends_with("statusline"));
+        assert!(hook_cmd.ends_with("hook invocation"));
         let _ = fs::remove_dir_all(runtime.parent().unwrap());
     }
 }

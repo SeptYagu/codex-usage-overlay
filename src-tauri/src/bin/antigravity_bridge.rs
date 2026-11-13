@@ -166,11 +166,17 @@ fn git_bash() -> Option<PathBuf> {
 }
 
 fn hook_invocation() {
-    let _ = read_stdin();
+    let raw = read_stdin();
+    let input: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
     let now = unix_now();
     let dir = shared::runtime_dir();
     let config: Option<shared::GuardConfig> = read_json(&dir.join(shared::GUARD_FILE));
-    let snapshot = shared::read_snapshot(&dir);
+    let mut snapshot = shared::read_snapshot(&dir);
+    if let Some(snap) = snapshot.as_mut() {
+        if snap.apply_hook_model(&input) {
+            let _ = shared::write_json_atomic(&dir.join(shared::SNAPSHOT_FILE), snap);
+        }
+    }
     let GuardDecision::Block(reason) = shared::guard_decision(config.as_ref(), snapshot.as_ref(), now) else {
         println!("{{}}");
         return;

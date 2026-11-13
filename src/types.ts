@@ -73,6 +73,7 @@ export interface OverlaySettings {
   dshFiveHourThresholdPercent: number;
   dshWeeklyThresholdPercent: number;
   claudeLivePolling: boolean;
+  antigravityLivePolling?: boolean;
   antigravityPool?: AntigravityPool;
   showProviderLogo: boolean;
   overlayLayout: 'grouped' | 'stacks';
@@ -129,6 +130,7 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   dshFiveHourThresholdPercent: 0,
   dshWeeklyThresholdPercent: 0,
   claudeLivePolling: false,
+  antigravityLivePolling: true,
   antigravityPool: 'auto',
   showProviderLogo: true,
   overlayLayout: 'grouped',
@@ -268,6 +270,7 @@ export interface AntigravityConnectionStatus {
   statusLine: boolean;
   hooks: boolean;
   bridgeAvailable: boolean;
+  cliAvailable: boolean;
   settingsPath: string | null;
   hooksPath: string | null;
   snapshotCapturedAt: number | null;
