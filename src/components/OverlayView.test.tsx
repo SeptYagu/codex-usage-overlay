@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OverlayView } from './OverlayView';
+import { ProviderLogo } from './ProviderLogo';
 import { CodexUsage, DEFAULT_SETTINGS } from '../types';
 import i18n from '../i18n';
 
@@ -457,4 +458,23 @@ it('keeps the capsule unchanged with rotation on and the logo hidden, and correl
   fireEvent.focus(capsule);expect(tauri.invoke).toHaveBeenCalledWith('set_display_interaction',{reason:'focus',active:true});
   fireEvent.mouseLeave(capsule);expect(tauri.invoke).toHaveBeenCalledWith('set_display_interaction',{reason:'hover',active:false});
   view.unmount();expect(tauri.invoke).toHaveBeenCalledWith('set_display_interaction',{reason:'focus',active:false});
+});
+
+it('renders the Gemini four-pointed star logo with unique gradient ids for Antigravity', () => {
+  const { container } = render(
+    <div>
+      <ProviderLogo provider="antigravity" />
+      <ProviderLogo provider="antigravity" />
+    </div>,
+  );
+  const gradients = [...container.querySelectorAll('linearGradient')];
+  const paths = [...container.querySelectorAll('path')];
+  expect(gradients).toHaveLength(2);
+  expect(paths).toHaveLength(2);
+  const ids = gradients.map((node) => node.getAttribute('id'));
+  expect(ids[0]).toBeTruthy();
+  expect(ids[0]).not.toBe(ids[1]);
+  expect(paths[0].getAttribute('d')).toContain('11.04 19.32');
+  expect(paths[0].getAttribute('fill')).toBe(`url(#${ids[0]})`);
+  expect(paths[1].getAttribute('fill')).toBe(`url(#${ids[1]})`);
 });
