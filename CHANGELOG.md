@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-11-14
+
+### Changed
+- Antigravity now shows the Argon weekly (WTU) limit as a third reading, `AR`, after 5H and WK, in the overlay and the tray tooltip. The readings are always 5H, Gemini weekly and Argon weekly, whichever quota pool is selected or picked by Auto; when Argon is the pool, WK still shows Gemini's weekly limit and the weekly burn rate moves to AR. Low-quota protection, notifications and burn rates keep acting on the selected pool's own limits. The docked edge pill still shows two bars.
+
 ## [1.9.0] - 2026-11-13
 
 ### Added
