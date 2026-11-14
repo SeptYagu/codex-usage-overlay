@@ -170,6 +170,7 @@ mod tests {
             five_hour_resets_at: None,
             week_resets_at: None,
             fetched_at: 1,
+            antigravity: Default::default(),
         }
     }
     fn settings() -> OverlaySettings {

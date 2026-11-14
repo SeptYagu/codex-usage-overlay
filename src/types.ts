@@ -16,6 +16,16 @@ export interface CodexUsage {
   fiveHourResetsAt: number | null;
   weekResetsAt: number | null;
   fetchedAt: number;
+  /** Antigravity only: the Argon weekly (WTU) limit shown next to 5H and WK. */
+  argonWeekRemainingPercent?: number | null;
+  argonWeekResetsAt?: number | null;
+  /**
+   * Antigravity only: Argon is the projected pool, so `week*` is Argon's limit
+   * (what protection acts on) and the WK reading shows `geminiWeek*` instead.
+   */
+  weeklyIsArgon?: boolean;
+  geminiWeekRemainingPercent?: number | null;
+  geminiWeekResetsAt?: number | null;
   // Optional only for legacy fixtures; production samples identify their source.
   sourceKey?: string;
   sourceGeneration?: number;

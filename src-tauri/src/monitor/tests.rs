@@ -66,6 +66,7 @@ fn sample(provider: Provider) -> RawCodexUsage {
         credits_balance: Some("1.00".into()),
         has_credits: provider != Provider::Claude,
         fetched_at: crate::codex::reader::unix_now(),
+        antigravity_weekly: None,
     }
 }
 impl UsageSource for Source {

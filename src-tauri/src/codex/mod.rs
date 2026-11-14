@@ -4,4 +4,4 @@ pub mod finder;
 pub mod reader;
 
 pub use burn_rate::BurnRateTracker;
-pub use client::{CodexClient, CodexUsage, QuotaSnapshot, RawCodexUsage};
+pub use client::{AntigravityWeeklies, CodexClient, CodexUsage, QuotaSnapshot, RawCodexUsage};

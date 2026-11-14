@@ -38,6 +38,45 @@ pub struct RawCodexUsage {
     pub credits_balance: Option<String>,
     pub has_credits: bool,
     pub fetched_at: i64,
+    /// Antigravity's extra weekly windows. Other providers leave it empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antigravity_weekly: Option<AntigravityWeeklies>,
+}
+
+/// Antigravity shows 5H, the Gemini weekly limit and the Argon weekly (WTU)
+/// limit side by side, whichever pool is projected. `weekly` stays the projected
+/// pool's own window, because protection, notifications and burn rates act on it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityWeeklies {
+    /// Argon's weekly (WTU) window.
+    #[serde(default)]
+    pub argon: Option<QuotaSnapshot>,
+    /// True when Argon is the projected pool, so `weekly` already is Argon's.
+    #[serde(default)]
+    pub weekly_is_argon: bool,
+    /// Gemini's weekly window, carried only while `weekly` is Argon's so the
+    /// WK reading can still show Gemini.
+    #[serde(default)]
+    pub gemini: Option<QuotaSnapshot>,
+}
+
+/// The display-only Antigravity readings; every field is empty for other providers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityReadings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argon_week_remaining_percent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argon_week_resets_at: Option<i64>,
+    /// The projected pool is Argon: `week_*` is Argon's limit, and the WK
+    /// reading shows `gemini_week_*` instead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub weekly_is_argon: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini_week_remaining_percent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini_week_resets_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -53,6 +92,8 @@ pub struct CodexUsage {
     pub five_hour_resets_at: Option<i64>,
     pub week_resets_at: Option<i64>,
     pub fetched_at: i64,
+    #[serde(flatten, default)]
+    pub antigravity: AntigravityReadings,
 }
 
 impl RawCodexUsage {
@@ -72,6 +113,15 @@ impl RawCodexUsage {
             five_hour_resets_at: self.five_hour.resets_at,
             week_resets_at: self.weekly.resets_at,
             fetched_at: self.fetched_at,
+            antigravity: self.antigravity_weekly.as_ref().map_or_else(AntigravityReadings::default, |extra| {
+                AntigravityReadings {
+                    argon_week_remaining_percent: extra.argon.as_ref().and_then(|w| remaining_percent(w.used_percent)),
+                    argon_week_resets_at: extra.argon.as_ref().and_then(|w| w.resets_at),
+                    weekly_is_argon: extra.weekly_is_argon,
+                    gemini_week_remaining_percent: extra.gemini.as_ref().and_then(|w| remaining_percent(w.used_percent)),
+                    gemini_week_resets_at: extra.gemini.as_ref().and_then(|w| w.resets_at),
+                }
+            }),
         }
     }
 }
@@ -655,6 +705,7 @@ fn parse_usage_result(result: &Value) -> Result<RawCodexUsage> {
         credits_balance,
         has_credits,
         fetched_at,
+        antigravity_weekly: None,
     })
 }
 

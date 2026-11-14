@@ -314,16 +314,26 @@ function CapsuleReadings({settings,usage,isLoading}:{settings:OverlaySettings;us
   const {t}=useTranslation();const layout=settings.overlayLayout;
   const raw=usage?.creditsDisplay??'—';const numeric=Number(raw);
   const credit=raw.trim()!==''&&Number.isFinite(numeric)?numeric.toFixed(2):raw;
+  // Antigravity always reads 5H | Gemini WK | Argon. When Argon is the projected
+  // pool, the usage's own weekly window (and its burn rate) belongs to Argon.
+  const antigravity=settings.provider==='antigravity';
+  const argonPool=antigravity&&usage?.weeklyIsArgon===true;
+  const ownWeekly={percent:usage?.weekRemainingPercent,countdown:formatResetCountdown(usage?.weekResetsAt,true),burn:formatBurnRate(usage?.weekBurnRatePerHour)};
+  const weekly=argonPool?{percent:usage?.geminiWeekRemainingPercent,countdown:formatResetCountdown(usage?.geminiWeekResetsAt,true),burn:''}:ownWeekly;
+  const argon=argonPool?ownWeekly:antigravity&&usage?.argonWeekRemainingPercent!=null
+    ?{percent:usage.argonWeekRemainingPercent,countdown:formatResetCountdown(usage.argonWeekResetsAt,true),burn:''}:null;
   const quotas=[
     {key:'five',label:layout==='stacks'?t('fiveHourLabel'):'5H',percent:usage?.fiveHourRemainingPercent,countdown:formatResetCountdown(usage?.fiveHourResetsAt),burn:formatBurnRate(usage?.fiveHourBurnRatePerHour)},
-    {key:'week',label:layout==='stacks'?t('weeklyLabel'):'WK',percent:usage?.weekRemainingPercent,countdown:formatResetCountdown(usage?.weekResetsAt,true),burn:formatBurnRate(usage?.weekBurnRatePerHour)},
+    {key:'week',label:layout==='stacks'?t('weeklyLabel'):'WK',...weekly},
+    ...(argon?[{key:'argon',label:layout==='stacks'?t('argonLabel'):'AR',...argon}]:[]),
   ].filter(q=>q.key!=='five'||settings.showFiveHourQuota);
+  const quotaName=(key:string)=>key==='five'?t('fiveHourLabel'):key==='argon'?t('argonLabel'):t('weeklyLabel');
   return <>
     {quotas.map((quota,index)=><React.Fragment key={quota.key}>
       {index>0&&layout==='grouped'&&<span aria-hidden="true" className="overlay-divider"/>}
-      <div className="overlay-quota" role="group" aria-label={quota.key==='five'?t('fiveHourLabel'):t('weeklyLabel')}>
+      <div className="overlay-quota" role="group" aria-label={quotaName(quota.key)}>
         <div className="overlay-reading"><span className="overlay-label">{quota.label}</span><span className={`overlay-value overlay-${usageTone(quota.percent)}`}>{quota.percent==null?'--%':`${quota.percent}%`}</span></div>
-        <div className="overlay-meta-row"><span className="overlay-countdown">{quota.countdown}</span>{settings.showBurnRate&&<span className="overlay-burn-rate" title={quota.key==='five'?burnRatePresentation(usage,t):undefined}>{quota.burn}</span>}</div>
+        <div className="overlay-meta-row"><span className="overlay-countdown">{quota.countdown}</span>{settings.showBurnRate&&quota.burn&&<span className="overlay-burn-rate" title={quota.key==='five'?burnRatePresentation(usage,t):undefined}>{quota.burn}</span>}</div>
       </div>
     </React.Fragment>)}
     {settings.showCredits&&((settings.provider!=='claude'&&settings.provider!=='antigravity')||Boolean(usage?.hasCredits))&&<>

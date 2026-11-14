@@ -32,6 +32,7 @@ impl AttemptSource for Scripted {
             credits_balance: None,
             has_credits: false,
             fetched_at: unix_now(),
+            antigravity_weekly: None,
         };
         Ok(ObservedUsage {
             usage,

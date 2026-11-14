@@ -238,6 +238,7 @@ pub(super) fn usage(value: &Value, account_id: &str, now_ms: i64) -> Result<RawC
         credits_balance,
         has_credits,
         fetched_at,
+        antigravity_weekly: None,
     })
 }
 

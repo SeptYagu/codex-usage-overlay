@@ -54,6 +54,7 @@ fn sample() -> RawCodexUsage {
         credits_balance: None,
         has_credits: false,
         fetched_at: now,
+        antigravity_weekly: None,
     }
 }
 

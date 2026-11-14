@@ -111,7 +111,7 @@ mod tests {
         let raw = RawCodexUsage { account_id: Some("account".into()),
             five_hour: QuotaSnapshot { used_percent: Some(100.0), resets_at: Some(2000), ..Default::default() },
             weekly: QuotaSnapshot { used_percent: Some(60.0), resets_at: Some(9000), ..Default::default() },
-            credits_display: "—".into(), credits_balance: None, has_credits: false, fetched_at: 1000 };
+            credits_display: "—".into(), credits_balance: None, has_credits: false, fetched_at: 1000, antigravity_weekly: None };
         (settings, raw)
     }
     #[tokio::test]

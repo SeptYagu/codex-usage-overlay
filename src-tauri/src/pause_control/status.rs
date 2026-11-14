@@ -475,6 +475,7 @@ mod tests {
             five_hour_resets_at: Some(unix_now() + 3600),
             week_resets_at: None,
             fetched_at: unix_now(),
+            antigravity: Default::default(),
         }
     }
     #[tokio::test]

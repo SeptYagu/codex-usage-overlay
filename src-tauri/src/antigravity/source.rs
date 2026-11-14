@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::shared::{self, PoolKind};
 use crate::codex::reader::{FailureKind, ReadFailure, ReadStage};
-use crate::codex::{QuotaSnapshot, RawCodexUsage};
+use crate::codex::{AntigravityWeeklies, QuotaSnapshot, RawCodexUsage};
 
 const FIVE_HOUR_MINS: u32 = 5 * 60;
 const SEVEN_DAY_MINS: u32 = 7 * 24 * 60;
@@ -72,10 +72,28 @@ pub fn sample(snapshot: &shared::Snapshot, pool: PoolKind, now: i64) -> Antigrav
             },
             has_credits: snapshot.has_credits,
             fetched_at: snapshot.captured_at,
+            antigravity_weekly: antigravity_weeklies(snapshot, effective_pool, &map_window),
         },
         stale: snapshot.age(now) > shared::SNAPSHOT_FRESH_SECS,
         effective_pool,
     }
+}
+
+/// The overlay shows 5H, Gemini's weekly limit and Argon's weekly (WTU) limit
+/// for every pool. When Argon is projected, `weekly` is Argon's own window (it is
+/// what protection acts on), so Gemini's weekly window rides along for the WK reading.
+fn antigravity_weeklies(
+    snapshot: &shared::Snapshot,
+    effective_pool: PoolKind,
+    map_window: &impl Fn(Option<shared::WindowSnapshot>, u32) -> QuotaSnapshot,
+) -> Option<AntigravityWeeklies> {
+    let weekly_is_argon = effective_pool == PoolKind::Argon;
+    let argon = snapshot.argon.weekly.map(|window| map_window(Some(window), SEVEN_DAY_MINS));
+    (argon.is_some() || weekly_is_argon).then(|| AntigravityWeeklies {
+        argon,
+        weekly_is_argon,
+        gemini: weekly_is_argon.then(|| map_window(snapshot.gemini.weekly, SEVEN_DAY_MINS)),
+    })
 }
 
 #[cfg(test)]
@@ -120,11 +138,28 @@ mod tests {
         assert_eq!(argon_sample.effective_pool, PoolKind::Argon);
         assert_eq!(argon_sample.usage.five_hour.used_percent, Some(20.0));
         assert_eq!(argon_sample.usage.weekly.used_percent, Some(80.0));
+        // Protection keeps acting on Argon's weekly window, but the WK reading
+        // still shows Gemini's weekly limit next to the Argon one.
+        let argon_ui = argon_sample.usage.to_ui(None, None);
+        assert_eq!(argon_ui.week_remaining_percent, Some(20));
+        assert!(argon_ui.antigravity.weekly_is_argon);
+        assert_eq!(argon_ui.antigravity.gemini_week_remaining_percent, Some(55));
+        assert_eq!(argon_ui.antigravity.gemini_week_resets_at, Some(now + 50_000));
+        assert_eq!(argon_ui.antigravity.argon_week_remaining_percent, Some(20));
 
         let tp_sample = read_usage(&dir, PoolKind::ThirdParty, now + 10).unwrap();
         assert_eq!(tp_sample.effective_pool, PoolKind::ThirdParty);
         assert_eq!(tp_sample.usage.five_hour.used_percent, Some(10.0));
         assert_eq!(tp_sample.usage.weekly.used_percent, Some(30.0));
+
+        // The other pools' own weekly window is the WK reading; Argon's rides along.
+        for sample in [&auto_sample, &tp_sample] {
+            let ui = sample.usage.to_ui(None, None);
+            assert!(!ui.antigravity.weekly_is_argon);
+            assert_eq!(ui.antigravity.gemini_week_remaining_percent, None);
+            assert_eq!(ui.antigravity.argon_week_remaining_percent, Some(20));
+            assert_eq!(ui.antigravity.argon_week_resets_at, Some(now + 60_000));
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

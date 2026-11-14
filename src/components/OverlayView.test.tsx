@@ -111,6 +111,43 @@ describe.each(['grouped', 'stacks'] as const)('%s layout', (overlayLayout) => {
     expect(screen.queryByRole('img', { name: current })).toBeNull();
   });
 
+  it('shows the Antigravity Argon limit after the weekly reading', () => {
+    const argonUsage = { ...usage, hasCredits: false, argonWeekRemainingPercent: 42, argonWeekResetsAt: now + 3 * 86400 + 2 * 3600 };
+    const { container, rerender } = render(
+      <OverlayView settings={{ ...settings, provider: 'antigravity', showBurnRate: true }} usage={argonUsage} isLoading={false} />,
+    );
+    const groups = [...container.querySelectorAll('.overlay-quota')].map((group) => group.getAttribute('aria-label'));
+    expect(groups).toEqual(['5 HOUR', 'WEEKLY', 'ARGON']);
+    const argon = within(screen.getByRole('group', { name: 'ARGON' }));
+    expect(argon.getByText(overlayLayout === 'stacks' ? 'ARGON' : 'AR')).toBeTruthy();
+    expect(argon.getByText('42%')).toBeTruthy();
+    expect(argon.getByText('3d 02h')).toBeTruthy();
+    // Argon has no burn rate of its own: no placeholder either.
+    expect(argon.queryByText('—')).toBeNull();
+    expect(container.querySelectorAll('.overlay-divider').length).toBe(overlayLayout === 'grouped' ? 2 : 0);
+
+    // Argon pool: the usage's own weekly window is Argon's, with its burn rate,
+    // yet WK still shows Gemini's weekly limit.
+    rerender(<OverlayView settings={{ ...settings, provider: 'antigravity', showBurnRate: true }} usage={{
+      ...argonUsage, weekRemainingPercent: 42, weekResetsAt: now + 3 * 86400 + 2 * 3600, weekBurnRatePerHour: 0.9,
+      weeklyIsArgon: true, geminiWeekRemainingPercent: 77, geminiWeekResetsAt: now + 6 * 86400 + 5 * 3600,
+    }} isLoading={false} />);
+    const geminiWeek = within(screen.getByRole('group', { name: 'WEEKLY' }));
+    expect(geminiWeek.getByText('77%')).toBeTruthy();
+    expect(geminiWeek.getByText('6d 05h')).toBeTruthy();
+    expect(geminiWeek.queryByText(/%\/h$/)).toBeNull();
+    const argonPool = within(screen.getByRole('group', { name: 'ARGON' }));
+    expect(argonPool.getByText('42%')).toBeTruthy();
+    expect(argonPool.getByText('3d 02h')).toBeTruthy();
+    expect(argonPool.getByText('0.9%/h')).toBeTruthy();
+
+    // Without an Argon reading, or for another provider, only 5H and WK remain.
+    rerender(<OverlayView settings={{ ...settings, provider: 'antigravity' }} usage={{ ...argonUsage, argonWeekRemainingPercent: null }} isLoading={false} />);
+    expect(screen.queryByRole('group', { name: 'ARGON' })).toBeNull();
+    rerender(<OverlayView settings={{ ...settings, provider: 'codex' }} usage={argonUsage} isLoading={false} />);
+    expect(screen.queryByRole('group', { name: 'ARGON' })).toBeNull();
+  });
+
   it.each(['∞', '—', '0'])('preserves credit state %s', (creditsDisplay) => {
     render(<OverlayView settings={settings} usage={{ ...usage, creditsDisplay }} isLoading={false} />);
     expect(within(screen.getByRole('group', { name: 'CREDITS' }))

@@ -582,6 +582,7 @@ mod tests {
             credits_balance: None,
             has_credits: false,
             fetched_at: at,
+            antigravity_weekly: None,
         }
     }
     #[test]

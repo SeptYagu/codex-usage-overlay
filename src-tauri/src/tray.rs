@@ -179,7 +179,21 @@ pub fn tray_presentation(
             if settings.show_five_hour_quota {
                 parts.push(format!("5H {}%", percent(visible_usage.and_then(|u| u.five_hour_remaining_percent))));
             }
-            parts.push(format!("WK {}%", percent(visible_usage.and_then(|u| u.week_remaining_percent))));
+            // Antigravity always reads 5H | Gemini WK | Argon. When Argon is the
+            // projected pool, the usage's own weekly window is Argon's.
+            let extra = visible_usage.map(|u| &u.antigravity).filter(|_| antigravity);
+            let argon_pool = extra.is_some_and(|a| a.weekly_is_argon);
+            let week = if argon_pool {
+                extra.and_then(|a| a.gemini_week_remaining_percent)
+            } else {
+                visible_usage.and_then(|u| u.week_remaining_percent)
+            };
+            parts.push(format!("WK {}%", percent(week)));
+            if argon_pool {
+                parts.push(format!("AR {}%", percent(visible_usage.and_then(|u| u.week_remaining_percent))));
+            } else if let Some(argon) = extra.and_then(|a| a.argon_week_remaining_percent) {
+                parts.push(format!("AR {argon}%"));
+            }
             if settings.show_credits && ((!claude && !antigravity) || visible_usage.is_some_and(|u| u.has_credits)) {
                 parts.push(format!("CR {}", visible_usage.map(|u| u.credits_display.as_str()).unwrap_or("—")));
             }
@@ -1362,6 +1376,43 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_tooltip_reads_five_hour_gemini_weekly_and_argon_for_every_pool() {
+        use crate::codex::{AntigravityWeeklies, QuotaSnapshot, RawCodexUsage};
+        let window = |used: f64| QuotaSnapshot { used_percent: Some(used), resets_at: None, window_duration_mins: Some(10080) };
+        let mut settings = OverlaySettings::default();
+        settings.provider = crate::config::Provider::Antigravity;
+        settings.show_five_hour_quota = true;
+        let tooltip = |settings: &OverlaySettings, raw: &RawCodexUsage| {
+            tray_presentation(settings, Some(&raw.to_ui(None, None)), TrayReadStatus::Success).tooltip
+        };
+        // Gemini pool: its own weekly window is WK, Argon rides along.
+        let gemini_pool = RawCodexUsage {
+            account_id: None,
+            five_hour: QuotaSnapshot { used_percent: Some(10.0), resets_at: None, window_duration_mins: Some(300) },
+            weekly: window(21.0),
+            credits_display: "—".into(), credits_balance: None, has_credits: false, fetched_at: 1,
+            antigravity_weekly: Some(AntigravityWeeklies { argon: Some(window(58.0)), weekly_is_argon: false, gemini: None }),
+        };
+        assert_eq!(tooltip(&settings, &gemini_pool), "Antigravity | 5H 90% | WK 79% | AR 42%");
+
+        // Argon pool: the usage's weekly window is Argon's, yet WK still shows Gemini.
+        let argon_pool = RawCodexUsage {
+            weekly: window(58.0),
+            antigravity_weekly: Some(AntigravityWeeklies { argon: Some(window(58.0)), weekly_is_argon: true, gemini: Some(window(21.0)) }),
+            ..gemini_pool.clone()
+        };
+        assert_eq!(tooltip(&settings, &argon_pool), "Antigravity | 5H 90% | WK 79% | AR 42%");
+
+        // No Argon reading at all: nothing is added.
+        let plain = RawCodexUsage { antigravity_weekly: None, ..gemini_pool.clone() };
+        assert_eq!(tooltip(&settings, &plain), "Antigravity | 5H 90% | WK 79%");
+        // Other providers never show it.
+        settings.provider = crate::config::Provider::Claude;
+        assert_eq!(tooltip(&settings, &gemini_pool), "Claude | 5H 90% | WK 79%");
+    }
+
+
+    #[test]
     fn weekly_only_pixels_have_large_weekly_track_and_no_inner_track() {
         // Coordinate probes avoid relying only on renderer-to-renderer equality.
         for percent in [None, Some(0.0), Some(19.0), Some(20.0), Some(50.0), Some(100.0)] {
@@ -1409,7 +1460,7 @@ mod tests {
                     account_id: Some("offline-test-account".into()),
                     five_hour: crate::codex::QuotaSnapshot { used_percent: Some(20.0), resets_at: Some(50000), window_duration_mins: Some(300) },
                     weekly: crate::codex::QuotaSnapshot { used_percent: Some(70.0), resets_at: Some(90000), window_duration_mins: Some(10080) },
-                    credits_display: "12.50".into(), credits_balance: Some("12.50".into()), has_credits: true, fetched_at: 10000,
+                    credits_display: "12.50".into(), credits_balance: Some("12.50".into()), has_credits: true, fetched_at: 10000, antigravity_weekly: None,
                 };
                 // Warm real crossing history while 5H presentation is hidden
                 // in one branch. Acceptance/persistence must remain independent.

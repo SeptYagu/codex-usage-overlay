@@ -2068,6 +2068,7 @@ mod tests {
             five_hour_resets_at,
             week_resets_at,
             fetched_at,
+            antigravity: Default::default(),
         }
     }
 

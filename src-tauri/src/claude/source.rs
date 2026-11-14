@@ -60,6 +60,7 @@ pub fn sample(snapshot: &shared::Snapshot, now: i64) -> ClaudeSample {
             credits_balance: None,
             has_credits: false,
             fetched_at: snapshot.captured_at,
+            antigravity_weekly: None,
         },
         stale: snapshot.age(now) > shared::SNAPSHOT_FRESH_SECS,
     }
