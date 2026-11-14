@@ -25,7 +25,7 @@ Install a setup package, or extract the portable ZIP and run `CodexUsageOverlay.
 - Optionally enable **Pause Codex when quota runs low**: when either remaining percentage reaches or falls below its threshold (5-hour: 5%, weekly: 2% by default), the app sends a cooperative "pause" request through the Codex desktop client's control plane. Settings, the tray menu and the tray tooltip report protection health. Settings details distinguish accepted requests from verified interruptions and show per-chat outcomes. Protection is off by default; request de-duplication is kept in memory.
 - While protection is enabled, quota polling accelerates to 15 seconds when either window is within 5 percentage points of its threshold. It returns to your normal refresh interval after two successful readings put both windows more than 7 points above their thresholds. Failed reads back off. Settings show the sample age and effective interval.
 - Drag with the left mouse button. Enable **Auto hide at screen edge**, then drag the overlay to a work-area edge to collapse it into two quota bars; hover to expand it. Supports multi-monitor free dragging with majority intersection area attribution (>50%), internal seam traversal without false folding, and physical outer boundary safe snapping. **Show 10% grid on edge bars** adds ten equal divisions to the collapsed quota bars. This setting appears only with **Auto hide at screen edge** enabled; drag to an edge and move the pointer away to see the grid. Left-click the tray icon to immediately show or hide the overlay, including when docked. A left double-click toggles it once. Right-click opens or closes the tray menu.
-- Settings defaults to 960×700 with Common, Codex, Claude and DSH tabs. The active page scrolls. Each provider has its own refresh interval, reset notifications and sounds; appearance and system controls are shared. Window geometry is retained.
+- Settings defaults to 960×700 with Common, Codex, Claude, DSH and Antigravity tabs. The active page scrolls. Each provider has its own refresh interval, reset notifications and sounds; appearance and system controls are shared. Window geometry is retained.
 - Enable **Mouse click-through** in Settings or the tray menu to interact with windows behind the overlay. Use the tray menu to turn it off at any time; click-through cannot be enabled without a working tray icon.
 - Autostart controls are available only for installed copies. Launching a portable or development copy leaves the installed copy's startup entry untouched.
 - Use the tray menu to change languages and check for updates. When a new version is found, click the status line below Check for Updates to install it; a failed installation can be retried there. Automatic installation is off by default. When enabled, it also enables automatic checks, then downloads and verifies new versions in the background and installs when the app normally exits. The installed build uses the new version on the next launch; the portable helper replaces its executable after exit. Windows installer progress or elevation prompts may still appear. A prepared update can also be installed immediately from the tray status line. Turn on **Include preview releases** to also be offered preview builds (off by default). Previews carry numbered versions (`1.5.0-preview.1` < `1.5.0-preview.2` < `1.5.0`), so each one updates to the next preview or the stable release.
@@ -39,7 +39,7 @@ Smart Pause requests cooperation from Codex; accepted delivery does not verify s
 
 ## Monitor multiple providers
 
-Available enabled local Codex, Claude and DSH sources keep monitoring in the background, with separate readings and burn-rate histories. Click the overlay's provider logo to cycle Codex → Claude → DSH; only sources with an available reading and enabled monitoring are included. Switching displays cached data immediately and leaves monitoring/protection running independently.
+Available enabled local Codex, Claude, DSH and Antigravity sources keep monitoring in the background, with separate readings and burn-rate histories. Click the overlay's provider logo to cycle Codex → Claude → DSH → Antigravity; only sources with an available reading and enabled monitoring are included. Switching displays cached data immediately and leaves monitoring/protection running independently.
 
 Settings separates **Displayed provider** from **Provider settings**. Select a source to configure its monitor and protection without changing the overlay. Disabling its monitor also disables its protection. On upgrade, only the previously selected source inherits an enabled protection switch; other sources start with protection off. Claude live reading remains opt-in. Enabled DSH monitoring automatically connects to a supported running Desktop and reads its active subscription account; pause sessions still require explicit selection.
 
@@ -63,6 +63,11 @@ Choose **Claude** under **Provider settings** to configure its connection and pr
 - With the protection switch on, the hooks refuse new prompts and tool calls while the 5-hour or weekly quota is at or below its threshold, and Claude Code shows the reason. Codex Smart Pause is not used for Claude. An old sample still counts until its reset time, because used quota only grows within a window. A missing or unreadable sample, a passed reset or a turned-off switch always lets requests through.
 - The capsule starts with the active provider's logo (OpenAI for Codex, Claude for Claude); **Show provider logo** hides it. The marks come from Simple Icons (Claude, CC0) and LobeHub Icons (OpenAI, MIT) and are trademarks of their owners. Credits are not shown for Claude. Burn rate and reset state are kept in separate `claude-` prefixed files, so Claude samples never mix with the Codex history.
 - The helper writes `claude-rate-limits.json` and `claude-guard-state.json`, and the overlay writes `claude-guard.json` and `claude-bridge.json`, all in the runtime directory above. Disconnect before uninstalling; otherwise Claude Code keeps calling the removed helper.
+
+## New in v1.9.0
+
+- **Antigravity provider support**: Adds first-class Antigravity monitoring, overlay/tray/carousel switching, and its own Settings tab. Defaults to live `agy /usage` polling alongside the bundled `antigravity-usage-bridge.exe` (`statusline` quota capture and `PreInvocation` low-quota guard hook), supports multi-pool selection (`auto`, `gemini`, `argon`, `3p`) with pool-isolated burn-rate history (`antigravity-<pool>`) and optional AI Credits display, and uses the colourful four-pointed Gemini star logo.
+- **Launch-time update checks and notifications**: Automatic update checks now run right at launch (with 30 s, 2 min, and 10 min failure retries before falling back to 12 hours), and backend-emitted notifications announce found or downloaded updates reliably before the overlay UI attaches.
 
 ## New in v1.8.0
 
@@ -98,12 +103,13 @@ Build and package a release:
 
 ```powershell
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin claude-usage-bridge
+cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin antigravity-usage-bridge
 npm run tauri -- build --ci --bundles nsis,msi
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin codex-usage-updater
-.\scripts\Build-TauriRelease.ps1 -Tag v1.5.1
+.\scripts\Build-TauriRelease.ps1 -Tag v1.9.0
 ```
 
-Set the Tauri updater signing key in the build environment before packaging a release. The tag workflow publishes NSIS, MSI, portable ZIP, signatures, and `latest.json`; the portable updater helper is included in the ZIP. The installers include every Cargo binary present at bundle time, so build the Claude bridge before `tauri build`.
+Set the Tauri updater signing key in the build environment before packaging a release. The tag workflow publishes NSIS, MSI, portable ZIP, signatures, and `latest.json`; the portable updater helper is included in the ZIP. The installers include every Cargo binary present at bundle time, so build the Claude and Antigravity bridges before `tauri build`.
 See the [preview notes](docs/v1.1.0-preview-notes.md) for automated results and Windows checks still to be completed.
 
 ## License

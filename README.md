@@ -25,7 +25,7 @@ Windows 桌面悬浮窗，显示 Codex 配额和 Credit 余额。通过本机 Co
 - 可选开启“额度不足时暂停 Codex”：任一剩余额度达到或低于阈值时（默认 5 小时 5%、每周 2%），应用通过 Codex 桌面客户端的控制面发送协作式“暂停”请求。设置、托盘菜单和托盘提示显示保护状态；设置详情区分“请求已接收”和“已确认中断”，并显示各会话结果。保护默认关闭，请求去重状态保存在内存中。
 - 开启保护后，任一额度距离阈值不超过 5 个百分点时，刷新间隔缩短为 15 秒；连续两次成功读取确认两项额度均高于各自阈值 7 个百分点后，恢复你选择的正常间隔。读取失败时逐步延长重试间隔。设置中显示样本时间和实际刷新间隔。
 - 左键拖动浮窗；右键可刷新、打开设置、隐藏或退出。启用“自动贴边隐藏”后，将浮窗拖到屏幕工作区边缘会收成两条配额指示，悬停时展开。支持多显示器自由拖拽，松手相交面积超过一半时自动归属到对应屏幕，内部接缝平滑漫游不误折叠，屏幕外侧物理边缘安全吸附。仅开启“自动贴边隐藏”时显示“贴边额度条显示 10% 刻度”设置；将浮窗拖到屏幕边缘并移开鼠标，收起的额度条才会显示 10 等分刻度。左键单击托盘图标可立即显示或隐藏浮窗（包括贴边状态）；左键双击只切换一次。右键单击可打开或收起托盘菜单。
-- 设置窗口默认 960×700：通用、Codex、Claude、DSH 分为选项卡，当前页面可滚动。各来源可分别设置刷新间隔、重置通知和音效；外观、语言、启动和更新共用。保留窗口大小和位置记忆。
+- 设置窗口默认 960×700：通用、Codex、Claude、DSH、Antigravity 分为选项卡，当前页面可滚动。各来源可分别设置刷新间隔、重置通知和音效；外观、语言、启动和更新共用。保留窗口大小和位置记忆。
 - 可在设置页或托盘菜单开启“鼠标穿透”，使鼠标操作落到浮窗下方的窗口。穿透时可随时从托盘菜单关闭；系统托盘不可用时不会开启穿透。
 - 仅安装版提供开机自启设置。启动便携版或开发版不会修改安装版的自启注册表项。
 - 托盘菜单可切换语言、检查更新；发现新版本时，“检查更新”下方的状态行可点击安装，安装失败后可直接重试。设置中可关闭自动检查，或允许自动安装更新（默认关闭；开启后也会开启自动检查）：新版会在后台下载、验签，并在正常退出时安装，使用中不会因自动检查而突然关闭。安装版在下次打开时使用新版；便携版退出后由助手替换主程序。系统安装进度或提权提示仍可能出现。更新已就绪时，也可从托盘状态行立即安装。开启“更新时包含预览版”后也会收到预览版（默认关闭）。预览版带有编号（`1.5.0-preview.1` < `1.5.0-preview.2` < `1.5.0`），因此每个预览版都能更新到下一个预览版或正式版。
@@ -39,7 +39,7 @@ Windows 桌面悬浮窗，显示 Codex 配额和 Credit 余额。通过本机 Co
 
 ## 多来源后台监控
 
-已连接且启用的本机 Codex、Claude 和 DSH 会持续在后台监控，各自保存读数和消耗速率历史。点击浮窗来源图标，按 Codex → Claude → DSH 轮换显示，跳过尚无可用读数或已关闭监控的来源。切换直接显示缓存，不会重置历史或改变各来源的保护开关。
+已连接且启用的本机 Codex、Claude、DSH 和 Antigravity 会持续在后台监控，各自保存读数和消耗速率历史。点击浮窗来源图标，按 Codex → Claude → DSH → Antigravity 轮换显示，跳过尚无可用读数或已关闭监控的来源。切换直接显示缓存，不会重置历史或改变各来源的保护开关。
 
 设置将「浮窗显示来源」和「来源设置」分开；可以配置后台来源而不改变当前显示。关闭某来源的监控也会关闭其保护。升级仅保留原来所选来源的保护开启状态，其他来源默认关闭保护。Claude 实时读取仍需主动授权。启用 DSH 监控后会自动接入受支持的 Desktop 并读取活动订阅账户；暂停目标仍须明确选择。
 
@@ -61,6 +61,11 @@ Windows 桌面悬浮窗，显示 Codex 配额和 Credit 余额。通过本机 Co
 - 开启保护开关后，5 小时或每周剩余额度达到或低于阈值时，钩子会拒绝新的提问和工具调用，Claude Code 会显示原因。Claude 不使用 Codex 智能暂停。旧样本在其重置时间之前仍然有效，因为窗口内已用额度只增不减。缺少或无法读取样本、重置时间已过或开关关闭时，请求一律放行。
 - 浮窗开头显示当前来源的图标（Codex 为 OpenAI，Claude 为 Claude），可用“显示来源图标”隐藏。图标取自 Simple Icons（Claude，CC0）和 LobeHub Icons（OpenAI，MIT），商标归各自所有者。Claude 不显示 Credit 余额。消耗速率与重置状态保存在以 `claude-` 开头的独立文件中，Claude 样本不会混入 Codex 历史。
 - 助手写入 `claude-rate-limits.json` 和 `claude-guard-state.json`，浮窗写入 `claude-guard.json` 和 `claude-bridge.json`，均位于上述运行目录。卸载前请先断开连接，否则 Claude Code 会继续调用已删除的助手。
+
+## v1.9.0 新增功能
+
+- **Antigravity 来源支持**：接入 Antigravity CLI 配额监控与独立设置页，默认开启 `agy /usage` 实时轮询，并支持搭配内置 `antigravity-usage-bridge.exe` 状态行/低配额 `PreInvocation` 保护钩子、多配额池选择（`auto` / `gemini` / `argon` / `3p`，按 `antigravity-<pool>` 隔离消耗速率历史）、可选 AI Credits 展示，以及彩色四角星 Gemini 来源图标。
+- **启动即检查更新并始终通知**：开启自动检查更新后，应用启动时立即检查并在后台发送系统通知（包含自动安装已下载待重启提示），未丢失于浮窗加载前；失败后按 30 秒、2 分钟、10 分钟退避重试。
 
 ## v1.8.0 新增功能
 
@@ -96,12 +101,13 @@ npm run tauri dev
 
 ```powershell
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin claude-usage-bridge
+cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin antigravity-usage-bridge
 npm run tauri -- build --ci --bundles nsis,msi
 cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin codex-usage-updater
-.\scripts\Build-TauriRelease.ps1 -Tag v1.5.1
+.\scripts\Build-TauriRelease.ps1 -Tag v1.9.0
 ```
 
-发布前需设置 Tauri 更新签名私钥环境变量。标签发布流程会生成 NSIS、MSI、便携 ZIP、签名和 `latest.json`；便携版更新助手也会一并打包。安装包会包含打包时已存在的所有 Cargo 可执行文件，因此需在 `tauri build` 之前构建 Claude 助手。
+发布前需设置 Tauri 更新签名私钥环境变量。标签发布流程会生成 NSIS、MSI、便携 ZIP、签名和 `latest.json`；便携版更新助手也会一并打包。安装包会包含打包时已存在的所有 Cargo 可执行文件，因此需在 `tauri build` 之前构建 Claude 和 Antigravity 助手。
 预览版的自动化结果与尚未完成的 Windows 实机检查见[预览说明](docs/v1.1.0-preview-notes.md)。
 
 ## 开源协议

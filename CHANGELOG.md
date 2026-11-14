@@ -7,14 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.9.0-preview.1] - 2026-11-13
+## [1.9.0] - 2026-11-13
 
 ### Added
 - First-class **Antigravity** (`antigravity`) provider support alongside Codex, Claude, and DSH, with an independent monitor, tray/overlay/carousel integration, settings tab, and localization in `en-US`, `zh-CN`, and `zh-Hant`.
-- Bundle `antigravity-usage-bridge.exe` (`statusline` quota capture into `%LOCALAPPDATA%\CodexUsageOverlay\antigravity-rate-limits.json` with chaining/backup of `~/.gemini/antigravity-cli/settings.json`, plus `PreInvocation`-only low-quota guard via `~/.gemini/config/hooks.json`).
+- Live `agy /usage` polling (`antigravity_live_polling`, enabled by default) paired with the bundled `antigravity-usage-bridge.exe` (`statusline` quota capture into `%LOCALAPPDATA%\CodexUsageOverlay\antigravity-rate-limits.json` with chaining/backup of `~/.gemini/antigravity-cli/settings.json`, plus `PreInvocation`-only low-quota guard via `~/.gemini/config/hooks.json`).
 - Multi-pool Antigravity selector (`auto`, `gemini`, `argon`, `3p`) with pool-isolated burn-rate history (`antigravity-<pool>`) and optional AI Credits extraction.
+- Colourful four-pointed Gemini star provider logo for Antigravity in the overlay and settings tabs.
 
 ### Changed
+- Fixed Windows `.cmd` shim hook quoting for the Antigravity bridge so installed hook/statusline commands invoke reliably under paths and shells with spaces.
 - With automatic update checks on, check right at launch instead of 15 seconds later, then every 12 hours as before. A failed check retries after 30 seconds, 2 minutes and 10 minutes before falling back to that interval.
 - Always notify when an automatic check finds an update. With automatic installation on, the notification says the update has been downloaded and installs when you quit, instead of downloading silently. Notifications now come from the app itself, so one found right at launch is not lost while the overlay is still loading.
 
