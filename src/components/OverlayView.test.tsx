@@ -460,21 +460,30 @@ it('keeps the capsule unchanged with rotation on and the logo hidden, and correl
   view.unmount();expect(tauri.invoke).toHaveBeenCalledWith('set_display_interaction',{reason:'focus',active:false});
 });
 
-it('renders the Gemini four-pointed star logo with unique gradient ids for Antigravity', () => {
+it('renders the colourful Gemini four-pointed star logo with unique mask and filter ids for Antigravity', () => {
   const { container } = render(
     <div>
       <ProviderLogo provider="antigravity" />
       <ProviderLogo provider="antigravity" />
     </div>,
   );
+  const svgs = [...container.querySelectorAll('svg[data-provider="antigravity"]')];
+  const masks = [...container.querySelectorAll('mask')];
   const gradients = [...container.querySelectorAll('linearGradient')];
-  const paths = [...container.querySelectorAll('path')];
+  const filters = [...container.querySelectorAll('filter')];
+  const maskedGroups = [...container.querySelectorAll('g[mask]')];
+  expect(svgs).toHaveLength(2);
+  expect(svgs.map((node) => node.getAttribute('viewBox'))).toEqual(['0 0 65 65', '0 0 65 65']);
+  expect(masks).toHaveLength(2);
   expect(gradients).toHaveLength(2);
-  expect(paths).toHaveLength(2);
-  const ids = gradients.map((node) => node.getAttribute('id'));
-  expect(ids[0]).toBeTruthy();
-  expect(ids[0]).not.toBe(ids[1]);
-  expect(paths[0].getAttribute('d')).toContain('11.04 19.32');
-  expect(paths[0].getAttribute('fill')).toBe(`url(#${ids[0]})`);
-  expect(paths[1].getAttribute('fill')).toBe(`url(#${ids[1]})`);
+  expect(filters).toHaveLength(22);
+  expect(maskedGroups).toHaveLength(2);
+  const maskIds = masks.map((node) => node.getAttribute('id'));
+  const gradientIds = gradients.map((node) => node.getAttribute('id'));
+  expect(maskIds[0]).toBeTruthy();
+  expect(maskIds[0]).not.toBe(maskIds[1]);
+  expect(gradientIds[0]).toBeTruthy();
+  expect(gradientIds[0]).not.toBe(gradientIds[1]);
+  expect(maskedGroups[0].getAttribute('mask')).toBe(`url(#${maskIds[0]})`);
+  expect(maskedGroups[1].getAttribute('mask')).toBe(`url(#${maskIds[1]})`);
 });
