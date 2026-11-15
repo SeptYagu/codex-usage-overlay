@@ -6,10 +6,8 @@ export const setProtectionFixture = (fixture) => {
     const quotaRecovery = ['protection-retrying', 'protection-quota-error', 'protection-stale'].includes(fixture);
     const summary = fixture === 'protection-requested' ? 'pauseRequested' : fixture === 'protection-error' || quotaRecovery
         ? 'needsAttention' : fixture === 'protection-low' ? 'quotaLow' : 'armed';
-    protection = { revision: ++revision, enabled: true, autoResumeEnabled: false, mode: 'cooperative',
+    protection = { revision: ++revision, enabled: true, mode: 'cooperative',
         connection: fixture === 'protection-error' ? 'unavailable' : 'available',
-        capabilities: { cooperativeDelivery: true, directInterrupt: false, completionObservation: false,
-            userActivityObservation: false, continuationControl: false },
         summary, reason: fixture === 'protection-error' ? 'bridgeUnavailable' : fixture === 'protection-requested' ? 'stoppingUnconfirmed'
             : fixture === 'protection-retrying' ? 'quotaReadRetrying' : fixture === 'protection-quota-error' ? 'quotaReadFailed' : fixture === 'protection-stale' ? 'quotaStale' : null,
         confirmedCount: 1, acceptedRequestCount: 1, confirmedInterruptionCount: 0, lastConfirmedAt: now,
@@ -20,7 +18,7 @@ export const setProtectionFixture = (fixture) => {
             lastFailure: { startedAt: now - 60, failure: { kind: 'timeout', stage: 'quota' } } } : null,
         targets: fixture === 'protection-requested' ? [{ threadId: '0199b0d2-4444-7000-8000-000000000004', periodId: 'fixture-period', active: true,
             hostId: 'local', turnId: null, phase: 'accepted', reason: 'stoppingUnconfirmed', requestedAt: now,
-            acceptedAt: now, interruptedAt: null }] : [], resumePlans: [], resumeStateError: null };
+            acceptedAt: now, interruptedAt: null }] : [], pausedThreads: [] };
     for (const callback of listeners.get('auto_pause_status_changed') ?? []) callback({ payload: protection });
 };
 export const invoke = async (cmd, args) => {

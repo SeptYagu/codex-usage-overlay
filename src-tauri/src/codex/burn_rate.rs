@@ -6,15 +6,6 @@ use crate::config::ConfigManager;
 
 use super::{QuotaSnapshot, RawCodexUsage};
 
-use personal::{
-    LatchedRejection, MaturedOutcome, PendingOutcome, PendingPersonalForecast,
-    PersonalCalibrationState, RejectionReason,
-};
-use shadow::{
-    append_evidence_event, compact_evidence_log, count_evidence_events, lifecycle_event,
-    matured_event, rejected_event, FiveHourShadowEstimate, FiveHourShadowState, ShadowEvidenceEvent,
-    MAX_EVIDENCE_EVENTS, SHADOW_ALGORITHM_VERSION,
-};
 use weighted::{
     WeightedParameters, WeightedShadowState, FIVE_HOUR_HARD_EVIDENCE_HORIZON_SECS,
     FIVE_HOUR_MIN_LEVEL_SPAN,
@@ -22,12 +13,168 @@ use weighted::{
 
 const SCHEMA_VERSION: u32 = 2;
 const LEGACY_SCHEMA_VERSION: u32 = 1;
+const SHADOW_ALGORITHM_VERSION: u32 = 1;
+const FEEDBACK_HORIZON_SECS: i64 = 300;
+const FEEDBACK_MAX_ELAPSED_SECS: i64 = 390;
+const FEEDBACK_MAX_GAP_SECS: i64 = 90;
 const FIVE_HOUR_HORIZON_SECS: i64 = 30 * 60;
 const WEEKLY_HORIZON_SECS: i64 = 24 * 60 * 60;
 const FIVE_HOUR_MAX_GAP_SECS: i64 = 10 * 60;
 const WEEKLY_MAX_GAP_SECS: i64 = 6 * 60 * 60;
 const MAX_CROSSINGS: usize = 64;
 const EPSILON: f64 = 1e-9;
+
+enum PendingOutcome {
+    Continue,
+    Duplicate,
+    Rejected,
+    Matured(affine::AffineSample),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingInterval {
+    pub algorithm_version: u32,
+    pub origin_at: i64,
+    pub origin_used_percent: f64,
+    pub origin_reset_at: i64,
+    pub origin_fixed_rate_per_hour: f64,
+    pub last_valid_at: i64,
+    pub last_valid_used_percent: f64,
+    pub origin_segment_id: u64,
+    #[serde(default, skip_serializing)]
+    pub latched_rejection: Option<serde_json::Value>,
+}
+
+impl PendingInterval {
+    fn build(
+        origin_at: i64,
+        used: Option<f64>,
+        resets_at: Option<i64>,
+        fixed_rate: Option<f64>,
+        segment_id: u64,
+    ) -> Option<Self> {
+        let used = used.filter(|&v| v < 100.0)?;
+        let resets_at = resets_at?;
+        let fixed_rate = fixed_rate.filter(|&r| r.is_finite() && r > 0.0)?;
+        if origin_at <= 0 {
+            return None;
+        }
+        Some(Self {
+            algorithm_version: SHADOW_ALGORITHM_VERSION,
+            origin_at,
+            origin_used_percent: used,
+            origin_reset_at: resets_at,
+            origin_fixed_rate_per_hour: fixed_rate,
+            last_valid_at: origin_at,
+            last_valid_used_percent: used,
+            origin_segment_id: segment_id,
+            latched_rejection: None,
+        })
+    }
+
+    fn observe(
+        &mut self,
+        observed_at: i64,
+        used_percent: f64,
+        resets_at: Option<i64>,
+    ) -> PendingOutcome {
+        if observed_at == self.last_valid_at {
+            return PendingOutcome::Duplicate;
+        }
+        if observed_at < self.last_valid_at
+            || observed_at - self.last_valid_at > FEEDBACK_MAX_GAP_SECS
+            || resets_at != Some(self.origin_reset_at)
+            || used_percent + EPSILON < self.last_valid_used_percent
+            || used_percent >= 100.0
+        {
+            return PendingOutcome::Rejected;
+        }
+        let elapsed = observed_at - self.origin_at;
+        if elapsed > FEEDBACK_MAX_ELAPSED_SECS {
+            return PendingOutcome::Rejected;
+        }
+        if elapsed < FEEDBACK_HORIZON_SECS {
+            self.last_valid_at = observed_at;
+            self.last_valid_used_percent = used_percent;
+            return PendingOutcome::Continue;
+        }
+        let remaining = (100.0 - self.origin_used_percent).max(0.0);
+        let fixed = (self.origin_fixed_rate_per_hour * elapsed as f64 / 3600.0).clamp(0.0, remaining);
+        let observed_delta = used_percent - self.origin_used_percent;
+        let confidence = if observed_delta.abs() <= EPSILON && fixed < 0.75 {
+            0.0
+        } else {
+            1.0
+        };
+        PendingOutcome::Matured(affine::AffineSample {
+            elapsed_seconds: elapsed,
+            observed_delta,
+            fixed_predicted_delta: fixed,
+            confidence,
+        })
+    }
+
+    pub fn is_valid_for(&self, quota: &QuotaRateState) -> bool {
+        self.latched_rejection.is_none()
+            && self.algorithm_version == SHADOW_ALGORITHM_VERSION
+            && self.origin_at > 0
+            && self.last_valid_at >= self.origin_at
+            && self.origin_used_percent.is_finite()
+            && (0.0..100.0).contains(&self.origin_used_percent)
+            && self.last_valid_used_percent.is_finite()
+            && self.last_valid_used_percent >= self.origin_used_percent - EPSILON
+            && self.last_valid_used_percent < 100.0
+            && self.origin_reset_at > 0
+            && self.origin_fixed_rate_per_hour.is_finite()
+            && self.origin_fixed_rate_per_hour > 0.0
+            && self.origin_segment_id == quota.segment_id
+            && quota.last_observed_at.is_some_and(|at| at >= self.last_valid_at)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FiveHourShadowState {
+    pub algorithm_version: u32,
+    pub weighted: WeightedShadowState,
+    #[serde(default, deserialize_with = "affine::recover")]
+    pub affine: affine::AffineCalibration,
+    pub pending: Option<PendingInterval>,
+}
+
+impl Default for FiveHourShadowState {
+    fn default() -> Self {
+        Self {
+            algorithm_version: SHADOW_ALGORITHM_VERSION,
+            weighted: WeightedShadowState::default(),
+            affine: affine::AffineCalibration::default(),
+            pending: None,
+        }
+    }
+}
+
+impl FiveHourShadowState {
+    pub fn isolate_algorithm_version(&mut self) -> bool {
+        if self.algorithm_version == SHADOW_ALGORITHM_VERSION {
+            return false;
+        }
+        *self = Self::default();
+        true
+    }
+
+    pub fn normalize(&mut self, quota: &QuotaRateState) -> bool {
+        let before = self.clone();
+        self.weighted.normalize(quota);
+        if !self.affine.valid(quota.last_observed_at) {
+            self.affine = affine::AffineCalibration::default();
+        }
+        if self.pending.as_ref().is_some_and(|pending| !pending.is_valid_for(quota)) {
+            self.pending = None;
+        }
+        before != *self
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -138,104 +285,18 @@ pub struct BurnRateEstimate {
     pub state_changed: bool,
 }
 
-/// What the account transition did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AccountTransition {
-    /// The account did not change.
-    None,
-    /// The account was attributed for the first time.
-    Attributed,
-    /// A confirmed account switch cleared the per-account state.
-    Switched,
-}
-
-/// The personal outcome of one observation.
-enum PersonalOutcome {
-    /// The interval matured and trained the learner.
-    Matured {
-        pending: PendingPersonalForecast,
-        matured: MaturedOutcome,
-        before: PersonalCalibrationState,
-    },
-    /// The interval was rejected without learning.
-    Rejected {
-        pending: PendingPersonalForecast,
-        reason: RejectionReason,
-    },
-}
-
-/// The learner values that are stored with a pending interval.
-#[derive(Clone, Copy, Debug)]
-struct LearnerSnapshot {
-    raw_factor: f64,
-    trust: f64,
-    effective_factor: f64,
-    evidence: f64,
-    informative_updates: u64,
-}
-
-/// What one accepted quota sample did to the history.
-///
-/// The classification is the transition signal the shadow path needs: it
-/// tells a real quota cycle, an overnight resume and a confirmed correction
-/// apart, and it records whether the production baseline advanced, which is
-/// the definition of an accepted observation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QuotaAcceptance {
-    /// The persisted state changed.
     changed: bool,
-    /// The production baseline advanced.
     accepted: bool,
-    /// The transition that ended the previous segment, if any.
-    transition: Option<SegmentTransition>,
-}
-
-/// The reason a new quota segment started.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SegmentTransition {
-    /// The quota cycle completed.
-    QuotaCycle,
-    /// The observation gap exceeded the production maximum.
-    LongIdle,
-    /// A decrease was confirmed by a later observation.
-    Correction,
-}
-
-impl SegmentTransition {
-    /// The stable evidence-log code of the transition.
-    fn code(&self) -> &'static str {
-        match self {
-            Self::QuotaCycle => "quota_cycle",
-            Self::LongIdle => "long_idle",
-            Self::Correction => "correction",
-        }
-    }
-
-    /// The stable rejection reason of a pending interval the transition
-    /// invalidated.
-    fn rejection_reason(&self) -> RejectionReason {
-        match self {
-            Self::QuotaCycle => RejectionReason::QuotaCycle,
-            Self::LongIdle => RejectionReason::LongIdle,
-            Self::Correction => RejectionReason::Correction,
-        }
-    }
-}
-
-/// The result of one shadow pass.
-struct ShadowPass {
-    state_changed: bool,
-    estimate: FiveHourShadowEstimate,
+    transitioned: bool,
 }
 
 pub struct BurnRateTracker {
     state: BurnRateStateFile,
     /// The in-memory state is newer than the persisted copy.
     state_dirty: bool,
-    /// How many records the local evidence log holds.
-    evidence_lines: usize,
-    /// The last shadow diagnostic. It never reaches the frontend.
-    shadow_estimate: FiveHourShadowEstimate,
+    weighted_five_hour_per_hour: Option<f64>,
     affine_enabled: bool,
     local_codex: bool,
     observation_gap: bool,
@@ -251,30 +312,15 @@ impl BurnRateTracker {
             .ok()
             .map(|raw| load_state(&raw))
             .unwrap_or_default();
-        let evidence_lines = count_evidence_events(&config.shadow_evidence_path());
-        let mut tracker = Self {
+        Self {
             state,
             state_dirty: migrated,
-            evidence_lines,
-            shadow_estimate: FiveHourShadowEstimate::default(),
+            weighted_five_hour_per_hour: None,
             affine_enabled: config.is_local_codex(),
             local_codex: config.is_local_codex(),
-            observation_gap:false,observation_unavailable:false,
-        };
-        // A retained audit event is flushed before any new feedback is
-        // processed, so a crash between the learner update and the log append
-        // does not lose the outcome.
-        if let Err(error) = tracker.flush_audit_outbox(config) {
-            eprintln!("Could not append the retained shadow evidence: {error}");
-        } else if tracker.is_dirty() {
-            // The retained event reached the log, so the cleared slot is
-            // persisted. Without it the next start would read the event again
-            // and append it to the evidence log a second time.
-            if let Err(error) = tracker.save(config) {
-                eprintln!("Could not persist the burn-rate state: {error}");
-            }
+            observation_gap: false,
+            observation_unavailable: false,
         }
-        tracker
     }
 
     #[cfg(test)]
@@ -282,25 +328,48 @@ impl BurnRateTracker {
         Self {
             state,
             state_dirty: false,
-            evidence_lines: 0,
-            shadow_estimate: FiveHourShadowEstimate::default(),
+            weighted_five_hour_per_hour: None,
             affine_enabled: true,
             local_codex: true,
-            observation_gap:false,observation_unavailable:false,
+            observation_gap: false,
+            observation_unavailable: false,
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn test_snapshot(&self)->serde_json::Value {serde_json::to_value(&self.state).unwrap()}
+    pub(crate) fn test_snapshot(&self) -> serde_json::Value {
+        serde_json::to_value(&self.state).unwrap()
+    }
+
     pub fn candidates(&self, estimate: &BurnRateEstimate) -> crate::presentation::Candidates {
-        if !self.affine_enabled || self.state.account_id.is_none() && !self.local_codex {
-            return crate::presentation::Candidates { legacy:estimate.five_hour_per_hour, weighted:None, personalized:None, learning:"identityUnavailable" };
+        if !self.affine_enabled || (self.state.account_id.is_none() && !self.local_codex) {
+            return crate::presentation::Candidates {
+                legacy: estimate.five_hour_per_hour,
+                weighted: None,
+                personalized: None,
+                learning: "identityUnavailable",
+            };
         }
-        let learning=if self.state_dirty || self.state.five_hour_shadow.audit_outbox.is_some(){"persistencePaused"}
-            else if self.observation_gap {"observationGap"} else if self.observation_unavailable {"observationUnavailable"}
-            else if self.state.five_hour_shadow.affine.n==0.{"accumulating"}else{"active"};
-        crate::presentation::Candidates{legacy:estimate.five_hour_per_hour,weighted:self.shadow_estimate.fixed_weighted_per_hour,
-            personalized:self.affine_enabled.then(||self.shadow_estimate.fixed_weighted_per_hour.and_then(|rate|self.state.five_hour_shadow.affine.rate(rate))).flatten(),learning}
+        let learning = if self.state_dirty {
+            "persistencePaused"
+        } else if self.observation_gap {
+            "observationGap"
+        } else if self.observation_unavailable {
+            "observationUnavailable"
+        } else if self.state.five_hour_shadow.affine.n == 0.0 {
+            "accumulating"
+        } else {
+            "active"
+        };
+        crate::presentation::Candidates {
+            legacy: estimate.five_hour_per_hour,
+            weighted: self.weighted_five_hour_per_hour,
+            personalized: self.affine_enabled.then(|| {
+                self.weighted_five_hour_per_hour
+                    .and_then(|rate| self.state.five_hour_shadow.affine.rate(rate))
+            }).flatten(),
+            learning,
+        }
     }
 
     pub fn save(&mut self, config: &ConfigManager) -> Result<(), String> {
@@ -309,76 +378,25 @@ impl BurnRateTracker {
         let serialized = serde_json::to_vec_pretty(&self.state).map_err(|e| e.to_string())?;
         fs::write(&tmp, serialized).map_err(|e| e.to_string())?;
         fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-        // The state is durable now, so a retained audit event may be appended.
         self.state_dirty = false;
         Ok(())
     }
 
-    /// The last shadow diagnostic of the tracker.
-    ///
-    /// It is internal evidence and never reaches the frontend. The shadow
-    /// phase deliberately publishes nothing, so the accessor is only called
-    /// by the offline tests that audit the learner.
-    #[allow(dead_code)]
-    pub fn shadow_estimate(&self) -> &FiveHourShadowEstimate {
-        &self.shadow_estimate
-    }
-
     /// Whether the persisted copy is older than the in-memory state.
-    ///
-    /// It stays true after a failed write, so the next refresh retries the
-    /// persistence instead of silently dropping the change.
     pub fn is_dirty(&self) -> bool {
         self.state_dirty
-    }
-
-    /// Appends a retained audit event to the local evidence log.
-    ///
-    /// The event is only appended when the learner state that produced it is
-    /// durable. A failed append keeps the event in the slot, so the next
-    /// refresh retries it and no personal outcome is lost.
-    pub fn flush_audit_outbox(&mut self, config: &ConfigManager) -> Result<(), String> {
-        let Some(event) = self.state.five_hour_shadow.audit_outbox.clone() else {
-            return Ok(());
-        };
-        if self.state_dirty {
-            // The learner state behind the event is not durable yet.
-            return Err("the burn-rate state is not persisted".to_string());
-        }
-        append_evidence_event(&config.shadow_evidence_path(), &event)?;
-        self.evidence_lines += 1;
-        if self.evidence_lines > MAX_EVIDENCE_EVENTS {
-            self.evidence_lines = compact_evidence_log(&config.shadow_evidence_path())?;
-        }
-        // The slot is cleared in memory; the persisted copy is replaced with
-        // the next state-changing save.
-        self.state.five_hour_shadow.audit_outbox = None;
-        // The cleared slot is a change of the persisted state. Without the
-        // flag the next start would read the retained event again and append
-        // it to the evidence log a second time.
-        self.state_dirty = true;
-        Ok(())
     }
 
     pub fn accept_usage(&mut self, usage: &RawCodexUsage) -> BurnRateEstimate {
         self.affine_enabled = self.local_codex || usage.account_id.as_deref().is_some_and(|id| !id.is_empty());
         let mut changed = false;
 
-        // The weighted metadata is repaired against the production history
-        // before the incoming observation advances the baseline.
-        changed |= self
-            .state
-            .five_hour_shadow
-            .normalize(&self.state.five_hour);
+        changed |= self.state.five_hour_shadow.normalize(&self.state.five_hour);
+        changed |= self.accept_account(usage.account_id.as_deref());
 
-        let account_transition = self.accept_account(usage.account_id.as_deref());
-        changed |= account_transition != AccountTransition::None;
-
-        // The shadow path needs the pre-accept state, so the transition it
-        // observes is the one the production tracker just made.
         let before = self.state.five_hour.clone();
-        self.observation_gap=before.last_observed_at.is_some_and(|at|usage.fetched_at.saturating_sub(at)>90);
-        self.observation_unavailable=valid_used_percent(&usage.five_hour).is_none();
+        self.observation_gap = before.last_observed_at.is_some_and(|at| usage.fetched_at.saturating_sub(at) > FEEDBACK_MAX_GAP_SECS);
+        self.observation_unavailable = valid_used_percent(&usage.five_hour).is_none();
         let acceptance = accept_quota(
             &mut self.state.five_hour,
             &usage.five_hour,
@@ -389,13 +407,13 @@ impl BurnRateTracker {
         let five_hour_per_hour = valid_used_percent(&usage.five_hour)
             .and_then(|_| estimate_rate(&self.state.five_hour, FIVE_HOUR_HORIZON_SECS, 2));
 
-        let shadow = if self.affine_enabled {
-            self.process_five_hour_shadow(usage, &before, acceptance, five_hour_per_hour, account_transition)
+        let (calibration_changed, weighted_rate) = if self.affine_enabled {
+            self.process_five_hour_calibration(usage, &before, acceptance)
         } else {
-            ShadowPass { state_changed:false, estimate:FiveHourShadowEstimate::default() }
+            (false, None)
         };
-        changed |= shadow.state_changed;
-        self.shadow_estimate = shadow.estimate;
+        changed |= calibration_changed;
+        self.weighted_five_hour_per_hour = weighted_rate;
 
         changed |= accept_quota(
             &mut self.state.weekly,
@@ -417,197 +435,82 @@ impl BurnRateTracker {
         }
     }
 
-    fn accept_account(&mut self, incoming: Option<&str>) -> AccountTransition {
+    fn accept_account(&mut self, incoming: Option<&str>) -> bool {
         let Some(incoming) = incoming.filter(|id| !id.is_empty()) else {
             if self.local_codex || self.state.account_id.is_none() {
-                return AccountTransition::None;
+                return false;
             }
-            // An unattributed sample may belong to another account. Drop the
-            // identified baseline before collecting a temporary classic one.
             self.state.account_id = None;
             self.reset_account_history();
-            return AccountTransition::Switched;
+            return true;
         };
         if self.state.account_id.as_deref() == Some(incoming) {
-            return AccountTransition::None;
+            return false;
         }
 
-        let had_attributed_or_unattributed_history = self.state.account_id.is_some()
+        let had_history = self.state.account_id.is_some()
             || self.state.five_hour.last_observed_at.is_some()
             || self.state.weekly.last_observed_at.is_some();
         self.state.account_id = Some(incoming.to_string());
-        if !had_attributed_or_unattributed_history {
-            return AccountTransition::Attributed;
+        if had_history {
+            self.reset_account_history();
         }
-
-        self.reset_account_history();
-        AccountTransition::Switched
+        true
     }
 
     fn reset_account_history(&mut self) {
         self.state.five_hour = QuotaRateState::default();
         self.state.weekly = QuotaRateState::default();
-        // No personal calibration and no audit identity may cross accounts.
-        self.state.five_hour_shadow.weighted = WeightedShadowState::default();
-        self.state.five_hour_shadow.personal = PersonalCalibrationState::default();
-        self.state.five_hour_shadow.affine = affine::AffineCalibration::default();
-        self.state.five_hour_shadow.pending = None;
-        self.state.five_hour_shadow.account_generation =
-            self.state.five_hour_shadow.account_generation.saturating_add(1);
-        self.state.five_hour_shadow.event_sequence = 0;
+        self.state.five_hour_shadow = FiveHourShadowState::default();
     }
 
-    /// Runs the shadow pass of one accepted observation.
-    ///
-    /// The order is the validated causal order: the weighted metadata
-    /// transition, the personal outcome, the current Fixed Weighted rate, the
-    /// personalized rate and finally the new origin snapshot. Nothing here
-    /// reaches the frontend.
-    fn process_five_hour_shadow(
+    fn process_five_hour_calibration(
         &mut self,
         usage: &RawCodexUsage,
         before: &QuotaRateState,
         acceptance: QuotaAcceptance,
-        published_rate: Option<f64>,
-        account_transition: AccountTransition,
-    ) -> ShadowPass {
+    ) -> (bool, Option<f64>) {
         let observed_at = usage.fetched_at;
         let mut changed = false;
         let after = self.state.five_hour.clone();
         let used = valid_used_percent(&usage.five_hour);
         let resets_at = usage.five_hour.resets_at.filter(|value| *value > 0);
-        let transition = acceptance.transition;
 
-        // The Fixed Weighted metadata follows the production crossing history.
-        if self
+        changed |= self
             .state
             .five_hour_shadow
             .weighted
-            .apply_transition(before, &after, observed_at)
-        {
-            changed = true;
-        }
+            .apply_transition(before, &after, observed_at);
 
-        // The personal outcome is paused while an audit event is still waiting
-        // for the durable evidence log. The weighted estimator keeps running.
-        let audit_busy = self.state.five_hour_shadow.audit_outbox.is_some();
-        let mut outcome: Option<PersonalOutcome> = None;
-
-        if audit_busy {
-            // The outbox still holds an unappended event, so the interval can
-            // not be settled. It is not blind, though: a segment reset or a
-            // decrease in this tick invalidates it, and the decision is
-            // latched on the interval, so that no later observation can wash
-            // it away.
-            if let Some(pending) = self.state.five_hour_shadow.pending.as_mut() {
-                if pending.latched_rejection.is_none() {
-                    let reason = match transition {
-                        Some(transition) => Some(transition.rejection_reason()),
-                        None if after.segment_id != pending.origin_segment_id => {
-                            Some(RejectionReason::SegmentReset)
-                        }
-                        None => None,
-                    };
-                    if let Some(reason) = reason {
-                        pending.latch_rejection(LatchedRejection {
-                            reason,
-                            observed_at,
-                            target_used_percent: used,
-                            actual_gap_seconds: (observed_at >= pending.last_valid_at)
-                                .then(|| observed_at - pending.last_valid_at),
-                        });
+        if let Some(mut pending) = self.state.five_hour_shadow.pending.take() {
+            if acceptance.transitioned || after.segment_id != pending.origin_segment_id {
+                changed = true;
+            } else if let Some(used) = used {
+                match pending.observe(observed_at, used, resets_at) {
+                    PendingOutcome::Continue => {
                         changed = true;
-                    } else if let Some(used) = used {
-                        // The interval is observed but never settled: a matured
-                        // outcome would overwrite the retained event, so the
-                        // learner stays untouched and the interval waits.
-                        match pending.observe(observed_at, used, resets_at) {
-                            PendingOutcome::Continue => {
-                                changed = true;
-                            }
-                            PendingOutcome::Duplicate => {}
-                            PendingOutcome::Rejected(reason) => {
-                                pending.latch_rejection(LatchedRejection {
-                                    reason,
-                                    observed_at,
-                                    target_used_percent: Some(used),
-                                    actual_gap_seconds: (observed_at >= pending.last_valid_at)
-                                        .then(|| observed_at - pending.last_valid_at),
-                                });
-                                changed = true;
-                            }
-                            PendingOutcome::Matured(_) => {}
-                        }
-                    }
-                }
-            }
-        } else if let Some(mut pending) = self.state.five_hour_shadow.pending.take() {
-            // A latched rejection is settled first: it was decided while the
-            // outbox was busy and it must not be washed away.
-            if let Some(latched) = pending.latched_rejection {
-                outcome = Some(PersonalOutcome::Rejected {
-                    pending,
-                    reason: latched.reason,
-                });
-                changed = true;
-            } else if let Some(transition) = transition {
-                // A confirmed transition invalidates the pending interval
-                // before it can train.
-                outcome = Some(PersonalOutcome::Rejected {
-                    pending,
-                    reason: transition.rejection_reason(),
-                });
-                changed = true;
-            } else if after.segment_id != pending.origin_segment_id {
-                // The interval outlived the segment it was created in, so it
-                // can never train the learner.
-                outcome = Some(PersonalOutcome::Rejected {
-                    pending,
-                    reason: RejectionReason::SegmentReset,
-                });
-                changed = true;
-            } else {
-                match used {
-                    Some(used) => match pending.observe(observed_at, used, resets_at) {
-                        PendingOutcome::Continue => {
-                            changed = true;
-                            self.state.five_hour_shadow.pending = Some(pending);
-                        }
-                        PendingOutcome::Duplicate => {
-                            self.state.five_hour_shadow.pending = Some(pending);
-                        }
-                        PendingOutcome::Rejected(reason) => {
-                            outcome = Some(PersonalOutcome::Rejected { pending, reason });
-                            changed = true;
-                        }
-                        PendingOutcome::Matured(matured) => {
-                            let learner_before = self.state.five_hour_shadow.personal.clone();
-                            if self.affine_enabled {self.state.five_hour_shadow.affine.learn(pending.origin_fixed_rate_per_hour, &matured, observed_at);}
-                            self.state.five_hour_shadow.personal.apply_outcome(
-                                matured.confidence,
-                                matured.predicted_delta,
-                                matured.observed_delta,
-                                observed_at,
-                            );
-                            outcome = Some(PersonalOutcome::Matured {
-                                pending,
-                                matured,
-                                before: learner_before,
-                            });
-                            changed = true;
-                        }
-                    },
-                    None => {
-                        // A missing sample neither advances nor rejects the
-                        // interval; the next valid observation is compared with
-                        // the last valid one.
                         self.state.five_hour_shadow.pending = Some(pending);
                     }
+                    PendingOutcome::Duplicate => {
+                        self.state.five_hour_shadow.pending = Some(pending);
+                    }
+                    PendingOutcome::Rejected => {
+                        changed = true;
+                    }
+                    PendingOutcome::Matured(sample) => {
+                        self.state.five_hour_shadow.affine.learn(
+                            pending.origin_fixed_rate_per_hour,
+                            &sample,
+                            observed_at,
+                        );
+                        changed = true;
+                    }
                 }
+            } else {
+                self.state.five_hour_shadow.pending = Some(pending);
             }
         }
 
-        // The current Fixed Weighted rate, published after the outcome.
         let metadata_before = (
             self.state.five_hour_shadow.weighted.last_crossing_observation_at,
             self.state.five_hour_shadow.weighted.idle_rate_ceiling,
@@ -628,178 +531,17 @@ impl BurnRateTracker {
             changed = true;
         }
 
-        // The personalized rate, from the post-outcome learner state.
-        let (learner, raw_factor, trust, effective_factor) = {
-            let personal = &self.state.five_hour_shadow.personal;
-            (
-                LearnerSnapshot {
-                    raw_factor: personal.raw_factor(),
-                    trust: personal.trust(),
-                    effective_factor: personal.effective_factor(),
-                    evidence: personal.evidence,
-                    informative_updates: personal.informative_updates,
-                },
-                personal.raw_factor(),
-                personal.trust(),
-                personal.effective_factor(),
-            )
-        };
-        let personalized = fixed_rate.map(|rate| rate * effective_factor);
-
-        // The evidence event is formed only now, so it carries the state that
-        // the outcome produced. A retained event is never overwritten: the
-        // audit slot holds one event, and a second one would destroy a record
-        // whose learner update already survived.
-        if self.state.five_hour_shadow.audit_outbox.is_none() {
-            let event = match outcome {
-                Some(PersonalOutcome::Matured {
-                    pending,
-                    matured,
-                    before: learner_before,
-                }) => Some(matured_event(
-                    &pending,
-                    &matured,
-                    &learner_before,
-                    &self.state.five_hour_shadow.personal,
-                    observed_at,
-                    personalized,
-                )),
-                Some(PersonalOutcome::Rejected { pending, reason }) => {
-                    // A latched rejection keeps the observation that caused
-                    // it, so the evidence describes the violation instead of
-                    // the tick that finally reported it.
-                    let (target_at, target_used, actual_gap) = match pending.latched_rejection {
-                        Some(latched) => (
-                            latched.observed_at,
-                            latched.target_used_percent,
-                            latched.actual_gap_seconds,
-                        ),
-                        None => (
-                            observed_at,
-                            used,
-                            // A backwards observation has no gap at all.
-                            (observed_at >= pending.last_valid_at)
-                                .then(|| observed_at - pending.last_valid_at),
-                        ),
-                    };
-                    Some(rejected_event(
-                        &pending,
-                        reason,
-                        target_at,
-                        target_used,
-                        actual_gap,
-                    ))
-                }
-                None => lifecycle_event_for(account_transition, transition, observed_at),
-            };
-            if let Some(mut event) = event {
-                self.state.five_hour_shadow.event_sequence =
-                    self.state.five_hour_shadow.event_sequence.saturating_add(1);
-                event.account_generation = self.state.five_hour_shadow.account_generation;
-                event.event_sequence = self.state.five_hour_shadow.event_sequence;
-                self.state.five_hour_shadow.audit_outbox = Some(event);
-                changed = true;
-            }
-        }
-
-        // A finished interval is replaced by a fresh origin at the same
-        // observation. The production must have accepted the observation, so
-        // the origin is never built from a sample the burn-rate history
-        // refused.
-        if !audit_busy
-            && acceptance.accepted
-            && self.state.five_hour_shadow.pending.is_none()
-        {
-            if let Some(mut pending) = build_pending(
-                observed_at,
-                used,
-                resets_at,
-                published_rate,
-                fixed_rate,
-                personalized,
-                learner,
-                after.segment_id,
-            ) {
-                pending.origin_affine_rate_per_hour = self.affine_enabled.then(||fixed_rate.and_then(|rate|self.state.five_hour_shadow.affine.rate(rate))).flatten();
+        if acceptance.accepted && self.state.five_hour_shadow.pending.is_none() {
+            if let Some(pending) =
+                PendingInterval::build(observed_at, used, resets_at, fixed_rate, after.segment_id)
+            {
                 self.state.five_hour_shadow.pending = Some(pending);
                 changed = true;
             }
         }
 
-        ShadowPass {
-            state_changed: changed,
-            estimate: FiveHourShadowEstimate {
-                fixed_weighted_per_hour: fixed_rate,
-                personalized_per_hour: personalized,
-                raw_factor: fixed_rate.map(|_| raw_factor),
-                trust,
-                effective_factor,
-                evidence: learner.evidence,
-                matured_feedbacks: self.state.five_hour_shadow.personal.matured_feedbacks,
-                informative_updates: self.state.five_hour_shadow.personal.informative_updates,
-            },
-        }
+        (changed, fixed_rate)
     }
-}
-
-/// The lifecycle evidence of an observation without a personal outcome.
-fn lifecycle_event_for(
-    account_transition: AccountTransition,
-    transition: Option<SegmentTransition>,
-    at: i64,
-) -> Option<ShadowEvidenceEvent> {
-    if account_transition == AccountTransition::Switched {
-        return Some(lifecycle_event("account_switch", at));
-    }
-    transition.map(|transition| lifecycle_event(transition.code(), at))
-}
-
-/// Builds the origin snapshot of a new five-minute learning interval.
-///
-/// The snapshot is causal: it stores the rates that were published at this
-/// observation, so the matured outcome can score them later without
-/// reconstructing them from the target time.
-fn build_pending(
-    origin_at: i64,
-    used: Option<f64>,
-    resets_at: Option<i64>,
-    published_rate: Option<f64>,
-    fixed_rate: Option<f64>,
-    personalized: Option<f64>,
-    learner: LearnerSnapshot,
-    segment_id: u64,
-) -> Option<PendingPersonalForecast> {
-    let used = used?;
-    if used >= 100.0 {
-        return None;
-    }
-    let resets_at = resets_at?;
-    let fixed_rate = fixed_rate?;
-    if !fixed_rate.is_finite() || fixed_rate <= 0.0 {
-        return None;
-    }
-    if origin_at <= 0 {
-        return None;
-    }
-    Some(PendingPersonalForecast {
-        algorithm_version: SHADOW_ALGORITHM_VERSION,
-        origin_at,
-        origin_used_percent: used,
-        origin_reset_at: resets_at,
-        origin_published_rate_per_hour: published_rate,
-        origin_fixed_rate_per_hour: fixed_rate,
-        origin_raw_factor: learner.raw_factor,
-        origin_trust: learner.trust,
-        origin_effective_factor: learner.effective_factor,
-        origin_shadow_rate_per_hour: personalized,
-        origin_affine_rate_per_hour: None,
-        origin_evidence: learner.evidence,
-        origin_informative_updates: learner.informative_updates,
-        last_valid_at: origin_at,
-        last_valid_used_percent: used,
-        origin_segment_id: segment_id,
-        latched_rejection: None,
-    })
 }
 
 fn valid_used_percent(snapshot: &QuotaSnapshot) -> Option<f64> {
@@ -813,28 +555,23 @@ fn accept_quota(
     max_gap_secs: i64,
 ) -> QuotaAcceptance {
     let before_observed_at = state.last_observed_at;
-    let (changed, transition) =
+    let (changed, transitioned) =
         accept_quota_sample(state, snapshot, observed_at, max_gap_secs);
     QuotaAcceptance {
         changed,
-        // The observation was accepted when the production baseline advanced.
         accepted: state.last_observed_at != before_observed_at,
-        transition,
+        transitioned,
     }
 }
 
-/// Applies one quota sample and classifies the transition it caused.
-///
-/// The state semantics are unchanged; only the transition cause is reported
-/// alongside the changed flag.
 fn accept_quota_sample(
     state: &mut QuotaRateState,
     snapshot: &QuotaSnapshot,
     observed_at: i64,
     max_gap_secs: i64,
-) -> (bool, Option<SegmentTransition>) {
+) -> (bool, bool) {
     let Some(current) = valid_used_percent(snapshot) else {
-        return (false, None);
+        return (false, false);
     };
 
     let (boundary_changed, actual_cycle_transition) =
@@ -843,36 +580,36 @@ fn accept_quota_sample(
     if actual_cycle_transition {
         start_new_segment(state);
         set_baseline(state, current, observed_at);
-        return (true, Some(SegmentTransition::QuotaCycle));
+        return (true, true);
     }
 
     let Some(previous_at) = state.last_observed_at else {
         set_baseline(state, current, observed_at);
-        return (true, None);
+        return (true, false);
     };
     let previous = state.last_observed_percent.unwrap_or(current);
 
     if observed_at < previous_at {
-        return (changed, None);
+        return (changed, false);
     }
     if observed_at.saturating_sub(previous_at) > max_gap_secs {
         start_new_segment(state);
         set_baseline(state, current, observed_at);
-        return (true, Some(SegmentTransition::LongIdle));
+        return (true, true);
     }
 
     if current + EPSILON < previous {
         if state.correction_candidate.is_some() {
             start_new_segment(state);
             set_baseline(state, current, observed_at);
-            return (true, Some(SegmentTransition::Correction));
+            return (true, true);
         } else {
             state.correction_candidate = Some(CorrectionCandidate {
                 used_percent: current,
                 observed_at,
                 resets_at: snapshot.resets_at,
             });
-            return (true, None);
+            return (true, false);
         }
     }
 
@@ -881,10 +618,7 @@ fn accept_quota_sample(
     }
 
     if observed_at == previous_at {
-        if (current - previous).abs() <= EPSILON {
-            return (changed, None);
-        }
-        return (changed, None);
+        return (changed, false);
     }
 
     if current > previous + EPSILON {
@@ -908,7 +642,7 @@ fn accept_quota_sample(
 
     state.last_observed_percent = Some(current);
     state.last_observed_at = Some(observed_at);
-    (true, None)
+    (true, false)
 }
 
 fn accept_reset_boundary(
@@ -985,12 +719,8 @@ fn estimate_rate(
 }
 
 #[cfg(test)]
-mod replay;
-#[cfg(test)]
 mod shadow_tests;
 
-pub mod personal;
-pub mod shadow;
 pub mod weighted;
 
 #[cfg(test)]

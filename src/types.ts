@@ -35,19 +35,37 @@ export type AntigravityPool = 'auto' | 'gemini' | 'argon' | '3p';
 export type Provider = 'codex' | 'dsh' | 'claude' | 'antigravity';
 
 export interface ProviderPreference {
-  fiveHourBurnRateAlgorithm?: FiveHourBurnRateAlgorithm;
-  carouselIncluded?: boolean;
+  fiveHourBurnRateAlgorithm: FiveHourBurnRateAlgorithm;
+  carouselIncluded: boolean;
   monitorEnabled: boolean;
   protectionEnabled: boolean;
   fiveHourThresholdPercent: number;
   weeklyThresholdPercent: number;
-  refreshIntervalSeconds?: number;
-  fiveHourResetNotification?: boolean;
-  weeklyResetNotification?: boolean;
-  fiveHourSoundMode?: 'windows' | 'custom';
-  weeklySoundMode?: 'windows' | 'custom';
-  fiveHourSoundPath?: string | null;
-  weeklySoundPath?: string | null;
+  refreshIntervalSeconds: number;
+  fiveHourResetNotification: boolean;
+  weeklyResetNotification: boolean;
+  fiveHourSoundMode: 'windows' | 'custom';
+  weeklySoundMode: 'windows' | 'custom';
+  fiveHourSoundPath: string | null;
+  weeklySoundPath: string | null;
+}
+
+export function defaultProviderPreference(provider: Provider): ProviderPreference {
+  return {
+    monitorEnabled: true,
+    carouselIncluded: true,
+    fiveHourBurnRateAlgorithm: 'legacy',
+    protectionEnabled: false,
+    fiveHourThresholdPercent: provider === 'dsh' ? 0 : 5,
+    weeklyThresholdPercent: provider === 'dsh' ? 0 : 2,
+    refreshIntervalSeconds: 60,
+    fiveHourResetNotification: true,
+    weeklyResetNotification: true,
+    fiveHourSoundMode: 'windows',
+    weeklySoundMode: 'windows',
+    fiveHourSoundPath: null,
+    weeklySoundPath: null,
+  };
 }
 
 export type SettingsPatch = Partial<Omit<OverlaySettings, 'providerPreferences'>> & {
@@ -71,17 +89,14 @@ export interface OverlaySettings {
   quotaCarouselIntervalSeconds?: number;
   autoPauseFiveHourMessage?: string;
   autoPauseWeeklyMessage?: string;
-  fiveHourBurnRateAlgorithm?: FiveHourBurnRateAlgorithm;
   schemaVersion?: number;
-  providerPreferences?: Partial<Record<Provider, ProviderPreference>>;
+  providerPreferences: Record<Provider, ProviderPreference>;
   provider: Provider;
   // Public instance origin only; pairing tokens never enter settings.
   dshBaseUrl: string;
   dshInstanceId: string;
   dshAccountId: string;
   dshSessionIds: string[];
-  dshFiveHourThresholdPercent: number;
-  dshWeeklyThresholdPercent: number;
   claudeLivePolling: boolean;
   antigravityLivePolling?: boolean;
   antigravityPool?: AntigravityPool;
@@ -92,25 +107,14 @@ export interface OverlaySettings {
   showCredits: boolean;
   showFiveHourQuota: boolean;
   showBurnRate: boolean;
-  refreshIntervalSeconds: number;
   language: string;
   autoStart: boolean;
   autoCheckUpdates: boolean;
   autoInstallUpdates: boolean;
   includePrereleaseUpdates: boolean;
-  fiveHourResetNotification: boolean;
-  weeklyResetNotification: boolean;
-  fiveHourSoundMode: 'windows' | 'custom';
-  weeklySoundMode: 'windows' | 'custom';
-  fiveHourSoundPath: string | null;
-  weeklySoundPath: string | null;
   autoEdgeHide: boolean;
   mousePassthrough: boolean;
   showPercentageGrid: boolean;
-  autoPauseOnLowQuota: boolean;
-  autoResumeAfterQuotaReset: boolean;
-  autoPauseFiveHourThresholdPercent: number;
-  autoPauseWeeklyThresholdPercent: number;
 }
 
 export interface SettingsEnvelope {
@@ -131,14 +135,19 @@ export interface DockStateInfo {
 }
 
 export const DEFAULT_SETTINGS: OverlaySettings = {
+  schemaVersion: 5,
+  providerPreferences: {
+    codex: defaultProviderPreference('codex'),
+    claude: defaultProviderPreference('claude'),
+    dsh: defaultProviderPreference('dsh'),
+    antigravity: defaultProviderPreference('antigravity'),
+  },
   quotaCarouselEnabled: false, quotaCarouselIntervalSeconds: 8,
   provider: 'codex',
   dshBaseUrl: '',
   dshInstanceId: '',
   dshAccountId: '',
   dshSessionIds: [],
-  dshFiveHourThresholdPercent: 0,
-  dshWeeklyThresholdPercent: 0,
   claudeLivePolling: false,
   antigravityLivePolling: true,
   antigravityPool: 'auto',
@@ -149,26 +158,14 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   showCredits: true,
   showFiveHourQuota: true,
   showBurnRate: true,
-  refreshIntervalSeconds: 60,
   language: 'auto',
   autoStart: true,
   autoCheckUpdates: true,
   autoInstallUpdates: false,
   includePrereleaseUpdates: false,
-  fiveHourResetNotification: true,
-  weeklyResetNotification: true,
-  fiveHourSoundMode: 'windows',
-  weeklySoundMode: 'windows',
-  fiveHourSoundPath: null,
-  weeklySoundPath: null,
   autoEdgeHide: false,
   mousePassthrough: false,
   showPercentageGrid: false,
-  // Smart pause is opt-in: an upgrade must never silently arm the feature.
-  autoPauseOnLowQuota: false,
-  autoResumeAfterQuotaReset: false,
-  autoPauseFiveHourThresholdPercent: 5,
-  autoPauseWeeklyThresholdPercent: 2,
 };
 
 export interface UsageStatus {
@@ -181,15 +178,7 @@ export interface ProtectionStatus {
   revision: number;
   enabled: boolean;
   provider: Provider;
-  autoResumeEnabled: boolean;
   connection: 'unknown' | 'available' | 'unavailable';
-  capabilities: {
-    cooperativeDelivery: boolean;
-    directInterrupt: boolean;
-    completionObservation: boolean;
-    userActivityObservation: boolean;
-    continuationControl: boolean;
-  };
   mode: 'cooperative' | 'direct';
   summary: 'off' | 'checking' | 'armed' | 'quotaLow' | 'pauseRequested' | 'needsAttention';
   reason: string | null;
@@ -214,10 +203,7 @@ export interface ProtectionStatus {
     phase: string; reason: string | null; requestedAt: number;
     acceptedAt: number | null; interruptedAt: number | null;
   }>;
-  resumePlans: Array<{
-    id: string; threadId: string; phase: string; eligibleAfter: number; reason: string | null;
-  }>;
-  resumeStateError: string | null;
+  pausedThreads: string[];
 }
 
 export interface QuotaReadDiagnostic {

@@ -95,7 +95,7 @@ const fs = require('node:fs');
                 for (const size of [{ width: 960, height: 620 }, { width: 760, height: 500 }])
                   for (const expanded of [false, true]) {
                     await page.setViewportSize(size);
-                    await page.evaluate(({ language, fixture }) => window.qa.render({ language, autoPauseOnLowQuota: true }, null, false, 'settings', fixture), { language, fixture });
+                    await page.evaluate(({ language, fixture }) => window.qa.render({ language, providerPreferences: { codex: { protectionEnabled: true } } }, null, false, 'settings', fixture), { language, fixture });
                     await page.evaluate(expanded => { document.querySelector('[data-protection-status] details').open = expanded; }, expanded);
                     const metrics = await page.evaluate(() => {
                         const panel = document.querySelector('[data-protection-status]');
@@ -120,7 +120,7 @@ const fs = require('node:fs');
                     }
                   }
                 await page.setViewportSize({ width: 500, height: 620 });
-                await page.evaluate(({ language, fixture }) => window.qa.render({ language, autoPauseOnLowQuota: true }, null, false, 'tray', fixture), { language, fixture });
+                await page.evaluate(({ language, fixture }) => window.qa.render({ language, providerPreferences: { codex: { protectionEnabled: true } } }, null, false, 'tray', fixture), { language, fixture });
                 const layout = await page.evaluate(() => window.qaTrayLayout);
                 if (layout?.widthLogical) await page.setViewportSize({ width: Math.ceil(layout.widthLogical), height: 620 });
                 const tray = await page.evaluate(() => ({ width: innerWidth,

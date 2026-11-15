@@ -507,7 +507,7 @@ impl crate::tray::TrayPresentationSink for NoWindow {
     }
 }
 impl crate::commands::UsageSource for NoWindow {
-    async fn read_usage(&self, state: &crate::commands::AppState) -> Result<RawCodexUsage, String> {
+    async fn read_usage(&self, state: &crate::commands::ProviderRuntime) -> Result<RawCodexUsage, String> {
         let generation = state.source_generation.load(Ordering::Acquire);
         let settings = state.settings.lock().await.clone();
         crate::commands::read_dsh_usage(state, &settings, generation).await
@@ -530,13 +530,14 @@ impl AutoRuntime {
             std::env::temp_dir().join(format!("overlay-auto-fixture-{}", Uuid::new_v4()));
         std::fs::create_dir_all(directory.join("dsh-bridges")).unwrap();
         let manager = crate::config::ConfigManager::with_runtime_dir(directory.clone());
-        let settings = crate::config::OverlaySettings {
+        let mut settings = crate::config::OverlaySettings {
             provider: crate::config::Provider::Dsh,
-            auto_pause_on_low_quota: true,
-            auto_pause_five_hour_threshold_percent: 100,
-            auto_pause_weekly_threshold_percent: 100,
             ..Default::default()
         };
+        let dsh_pref = settings.preference_mut(crate::config::Provider::Dsh);
+        dsh_pref.protection_enabled = true;
+        dsh_pref.five_hour_threshold_percent = 100;
+        dsh_pref.weekly_threshold_percent = 100;
         manager.save_settings_checked(&settings).unwrap();
         let id = Uuid::new_v4().to_string();
         let record = directory.join("dsh-bridges").join(format!("{id}.json"));
@@ -568,12 +569,15 @@ async fn assert_no_pause(server: &Server) {
 }
 
 async fn enable_provider_monitors(runtime: &AutoRuntime) {
-    let mut settings = runtime.state.settings.lock().await;
-    settings.migrate();
-    settings.provider = crate::config::Provider::Codex;
-    settings.mirror_display_preferences();
-    runtime.state.config_manager.save_settings_checked(&settings).unwrap();
-    crate::monitor::initialize(&runtime.state, &settings);
+    let settings = {
+        let mut settings = runtime.state.settings.lock().await;
+        settings.migrate();
+        settings.provider = crate::config::Provider::Codex;
+        runtime.state.config_manager.save_settings_checked(&settings).unwrap();
+        settings.clone()
+    };
+    runtime.state.displayed_provider.store(settings.provider.index(), Ordering::Release);
+    runtime.state.monitors.synchronize(&runtime.state, &settings).await;
 }
 
 #[tokio::test]
@@ -582,7 +586,7 @@ async fn automatic_dsh_connects_and_binds_in_background_without_resetting_other_
     let server = Server::start(Behavior::AutoBridge).await;
     let runtime = AutoRuntime::new(&server).await;
     enable_provider_monitors(&runtime).await;
-    let registry = runtime.state.monitors.get().unwrap();
+    let registry = &runtime.state.monitors;
     let codex = registry.get(Provider::Codex);
     let claude = registry.get(Provider::Claude);
     auto::reconcile(&NoWindow, &runtime.state, false).await;
@@ -651,7 +655,7 @@ async fn native_disconnect_clears_background_dsh_binding_and_stays_suspended() {
     let server = Server::start(Behavior::AutoBridge).await;
     let runtime = AutoRuntime::new(&server).await;
     enable_provider_monitors(&runtime).await;
-    let registry = runtime.state.monitors.get().unwrap();
+    let registry = &runtime.state.monitors;
     let codex = registry.get(Provider::Codex);
     auto::reconcile(&NoWindow, &runtime.state, false).await;
     let status = runtime.state.dsh.cached_status();
@@ -679,34 +683,39 @@ async fn native_startup_discovers_without_settings_and_is_read_only_and_idempote
     let local = Arc::new(crate::pause_control::testing::ScriptedTransport::new());
     runtime
         .state
+        .monitors
+        .get(crate::config::Provider::Codex)
         .auto_pause
         .lock()
         .unwrap()
         .set_transport(local.clone());
     auto::reconcile(&NoWindow, &runtime.state, false).await;
+    let dsh = runtime.state.monitors.get(crate::config::Provider::Dsh);
+    dsh.auto_pause.lock().unwrap().set_transport(local.clone());
     let settings = runtime.state.settings.lock().await.clone();
     assert_eq!(settings.dsh_account_id, AUTO_ACCOUNT);
     assert_eq!(settings.dsh_instance_id, runtime.id);
     assert_eq!(settings.dsh_profile_id, "a".repeat(64));
     assert!(settings.dsh_session_ids.is_empty());
-    assert!(settings.auto_pause_on_low_quota);
+    assert!(settings.preference(crate::config::Provider::Dsh).protection_enabled);
     assert_eq!(
         runtime.state.dsh_auto.status(&runtime.state.dsh).auto_phase,
         "ready"
     );
     let revision = runtime.state.settings_revision.load(Ordering::Acquire);
-    let generation = runtime.state.source_generation.load(Ordering::Acquire);
+    let generation = dsh.source_generation.load(Ordering::Acquire);
     let connection_revision = runtime.state.dsh.cached_status().connection_revision;
     let disk = tokio::fs::read(runtime.directory.join("settings.json"))
         .await
         .unwrap();
     auto::reconcile(&NoWindow, &runtime.state, false).await;
+    assert!(Arc::ptr_eq(&dsh, &runtime.state.monitors.get(crate::config::Provider::Dsh)));
     assert_eq!(
         runtime.state.settings_revision.load(Ordering::Acquire),
         revision
     );
     assert_eq!(
-        runtime.state.source_generation.load(Ordering::Acquire),
+        dsh.source_generation.load(Ordering::Acquire),
         generation
     );
     assert_eq!(
@@ -719,12 +728,14 @@ async fn native_startup_discovers_without_settings_and_is_read_only_and_idempote
             .unwrap(),
         disk
     );
-    let usage = crate::commands::refresh_usage(&NoWindow, &runtime.state)
+    let usage = crate::commands::refresh_usage(&NoWindow, &dsh)
         .await
         .unwrap();
     assert!(
         usage.five_hour_remaining_percent.unwrap()
-            <= settings.auto_pause_five_hour_threshold_percent
+            <= settings
+                .preference(crate::config::Provider::Dsh)
+                .five_hour_threshold_percent
     );
     assert_no_pause(&server).await;
     assert!(local.calls().is_empty());
@@ -755,9 +766,10 @@ async fn late_automatic_handshake_cannot_commit_after_native_disconnect_and_retr
         .unwrap();
     server.fixture.status_release.notify_one();
     auto::reconcile(&NoWindow, &runtime.state, false).await;
+    let dsh = runtime.state.monitors.get(crate::config::Provider::Dsh);
     assert!(!runtime.state.dsh.cached_status().connected);
     assert!(runtime.state.settings.lock().await.dsh_base_url.is_empty());
-    assert_eq!(runtime.state.source_generation.load(Ordering::Acquire), 0);
+    assert_eq!(dsh.source_generation.load(Ordering::Acquire), 0);
     runtime.state.dsh_auto.retry(&runtime.state.dsh);
     auto::reconcile(&NoWindow, &runtime.state, false).await;
     assert!(runtime.state.dsh.cached_status().connected);
@@ -802,8 +814,9 @@ async fn prepared_connection_waiting_for_commit_cannot_override_provider_change(
         .await
         .dsh_instance_id
         .is_empty());
+    let dsh = runtime.state.monitors.get(crate::config::Provider::Dsh);
     assert_eq!(runtime.state.settings_revision.load(Ordering::Acquire), 0);
-    assert_eq!(runtime.state.source_generation.load(Ordering::Acquire), 0);
+    assert_eq!(dsh.source_generation.load(Ordering::Acquire), 0);
     assert!(!runtime.state.dsh.cached_status().connected);
     assert_no_pause(&server).await;
 }
@@ -834,16 +847,19 @@ async fn automatic_reconnect_and_active_account_change_clear_targets_without_res
         runtime.state.settings.lock().await.dsh_session_ids,
         [AUTO_SESSION]
     );
+    let dsh = runtime.state.monitors.get(crate::config::Provider::Dsh);
     server.fixture.active_b.store(true, Ordering::Release);
-    let generation = runtime.state.source_generation.load(Ordering::Acquire);
+    let generation = dsh.source_generation.load(Ordering::Acquire);
     auto::reconcile(&NoWindow, &runtime.state, false).await;
     let settings = runtime.state.settings.lock().await.clone();
     assert_eq!(settings.dsh_account_id, AUTO_ACCOUNT_B);
     assert!(settings.dsh_session_ids.is_empty());
-    assert_eq!(
-        runtime.state.source_generation.load(Ordering::Acquire),
-        generation + 1
+    assert!(
+        dsh.source_generation.load(Ordering::Acquire) > generation
     );
+    let current = runtime.state.monitors.get(crate::config::Provider::Dsh);
+    assert!(!Arc::ptr_eq(&dsh, &current));
+    assert!(current.source_generation.load(Ordering::Acquire) > generation);
     assert!(crate::commands::bind_dsh_targets(
         &NoWindow,
         &runtime.state,
@@ -909,7 +925,11 @@ async fn multiple_companions_are_ambiguous_and_discovery_never_changes_other_pro
     let read_only_requests = server.fixture.requests.lock().await.len();
     assert!(read_only_requests > 0);
     assert_no_pause(&server).await;
-    runtime.state.settings.lock().await.provider = crate::config::Provider::Codex;
+    {
+        let mut s = runtime.state.settings.lock().await;
+        s.provider = crate::config::Provider::Codex;
+        s.preference_mut(crate::config::Provider::Dsh).monitor_enabled = false;
+    }
     auto::reconcile(&NoWindow, &runtime.state, false).await;
     assert_eq!(
         server.fixture.requests.lock().await.len(),
@@ -922,17 +942,17 @@ async fn actual_quota_read_is_discarded_when_provider_changes_during_rpc() {
     let server = Server::start(Behavior::AutoBridge).await;
     let runtime = AutoRuntime::new(&server).await;
     auto::reconcile(&NoWindow, &runtime.state, false).await;
+    let dsh = runtime.state.monitors.get(crate::config::Provider::Dsh);
     let local = Arc::new(crate::pause_control::testing::ScriptedTransport::new());
-    runtime
-        .state
+    dsh
         .auto_pause
         .lock()
         .unwrap()
         .set_transport(local.clone());
     server.fixture.hold_status.store(true, Ordering::Release);
-    let state = runtime.state.clone();
+    let dsh_task = dsh.clone();
     let reading =
-        tokio::spawn(async move { crate::commands::refresh_usage(&NoWindow, &state).await });
+        tokio::spawn(async move { crate::commands::refresh_usage(&NoWindow, &dsh_task).await });
     timeout(
         Duration::from_secs(2),
         server.fixture.status_started.notified(),
@@ -942,7 +962,7 @@ async fn actual_quota_read_is_discarded_when_provider_changes_during_rpc() {
     crate::commands::apply_settings_patch(
         &NoWindow,
         &runtime.state,
-        json!({"provider":"codex"}),
+        json!({"provider":"codex","providerPreferences":{"dsh":{"monitorEnabled":false}}}),
         false,
     )
     .await
@@ -954,7 +974,7 @@ async fn actual_quota_read_is_discarded_when_provider_changes_during_rpc() {
         .unwrap()
         .unwrap_err();
     assert!(error.contains("source changed"));
-    assert!(runtime.state.last_usage.lock().await.is_none());
+    assert!(dsh.last_usage.lock().await.is_none());
     assert_no_pause(&server).await;
     assert!(local.calls().is_empty());
 }

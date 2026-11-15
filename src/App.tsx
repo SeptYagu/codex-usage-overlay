@@ -4,14 +4,13 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTranslation } from 'react-i18next';
 import i18n, { updateLanguage } from './i18n';
-import { CodexUsage, DockStateInfo, OverlaySettings, SettingsEnvelope, DEFAULT_SETTINGS, SettingsPatch } from './types';
+import { DockStateInfo, OverlaySettings, SettingsEnvelope, DEFAULT_SETTINGS, SettingsPatch } from './types';
 import { OverlayView } from './components/OverlayView';
 import { SettingsView } from './components/SettingsView';
 import { TrayMenuView } from './components/TrayMenuView';
-import { sourceBinding, UsageSourceScope, usageMatchesSource, usageSourceScope, usageIsOlder, bufferUsage, takeMatchingUsage } from './usageSource';
 import { useDisplayState } from './hooks/useDisplayState';
 import { useProviderMonitors } from './hooks/useProviderMonitors';
-import { mergeSettingsPatch, mergePendingPatches, settingsForProvider } from './providerSettings';
+import { mergeSettingsPatch, mergePendingPatches } from './providerSettings';
 
 function errorTargetsForPatch(patch: SettingsPatch): string[] {
   const targets = Object.keys(patch.providerPreferences ?? {});
@@ -21,7 +20,6 @@ function errorTargetsForPatch(patch: SettingsPatch): string[] {
     } else if (
       patch.autoPauseFiveHourMessage !== undefined
       || patch.autoPauseWeeklyMessage !== undefined
-      || patch.fiveHourBurnRateAlgorithm !== undefined
     ) {
       targets.push('codex');
     } else {
@@ -44,29 +42,12 @@ export const App: React.FC = () => {
   const patchQueue = useRef<Promise<void>>(Promise.resolve());
   const sliderPatch = useRef<SettingsPatch>({});
   const sliderTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [usage, setUsage] = useState<CodexUsage | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
   const [dockState, setDockState] = useState<DockStateInfo | null>(null);
   const dockStateRevision = useRef(0);
-  const usageEventRevision = useRef(0);
-  const sourceScope = useRef<UsageSourceScope | null>(null);
   const currentSettings = useRef(DEFAULT_SETTINGS);
-  const pendingUsage = useRef(new Map<string,CodexUsage>());
+  const [confirmedSource, setConfirmedSource] = useState<{ sourceKey: string; sourceGeneration: number } | null>(null);
   const monitors = useProviderMonitors();
   const display=useDisplayState();
-  const currentDisplay=useRef(display);currentDisplay.current=display;
-  const matchesActive=(sample:CodexUsage)=>currentDisplay.current
-    ? sample.sourceKey===currentDisplay.current.sourceKey&&sample.sourceGeneration===currentDisplay.current.sourceGeneration
-    : usageMatchesSource(sample,sourceScope.current);
-  useEffect(()=>{
-    if(!display)return;
-    const pending=takeMatchingUsage(pendingUsage.current,matchesActive);
-    setUsage(current=>{
-      const retained=current&&matchesActive(current)?current:null;
-      if(pending){return retained&&usageIsOlder(pending,retained)?retained:pending;}
-      return retained;
-    });
-  },[display]);
 
   const applySavedSettings = useCallback((envelope: SettingsEnvelope) => {
     if (envelope.revision < settingsRevision.current) return;
@@ -74,20 +55,15 @@ export const App: React.FC = () => {
     confirmedSettings.current=envelope;
     const serverSettings = { ...DEFAULT_SETTINGS, ...envelope.settings };
     const merged = [...pendingPatches.current, sliderPatch.current].reduce<OverlaySettings>(mergeSettingsPatch, serverSettings);
-    // An optimistic source change has no authoritative identity until its save
-    // arrives. Do not associate the old envelope's identity with that binding.
-    const confirmed = sourceBinding(merged) === sourceBinding(serverSettings);
-    const scope = usageSourceScope(confirmed ? envelope : { revision: envelope.revision, settings: merged }, merged, sourceScope.current);
-    sourceScope.current = scope;
+    if (
+      typeof envelope.sourceKey === 'string'
+      && envelope.sourceKey.length > 0
+      && Number.isSafeInteger(envelope.sourceGeneration)
+      && envelope.sourceGeneration! >= 0
+    ) {
+      setConfirmedSource({ sourceKey: envelope.sourceKey, sourceGeneration: envelope.sourceGeneration! });
+    }
     currentSettings.current = merged;
-    const pending = takeMatchingUsage(pendingUsage.current,matchesActive);
-    setUsage(current => {
-      const retained = current && matchesActive(current) ? current : null;
-      if (pending) {
-        return retained && usageIsOlder(pending, retained) ? retained : pending;
-      }
-      return retained;
-    });
     setSettings(merged);
     updateLanguage(merged.language);
     setSettingsLoadState('ready');
@@ -117,42 +93,6 @@ export const App: React.FC = () => {
       if (active) applySavedSettings(event.payload);
     });
 
-    // Register first, then hydrate only if no live event arrived during the
-    // cache request. fetchedAt alone cannot order samples within the same second.
-    const applyUsageIfNewer = (next: CodexUsage) => {
-      if (!matchesActive(next)) {
-        // A sample may arrive before its settings broadcast. Hold it without
-        // displaying it; only a matching authoritative source can release it.
-        bufferUsage(pendingUsage.current,next);
-        return;
-      }
-      setUsage((current) => {
-        if (!matchesActive(next)) return current;
-        return current && matchesActive(current)
-          && usageIsOlder(next, current) ? current : next;
-      });
-      setIsLoading(false);
-    };
-    const unlistenUsage = listen<CodexUsage>('usage_updated', (event) => {
-      if (!active) return;
-      usageEventRevision.current++;
-      applyUsageIfNewer(event.payload);
-    });
-    if (windowLabel === 'main') {
-      void unlistenUsage.then(async () => {
-        if (!active) return;
-        const revision = usageEventRevision.current;
-        try {
-          const cached = await invoke<CodexUsage | null>('get_last_usage');
-          if (active && usageEventRevision.current === revision && cached) {
-            applyUsageIfNewer(cached);
-          }
-        } catch (error) {
-          console.error('Failed to get cached usage:', error);
-        }
-      });
-    }
-
     // Update notifications come from the backend, so a check that finishes
     // before this page has loaded (right at launch) is never lost.
 
@@ -174,7 +114,6 @@ export const App: React.FC = () => {
       active = false;
       settingsLoadToken.current++;
       unlistenSettings.then((f) => f());
-      unlistenUsage.then((f) => f());
       unlistenDockState.then((f) => f());
     };
   }, [applySavedSettings, loadSettings, windowLabel]);
@@ -183,11 +122,6 @@ export const App: React.FC = () => {
     pendingPatches.current.push(patch);
     if (optimistic) {
       const merged = mergeSettingsPatch(currentSettings.current, patch);
-      if (!currentDisplay.current && sourceBinding(merged) !== sourceBinding(currentSettings.current)) {
-        sourceScope.current = { binding: sourceBinding(merged), allowLegacy: false };
-        pendingUsage.current.clear();
-        setUsage(null);
-      }
       currentSettings.current = merged;
       setSettings(merged);
       if (patch.language) updateLanguage(patch.language);
@@ -272,24 +206,28 @@ export const App: React.FC = () => {
 
   if (windowLabel === 'tray-menu' || window.location.hash === '#tray-menu') {
     if (settingsLoadState !== 'ready') return null;
-    return <TrayMenuView display={display??undefined} settings={settingsForProvider(settings, display?.effectiveProvider ?? settings.provider)} onPatchSettings={handlePatchSettings} />;
+    return <TrayMenuView display={display??undefined} settings={settings} onPatchSettings={handlePatchSettings} />;
   }
 
   if (windowLabel === 'main' && (settingsLoadState === 'loading' || dockState === null)) return null;
 
-  const effectiveProvider=display?.effectiveProvider??settings.provider;
-  const monitor=monitors[effectiveProvider];
-  const matches=(sample:CodexUsage|null|undefined)=>!!sample && (display
-    ?sample.sourceKey===display.sourceKey&&sample.sourceGeneration===display.sourceGeneration
-    :usageMatchesSource(sample,sourceScope.current));
-  const monitorUsage=matches(monitor?.usage)?monitor!.usage:null;
-  const directUsage=matches(usage)?usage:null;
-  const displayedUsage=monitorUsage&&directUsage ?(usageIsOlder(monitorUsage,directUsage)?directUsage:monitorUsage):monitorUsage??directUsage;
+  const effectiveProvider = display?.effectiveProvider ?? settings.provider;
+  const monitor = monitors[effectiveProvider];
+  const expectedSourceKey = display?.sourceKey ?? confirmedSource?.sourceKey;
+  const expectedSourceGeneration = display?.sourceGeneration ?? confirmedSource?.sourceGeneration;
+  const matchesSource = Boolean(
+    monitor && (
+      (expectedSourceKey === undefined || monitor.sourceKey === expectedSourceKey)
+      && (expectedSourceGeneration === undefined || monitor.sourceGeneration === expectedSourceGeneration)
+    ),
+  );
+  const displayedUsage = matchesSource ? monitor?.usage ?? null : null;
   return (
     <OverlayView
-      settings={settingsForProvider(settings,effectiveProvider)}
+      settings={settings}
+      provider={effectiveProvider}
       usage={displayedUsage}
-      isLoading={monitor ? monitor.health === 'checking' : isLoading}
+      isLoading={monitor?.health === 'checking'}
       dockState={dockState ?? undefined}
       monitors={monitors}
       onCycleProvider={async () => {

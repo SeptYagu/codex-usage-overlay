@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { OverlaySettings, Provider, ProviderPreference, SettingsPatch, DisplayState } from '../types';
-import { providerPreference, settingsForProvider } from '../providerSettings';
+import { providerPreference } from '../providerSettings';
 import { useProviderMonitors } from '../hooks/useProviderMonitors';
 import { APP_VERSION } from '../version';
 import { useTranslation } from 'react-i18next';
@@ -89,43 +89,31 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
   common?: boolean;
 }) {
   const { t } = useTranslation();
-  const settings = settingsForProvider(savedSettings, configurationProvider);
+  const settings = savedSettings;
   const preference = providerPreference(savedSettings, configurationProvider);
+  const patchPreference = (patch: Partial<ProviderPreference>, debounce = false) => {
+    savePatch({ providerPreferences: { [configurationProvider]: patch } }, debounce);
+  };
   const onPatchSettings = (patch: SettingsPatch, debounce = false) => {
-    const fields: Record<string, keyof ProviderPreference> = {
-      fiveHourBurnRateAlgorithm: 'fiveHourBurnRateAlgorithm',
-      refreshIntervalSeconds: 'refreshIntervalSeconds', fiveHourResetNotification: 'fiveHourResetNotification', weeklyResetNotification: 'weeklyResetNotification',
-      fiveHourSoundMode: 'fiveHourSoundMode', weeklySoundMode: 'weeklySoundMode', fiveHourSoundPath: 'fiveHourSoundPath', weeklySoundPath: 'weeklySoundPath',
-      autoPauseOnLowQuota: 'protectionEnabled', autoPauseFiveHourThresholdPercent: 'fiveHourThresholdPercent',
-      autoPauseWeeklyThresholdPercent: 'weeklyThresholdPercent', dshFiveHourThresholdPercent: 'fiveHourThresholdPercent',
-      dshWeeklyThresholdPercent: 'weeklyThresholdPercent',
-    };
-    const global: Record<string, unknown> = {};
-    const scoped: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(patch)) {
-      if (fields[key]) scoped[fields[key]] = value; else global[key] = value;
-    }
-    if (Object.keys(scoped).length) {
-      global.providerPreferences = { [configurationProvider]: scoped };
-    }
-    savePatch(global as SettingsPatch, debounce);
+    savePatch(patch, debounce);
   };
   const updateField = <K extends keyof OverlaySettings>(key: K, value: OverlaySettings[K]) => {
-    onPatchSettings({ [key]: value }, key === 'scalePercent' || key === 'backgroundTransparencyPercent');
+    savePatch({ [key]: value }, key === 'scalePercent' || key === 'backgroundTransparencyPercent');
   };
 
   const toggleRow = 'flex items-center justify-between p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800/60 hover:bg-slate-200/60 dark:hover:bg-slate-800 cursor-pointer transition-colors';
   const checkbox = 'w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 accent-cyan-500 cursor-pointer';
 
   // The smart-pause thresholds only apply while the master switch is on.
-  const autoPauseDisabled = !settings.autoPauseOnLowQuota || !preference.monitorEnabled;
+  const protectionEnabled = preference.monitorEnabled && preference.protectionEnabled;
+  const autoPauseDisabled = !protectionEnabled;
   // Claude has no credit balance and is protected by Claude Code hooks instead
   // of a Codex pause request.
-  const claude = settings.provider === 'claude';
-  const antigravity = settings.provider === 'antigravity';
-  const dsh = settings.provider === 'dsh';
-  const fiveHourThreshold = dsh ? settings.dshFiveHourThresholdPercent : settings.autoPauseFiveHourThresholdPercent;
-  const weeklyThreshold = dsh ? settings.dshWeeklyThresholdPercent : settings.autoPauseWeeklyThresholdPercent;
+  const claude = configurationProvider === 'claude';
+  const antigravity = configurationProvider === 'antigravity';
+  const dsh = configurationProvider === 'dsh';
+  const fiveHourThreshold = preference.fiveHourThresholdPercent;
+  const weeklyThreshold = preference.weeklyThresholdPercent;
 
   if (common) return <div data-common-settings className="grid gap-4 md:grid-cols-2 pt-4">
     <div className="space-y-2">          <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
@@ -367,11 +355,11 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
             <select
               aria-label={t('refreshInterval')}
               aria-describedby={`${configurationProvider}-refresh-interval-hint`}
-              value={settings.refreshIntervalSeconds}
-              onChange={(e) => updateField('refreshIntervalSeconds', parseInt(e.target.value, 10))}
+              value={preference.refreshIntervalSeconds}
+              onChange={(e) => patchPreference({ refreshIntervalSeconds: parseInt(e.target.value, 10) })}
               className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono"
             >
-              {![30, 60, 120, 300].includes(settings.refreshIntervalSeconds) && <option value={settings.refreshIntervalSeconds}>{settings.refreshIntervalSeconds} s</option>}
+              {![30, 60, 120, 300].includes(preference.refreshIntervalSeconds) && <option value={preference.refreshIntervalSeconds}>{preference.refreshIntervalSeconds} s</option>}
               <option value="30">{t('sec30')}</option>
               <option value="60">{t('sec60')}</option>
               <option value="120">{t('min2')}</option>
@@ -389,9 +377,9 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
               <input
                 type="checkbox"
                 aria-label={t(claude ? 'claudeGuardOnLowQuota' : antigravity ? 'antigravityGuardOnLowQuota' : 'autoPauseOnLowQuota')}
-                checked={settings.autoPauseOnLowQuota}
+                checked={protectionEnabled}
                 disabled={!preference.monitorEnabled}
-                onChange={(e) => onPatchSettings({ autoPauseOnLowQuota: e.target.checked })}
+                onChange={(e) => patchPreference({ protectionEnabled: e.target.checked })}
                 className={checkbox}
               />
             </label>
@@ -412,9 +400,7 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
                   step="1"
                   disabled={autoPauseDisabled}
                   value={fiveHourThreshold}
-                  onChange={(e) => onPatchSettings(dsh
-                    ? { dshFiveHourThresholdPercent: parseInt(e.target.value, 10) }
-                    : { autoPauseFiveHourThresholdPercent: parseInt(e.target.value, 10) }, true)}
+                  onChange={(e) => patchPreference({ fiveHourThresholdPercent: parseInt(e.target.value, 10) }, true)}
                   className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:cursor-not-allowed"
                 />
               </div>
@@ -434,9 +420,7 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
                   step="1"
                   disabled={autoPauseDisabled}
                   value={weeklyThreshold}
-                  onChange={(e) => onPatchSettings(dsh
-                    ? { dshWeeklyThresholdPercent: parseInt(e.target.value, 10) }
-                    : { autoPauseWeeklyThresholdPercent: parseInt(e.target.value, 10) }, true)}
+                  onChange={(e) => patchPreference({ weeklyThresholdPercent: parseInt(e.target.value, 10) }, true)}
                   className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:cursor-not-allowed"
                 />
               </div>
@@ -446,10 +430,10 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
               {t(claude ? 'claudeGuardHint' : antigravity ? 'antigravityGuardHint' : dsh ? 'dshPauseHint' : 'autoPauseHint')}
             </p>
             {dsh && <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('quotaThresholdZeroHint')}</p>}
-            {!claude && !antigravity && <ProtectionStatusView settings={settings} onPatchSettings={onPatchSettings} />}
+            {!claude && !antigravity && <ProtectionStatusView settings={settings} provider={configurationProvider} />}
           </div>
 
-          <BurnRateOptions provider={configurationProvider} algorithm={settings.fiveHourBurnRateAlgorithm??'legacy'} usage={monitors[configurationProvider]?.usage} onPatchSettings={onPatchSettings} />
+          <BurnRateOptions provider={configurationProvider} algorithm={preference.fiveHourBurnRateAlgorithm ?? 'legacy'} usage={monitors[configurationProvider]?.usage} onPatchSettings={onPatchSettings} />
           {configurationProvider === 'codex' && <CodexOptions settings={settings}
             disabled={autoPauseDisabled} onPatchSettings={onPatchSettings} />}
           <section aria-labelledby={`${configurationProvider}-reset-notifications-title`} className="space-y-2.5">
@@ -465,31 +449,31 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
                   <input
                     type="checkbox"
                     aria-label={`${t(title)} ${t('enableNotification')}`}
-                    checked={settings[enabled]}
-                    onChange={(e) => updateField(enabled, e.target.checked)}
+                    checked={preference[enabled]}
+                    onChange={(e) => patchPreference({ [enabled]: e.target.checked })}
                     className="w-4 h-4 rounded text-cyan-600 accent-cyan-500 cursor-pointer"
                   />
                 </label>
-                <label className={`flex items-center justify-between gap-3 text-sm ${!settings[enabled] ? 'opacity-50' : ''}`}>
+                <label className={`flex items-center justify-between gap-3 text-sm ${!preference[enabled] ? 'opacity-50' : ''}`}>
                   <span>{t('soundMode')}</span>
                   <select
                     aria-label={`${t(title)} ${t('soundMode')}`}
-                    disabled={!settings[enabled]}
-                    value={settings[mode]}
-                    onChange={(e) => updateField(mode, e.target.value as 'windows' | 'custom')}
+                    disabled={!preference[enabled]}
+                    value={preference[mode]}
+                    onChange={(e) => patchPreference({ [mode]: e.target.value as 'windows' | 'custom' })}
                     className="max-w-36 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 disabled:cursor-not-allowed"
                   >
                     <option value="windows">{t('soundModeWindows')}</option>
                     <option value="custom">{t('soundModeCustom')}</option>
                   </select>
                 </label>
-                {settings[mode] === 'custom' && settings[enabled] && (
+                {preference[mode] === 'custom' && preference[enabled] && (
                   <SoundPicker
                     provider={configurationProvider}
                     kind={enabled === 'fiveHourResetNotification' ? 'fiveHour' : 'week'}
-                    path={settings[path]}
-                    disabled={!settings[enabled]}
-                    onChangePath={(value) => updateField(path, value)}
+                    path={preference[path]}
+                    disabled={!preference[enabled]}
+                    onChangePath={(value) => patchPreference({ [path]: value })}
                   />
                 )}
               </div>

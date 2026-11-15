@@ -45,6 +45,22 @@ impl Cache {
     }
 }
 
+/// Caller holds this runtime's source_commit gate. No reader/learner is touched.
+pub async fn reproject_locked<S:crate::tray::TrayPresentationSink>(sink:&S,state:&std::sync::Arc<crate::commands::ProviderRuntime>) {
+    let settings=state.settings.lock().await.clone();
+    let pref = settings.preference(state.provider);
+    let usage=state.presentation.lock().unwrap_or_else(|p|p.into_inner()).project(pref.five_hour_burn_rate_algorithm,
+        state.applied_settings_revision.load(std::sync::atomic::Ordering::Acquire),state.polling.lock().unwrap_or_else(|p|p.into_inner()).healthy_interval_seconds(&pref)>90);
+    let Some(_usage)=usage else{return;};
+    *state.last_usage.lock().await=Some(_usage.clone());
+    let status=*state.tray_read_status.lock().await;
+    {
+        let _tray=state.tray_gate.lock().unwrap_or_else(|p|p.into_inner());
+        if state.is_displayed(){sink.present(crate::tray::runtime_presentation(state,&settings,Some(&_usage),status));}
+    }
+    crate::monitor::publish_runtime(sink, state).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,25 +72,5 @@ mod tests {
         sample.candidates.personalized=None;assert_eq!(sample.project(Algorithm::Personalized).1,Some(Algorithm::Weighted));
         sample.candidates.weighted=Some(f64::NAN);assert_eq!(sample.project(Algorithm::Weighted).1,Some(Algorithm::Legacy));
         sample.candidates.legacy=None;assert_eq!(sample.project(Algorithm::Personalized).1,None);
-    }
-}
-
-/// Caller holds this runtime's settings_patch commit gate. No reader/learner is touched.
-pub async fn reproject_locked<S:crate::tray::TrayPresentationSink>(sink:&S,state:&std::sync::Arc<crate::commands::AppState>) {
-    let settings=state.settings.lock().await.clone();
-    let usage=state.presentation.lock().unwrap_or_else(|p|p.into_inner()).project(settings.five_hour_burn_rate_algorithm,
-        state.applied_settings_revision.load(std::sync::atomic::Ordering::Acquire),state.polling.lock().unwrap_or_else(|p|p.into_inner()).healthy_interval_seconds(&settings)>90);
-    let Some(usage)=usage else{return;};
-    *state.last_usage.lock().await=Some(usage.clone());
-    let status=*state.tray_read_status.lock().await;
-    {
-        let _tray=state.tray_gate.lock().unwrap_or_else(|p|p.into_inner());
-        if state.is_displayed(){sink.present(crate::tray::runtime_presentation(state,&settings,Some(&usage),status));}
-    }
-    sink.publish_usage(crate::commands::usage_envelope(state,&settings,usage));
-    if let Some(app)=sink.app_handle(){
-        if let Some(owner)=state.owner.get().and_then(|w|w.upgrade()){
-            if let Some(registry)=owner.monitors.get(){registry.publish(app).await;}
-        }
     }
 }

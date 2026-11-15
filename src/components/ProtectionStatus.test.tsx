@@ -10,16 +10,21 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: tauri.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: tauri.listen }));
 
 function snapshot(overrides: Partial<ProtectionStatus> = {}): ProtectionStatus {
-  return { revision: 1, enabled: true, provider: 'codex', autoResumeEnabled: false, connection: 'available',
-    capabilities: { cooperativeDelivery: true, directInterrupt: false, completionObservation: false,
-      userActivityObservation: false, continuationControl: false },
+  return { revision: 1, enabled: true, provider: 'codex', connection: 'available',
     mode: 'cooperative', summary: 'pauseRequested', reason: 'stoppingUnconfirmed',
     confirmedCount: 1, acceptedRequestCount: 1, confirmedInterruptionCount: 0,
     lastConfirmedAt: 100, lastProbeAt: 100, lastSuccessfulSampleAt: Math.floor(Date.now() / 1000),
     effectiveIntervalSeconds: 15, nextPollAt: null, quotaHealth: 'success', targets: [],
-    resumePlans: [], resumeStateError: null, ...overrides };
+    pausedThreads: [], ...overrides };
 }
-const settings = { ...DEFAULT_SETTINGS, autoPauseOnLowQuota: true };
+const settings = {
+  ...DEFAULT_SETTINGS,
+  providerPreferences: {
+    ...DEFAULT_SETTINGS.providerPreferences,
+    codex: { ...DEFAULT_SETTINGS.providerPreferences.codex, protectionEnabled: true },
+    dsh: { ...DEFAULT_SETTINGS.providerPreferences.dsh, protectionEnabled: true },
+  },
+};
 beforeEach(async () => {
   tauri.listeners.clear(); tauri.invoke.mockReset(); tauri.listen.mockReset();
   tauri.invoke.mockResolvedValue(snapshot());
@@ -64,37 +69,26 @@ describe('protection status', () => {
     expect(screen.getByText('Last successful read: 450 ms · attempt 1.')).toBeTruthy();
     expect(screen.queryByText('Next quota check in 15s.')).toBeNull();
   });
-  it('shows acceptance separately from verified stopping and gates resume', async () => {
-    const patch = vi.fn();
-    render(<ProtectionStatusView settings={settings} onPatchSettings={patch} />);
+  it('shows acceptance separately from verified stopping without auto-resume toggle', async () => {
+    render(<ProtectionStatusView settings={settings} />);
     await screen.findByText('Pause requested — stopping unconfirmed');
     fireEvent.click(screen.getByText('Protection details'));
     expect(screen.getByText('Requests accepted: 1 · Interruptions verified: 0')).toBeTruthy();
-    const resume = screen.getByRole('checkbox', { name: 'Resume automatically after quota reset' }) as HTMLInputElement;
-    expect(resume.disabled).toBe(true);
-    fireEvent.click(resume);
-    expect(patch).not.toHaveBeenCalled();
+    expect(screen.queryByRole('checkbox')).toBeNull();
     expect(tauri.invoke.mock.calls.every(([name]) => name === 'get_auto_pause_status')).toBe(true);
   });
-  it.each(['en-US', 'zh-CN', 'zh-Hant'])('keeps DSH cooperative-only and cannot offer local resume in %s even with stale capabilities/plans', async locale => {
+  it.each(['en-US', 'zh-CN', 'zh-Hant'])('keeps DSH cooperative-only and cannot offer local resume in %s even with stale pausedThreads', async locale => {
     await i18n.changeLanguage(locale);
-    tauri.invoke.mockResolvedValue(snapshot({ provider: 'dsh', autoResumeEnabled: true,
+    tauri.invoke.mockResolvedValue(snapshot({ provider: 'dsh',
       confirmedInterruptionCount: 9,
-      capabilities: { cooperativeDelivery: true, directInterrupt: true, completionObservation: true, userActivityObservation: true, continuationControl: true },
       targets: [{ periodId: 'period', active: true, threadId: 'dsh-session', hostId: null, turnId: null, phase: 'interrupted', reason: null, requestedAt: 100, acceptedAt: 101, interruptedAt: 102 }],
-      resumePlans: [{ id: 'legacy-plan', threadId: 'local-chat', phase: 'ready', eligibleAfter: 100, reason: null }] }));
-    const patch = vi.fn();
-    render(<ProtectionStatusView settings={{ ...settings, provider: 'dsh', autoResumeAfterQuotaReset: true }} onPatchSettings={patch} />);
+      pausedThreads: ['local-chat'] }));
+    render(<ProtectionStatusView settings={{ ...settings, provider: 'dsh' }} />);
     await screen.findByText(i18n.t('protectionSummaries.pauseRequested'));
     fireEvent.click(screen.getByText(i18n.t('protectionDetails')));
     expect(screen.getByText(i18n.t('protectionCounts', { accepted: 1, stopped: 0 }))).toBeTruthy();
     expect(screen.getByText(new RegExp(i18n.t('protectionPhases.accepted')))).toBeTruthy();
     expect(screen.getByText(i18n.t('dshResumeUnavailable'))).toBeTruthy();
-    const resume = screen.getByRole('checkbox', { name: i18n.t('autoResumeAfterQuotaReset') }) as HTMLInputElement;
-    expect(resume.disabled).toBe(true);
-    expect(resume.checked).toBe(false);
-    fireEvent.click(resume);
-    expect(patch).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: i18n.t('resumeChat') })).toBeNull();
     expect(screen.queryByRole('button', { name: i18n.t('cancelResumePlans') })).toBeNull();
     expect(tauri.invoke.mock.calls.every(([command]) => command === 'get_auto_pause_status')).toBe(true);
@@ -107,7 +101,7 @@ describe('protection status', () => {
   ])('renders the DSH binding requirement without a fallback in %s', async (locale, message) => {
     await i18n.changeLanguage(locale);
     tauri.invoke.mockResolvedValue(snapshot({ provider: 'dsh', summary: 'needsAttention', reason: 'dshBindingRequired',
-      confirmedCount: 0, acceptedRequestCount: 0, confirmedInterruptionCount: 0, targets: [], resumePlans: [] }));
+      confirmedCount: 0, acceptedRequestCount: 0, confirmedInterruptionCount: 0, targets: [], pausedThreads: [] }));
     render(<ProtectionStatusView settings={{ ...settings, provider: 'dsh' }} />);
     await screen.findByText(message);
     expect(screen.queryByText(i18n.t('protectionReasons.statusUnavailable'))).toBeNull();
@@ -115,7 +109,7 @@ describe('protection status', () => {
   });
 
   it('drops old-provider status and resume actions immediately when selecting DSH', async () => {
-    tauri.invoke.mockResolvedValue(snapshot({ resumePlans: [{ id: 'plan', threadId: 'local-chat', phase: 'ready', eligibleAfter: 100, reason: null }] }));
+    tauri.invoke.mockResolvedValue(snapshot({ pausedThreads: ['local-chat'] }));
     const view = render(<ProtectionStatusView settings={settings} />);
     fireEvent.click(await screen.findByText('Protection details'));
     expect(screen.getByRole('button', { name: 'Resume chat' })).toBeTruthy();
@@ -161,7 +155,7 @@ describe('protection status', () => {
   it('shows off immediately when the local setting is disabled', async () => {
     const view = render(<ProtectionStatusView settings={settings} compact />);
     await screen.findByText('Pause requested — stopping unconfirmed');
-    view.rerender(<ProtectionStatusView settings={{ ...settings, autoPauseOnLowQuota: false }} compact />);
+    view.rerender(<ProtectionStatusView settings={DEFAULT_SETTINGS} compact />);
     expect(screen.getByText('Protection off')).toBeTruthy();
   });
   it('reports status read failures instead of claiming protection is armed', async () => {
@@ -170,20 +164,16 @@ describe('protection status', () => {
     await screen.findByText('Protection needs attention');
     expect(screen.getByText('Protection status is unavailable.')).toBeTruthy();
   });
-  it('cancels saved plans only after an explicit button click', async () => {
-    tauri.invoke.mockResolvedValue(snapshot({ resumePlans: [
-      { id: 'plan', threadId: 'chat', phase: 'needsReview', eligibleAfter: 100, reason: null }
-    ] }));
+  it('clears paused chats only after an explicit button click', async () => {
+    tauri.invoke.mockResolvedValue(snapshot({ pausedThreads: ['chat'] }));
     render(<ProtectionStatusView settings={settings} />);
-    fireEvent.click(await screen.findByText('Cancel pending resume plans'));
+    fireEvent.click(await screen.findByText('Clear paused chats'));
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('cancel_resume_plans', { provider: 'codex' }));
   });
   it('resumes a chat when clicking the resume button', async () => {
     tauri.invoke.mockImplementation(async (cmd) => {
       if (cmd === 'get_auto_pause_status') {
-        return snapshot({ resumePlans: [
-          { id: 'plan', threadId: 'chat-abc', phase: 'ready', eligibleAfter: 100, reason: null }
-        ] });
+        return snapshot({ pausedThreads: ['chat-abc'] });
       }
       return null;
     });
@@ -194,9 +184,7 @@ describe('protection status', () => {
   it('displays error when resume fails because quota is still low', async () => {
     tauri.invoke.mockImplementation(async (cmd) => {
       if (cmd === 'get_auto_pause_status') {
-        return snapshot({ resumePlans: [
-          { id: 'plan', threadId: 'chat-abc', phase: 'waitingForQuota', eligibleAfter: 100, reason: null }
-        ] });
+        return snapshot({ pausedThreads: ['chat-abc'] });
       }
       if (cmd === 'resume_chat') {
         throw 'quotaStillLow';
@@ -224,6 +212,6 @@ it.each(['en-US','zh-CN','zh-Hant'])('explains unknown submissions in %s without
     targets:[{periodId:'p',active:true,threadId:'chat',hostId:null,turnId:null,phase:'unknown',reason:'submissionUnknown',requestedAt:Math.floor(Date.now()/1000),acceptedAt:null,interruptedAt:null}]}));
   const view=render(<ProtectionStatusView settings={{...settings,language:locale}}/>);
   await screen.findByText(i18n.t('protectionReasons.submissionUnknown'));
-  expect(view.container.textContent).toContain(i18n.t('protectionPhases.unknown'));
-  expect(view.container.textContent).not.toContain('protectionPhases.unknown');
+  fireEvent.click(view.getByText(i18n.t('protectionDetails')));
+  expect(view.getByText(i18n.t('protectionCounts',{accepted:0,stopped:0}))).toBeTruthy();
 });

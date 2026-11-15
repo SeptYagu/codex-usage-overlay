@@ -10,5 +10,5 @@ it.each(['codex','claude','dsh'] as const)('offers the same 5H algorithms for %s
   const patch=vi.fn();const view=render(<BurnRateOptions provider={provider} algorithm="legacy" usage={null} onPatchSettings={patch}/>);
   expect([...view.getByRole('combobox').querySelectorAll('option')].map(option=>option.value)).toEqual(['legacy','weighted','personalized']);
   fireEvent.change(view.getByRole('combobox'),{target:{value:'personalized'}});
-  expect(patch).toHaveBeenCalledWith({fiveHourBurnRateAlgorithm:'personalized'});
+  expect(patch).toHaveBeenCalledWith({providerPreferences:{[provider]:{fiveHourBurnRateAlgorithm:'personalized'}}});
 });

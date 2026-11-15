@@ -8,6 +8,8 @@ mod config;
 mod dock;
 mod dsh;
 mod dsh_control;
+mod geometry;
+mod live_poll;
 mod notify;
 mod pause_control;
 mod pause_message;
@@ -33,10 +35,10 @@ pub fn run() {
     // Before any provider-specific state is loaded below.
     config_manager.set_source(&initial_settings);
     if let Err(error) = config_manager.save_settings_checked(&initial_settings) { eprintln!("Could not save migrated settings: {error}"); }
-    if let Err(error) = claude::install::write_guard_config(config_manager.runtime_dir(), &initial_settings.for_provider(config::Provider::Claude)) {
+    if let Err(error) = claude::install::write_guard_config(config_manager.runtime_dir(), &initial_settings) {
         eprintln!("Could not write the Claude guard preferences: {error}");
     }
-    if let Err(error) = antigravity::install::write_guard_config(config_manager.runtime_dir(), &initial_settings.for_provider(config::Provider::Antigravity)) {
+    if let Err(error) = antigravity::install::write_guard_config(config_manager.runtime_dir(), &initial_settings) {
         eprintln!("Could not write the Antigravity guard preferences: {error}");
     }
     if let (Some(settings_path), Some(hooks_path), Some(bridge)) = (
@@ -50,7 +52,6 @@ pub fn run() {
     }
 
     let app_state = Arc::new(AppState::new(config_manager.clone(), initial_settings.clone()));
-    monitor::initialize(&app_state, &initial_settings);
 
     let app_state_clone = app_state.clone();
     let window_state = app_state.clone();
@@ -95,15 +96,11 @@ pub fn run() {
                 tauri::WindowEvent::Focused(focused)
                     if window.label() == tray::TRAY_MENU_WINDOW_LABEL =>
                 {
-                    struct LiveFocusOps<'a>(&'a tauri::Window);
-                    impl<'a> TrayMenuFocusWindowOps for LiveFocusOps<'a> {
-                        fn hide(&mut self) {
-                            let _ = self.0.hide();
-                        }
-                    }
-                    apply_tray_menu_focus_event(&mut LiveFocusOps(window), *focused, || {
+                    if handle_tray_menu_focus_event(*focused, || {
                         tray::on_tray_menu_blur(window.app_handle())
-                    });
+                    }) {
+                        let _ = window.hide();
+                    }
                 }
                 tauri::WindowEvent::ScaleFactorChanged { .. } if window.label() == "main" => {
                     let app = window.app_handle().clone();
@@ -139,7 +136,6 @@ pub fn run() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::fetch_usage,
-            commands::get_last_usage,
             commands::get_settings,
             pause_message::get_pause_templates,
             monitor::get_monitor_snapshots,
@@ -274,17 +270,22 @@ pub fn run() {
             let status_state = app_state_clone.clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    if let Some(registry) = status_state.monitors.get() {
-                        for runtime in registry.all() {
-                            let settings = runtime.settings.lock().await.clone();
-                            if settings.auto_pause_on_low_quota && settings.provider == config::Provider::Codex {
-                                pause_control::probe_bridge_status(&runtime);
-                            }
-                            pause_control::status::publish(&status_handle, &runtime).await;
+                    for runtime in status_state.monitors.all() {
+                        let settings = runtime.settings.lock().await.clone();
+                        let codex_pref = settings.preference(config::Provider::Codex);
+                        if runtime.provider == config::Provider::Codex
+                            && codex_pref.monitor_enabled
+                            && codex_pref.protection_enabled
+                        {
+                            pause_control::probe_bridge_status(&runtime);
                         }
-                        registry.publish(&status_handle).await;
+                        pause_control::status::publish(&status_handle, &runtime).await;
                     }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    status_state.monitors.publish(&status_handle).await;
+                    tokio::select! {
+                        _ = status_state.services.status_wake.notified() => {}
+                        _ = tokio::time::sleep(Duration::from_secs(15)) => {}
+                    }
                 }
             });
 
@@ -349,7 +350,7 @@ pub fn run() {
                         );
                     }
                 }
-                if let Some(registry) = app.state::<Arc<AppState>>().monitors.get() { registry.shutdown(); }
+                app.state::<Arc<AppState>>().monitors.shutdown();
                 commands::shutdown_audio(app);
                 commands::install_prepared_update_on_exit(
                     app,
@@ -486,26 +487,13 @@ pub fn handle_tray_menu_focus_event(
     }
 }
 
-pub trait TrayMenuFocusWindowOps {
-    fn hide(&mut self);
-}
-
-pub fn apply_tray_menu_focus_event<W: TrayMenuFocusWindowOps>(
-    ops: &mut W,
-    focused: bool,
-    blur_evaluator: impl FnOnce() -> bool,
-) {
-    if handle_tray_menu_focus_event(focused, blur_evaluator) {
-        ops.hide();
-    }
-}
 
 pub(crate) async fn fetch_usage_background(handle: &AppHandle, state: &Arc<AppState>) {
     let provider = state.settings.lock().await.provider;
-    let runtime = monitor::selected(state, provider);
+    let runtime = state.monitors.get(provider);
     refresh_provider_background(handle, &runtime).await;
 }
-pub(crate) async fn refresh_provider_background(handle: &AppHandle, state: &Arc<AppState>) {
+pub(crate) async fn refresh_provider_background(handle: &AppHandle, state: &Arc<commands::ProviderRuntime>) {
     if state.monitor_enabled.load(std::sync::atomic::Ordering::Acquire) {
         let _ = commands::refresh_usage(handle, state).await;
     }
@@ -1003,31 +991,6 @@ mod tests {
         // When focused becomes false, respect the blur evaluator.
         assert!(!handle_tray_menu_focus_event(false, || false));
         assert!(handle_tray_menu_focus_event(false, || true));
-    }
-
-    #[test]
-    fn apply_tray_menu_focus_event_hides_only_when_approved() {
-        struct MockFocusOps(usize);
-        impl TrayMenuFocusWindowOps for MockFocusOps {
-            fn hide(&mut self) {
-                self.0 += 1;
-            }
-        }
-
-        // Focused(true): never hide
-        let mut ops = MockFocusOps(0);
-        apply_tray_menu_focus_event(&mut ops, true, || true);
-        assert_eq!(ops.0, 0);
-
-        // Focused(false) with evaluator false: never hide
-        let mut ops = MockFocusOps(0);
-        apply_tray_menu_focus_event(&mut ops, false, || false);
-        assert_eq!(ops.0, 0);
-
-        // Focused(false) with evaluator true: hide exactly once
-        let mut ops = MockFocusOps(0);
-        apply_tray_menu_focus_event(&mut ops, false, || true);
-        assert_eq!(ops.0, 1);
     }
 }
 

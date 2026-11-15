@@ -9,6 +9,7 @@ import { ProviderLogo } from './ProviderLogo';
 
 interface OverlayViewProps {
   settings: OverlaySettings;
+  provider?: Provider;
   usage: CodexUsage | null;
   isLoading: boolean;
   dockState?: DockStateInfo;
@@ -46,7 +47,8 @@ export function formatBurnRate(rate: number | null | undefined): string {
  */
 const PERCENTAGE_GRID_TICKS = [10, 20, 30, 40, 50, 60, 70, 80, 90];
 
-export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoading, dockState, monitors = {}, onCycleProvider }) => {
+export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, usage, isLoading, dockState, monitors = {}, onCycleProvider }) => {
+  const activeProvider = provider ?? settings.provider;
   const { t } = useTranslation();
   const [, setTick] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -61,21 +63,21 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
   const layout = settings.overlayLayout === 'stacks' ? 'stacks' : 'grouped';
   const collapsed = Boolean(dockState?.docked && !dockState.expanded);
   // Claude has no credit balance; Antigravity shows credits only when reported.
-  const claude = settings.provider === 'claude';
-  const showCredits = settings.showCredits && ((settings.provider !== 'claude' && settings.provider !== 'antigravity') || Boolean(usage?.hasCredits));
+  const claude = activeProvider === 'claude';
+  const showCredits = settings.showCredits && ((activeProvider !== 'claude' && activeProvider !== 'antigravity') || Boolean(usage?.hasCredits));
   const showLogo = settings.showProviderLogo;
   const [switching, setSwitching] = useState(false);
   const order: Provider[] = ['codex', 'claude', 'dsh', 'antigravity'];
-  const nextProvider = [1, 2, 3].map(offset => order[(order.indexOf(settings.provider) + offset) % 4])
-    .find(provider => monitors[provider]?.available && monitors[provider]?.monitorEnabled);
-  const providerLabel = (provider: Provider) => t(
-    provider === 'claude' ? 'providerClaude'
-      : provider === 'dsh' ? 'providerDsh'
-        : provider === 'antigravity' ? 'providerAntigravity'
+  const nextProvider = [1, 2, 3].map(offset => order[(order.indexOf(activeProvider) + offset) % 4])
+    .find(candidate => monitors[candidate]?.available && monitors[candidate]?.monitorEnabled);
+  const providerLabel = (target: Provider) => t(
+    target === 'claude' ? 'providerClaude'
+      : target === 'dsh' ? 'providerDsh'
+        : target === 'antigravity' ? 'providerAntigravity'
           : 'providerCodex'
   );
-  const logoHint = nextProvider ? t('switchProviderHint', { current: providerLabel(settings.provider), next: providerLabel(nextProvider) })
-    : t('singleProviderHint', { current: providerLabel(settings.provider) });
+  const logoHint = nextProvider ? t('switchProviderHint', { current: providerLabel(activeProvider), next: providerLabel(nextProvider) })
+    : t('singleProviderHint', { current: providerLabel(activeProvider) });
 
   const interaction=(reason:'hover'|'focus',active:boolean)=>{void invoke('set_display_interaction',{reason,active}).catch(()=>{});};
   useEffect(()=>{
@@ -279,7 +281,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
         onMouseLeave={handleMouseLeave}
         onDoubleClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
         onContextMenu={handleContextMenu}
-        title={`${providerLabel(settings.provider)} · ${usage ? t('tooltipUpdated', { time: new Date(usage.fetchedAt * 1000).toLocaleTimeString() }) : t('loadingTooltip')}`}
+        title={`${providerLabel(activeProvider)} · ${usage ? t('tooltipUpdated', { time: new Date(usage.fetchedAt * 1000).toLocaleTimeString() }) : t('loadingTooltip')}`}
         style={{
           '--overlay-alpha': (100 - settings.backgroundTransparencyPercent) / 100,
           transform: `scale(${scale / dprComp})`,
@@ -299,24 +301,24 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, usage, isLoa
                 setSwitching(true);
                 try { await onCycleProvider(); } finally { setSwitching(false); }
               }}>
-              <ProviderLogo provider={settings.provider} />
+              <ProviderLogo provider={activeProvider} />
             </button>
             {layout === 'grouped' && <span aria-hidden="true" className="overlay-divider" />}
           </>
         )}
-        <CapsuleReadings settings={settings} usage={usage} isLoading={isLoading} />
+        <CapsuleReadings settings={settings} provider={activeProvider} usage={usage} isLoading={isLoading} />
       </div>
     </div>
   );
 };
 
-function CapsuleReadings({settings,usage,isLoading}:{settings:OverlaySettings;usage:CodexUsage|null;isLoading:boolean}) {
+function CapsuleReadings({settings,provider,usage,isLoading}:{settings:OverlaySettings;provider:Provider;usage:CodexUsage|null;isLoading:boolean}) {
   const {t}=useTranslation();const layout=settings.overlayLayout;
   const raw=usage?.creditsDisplay??'—';const numeric=Number(raw);
   const credit=raw.trim()!==''&&Number.isFinite(numeric)?numeric.toFixed(2):raw;
   // Antigravity always reads 5H | Gemini WK | Argon. When Argon is the projected
   // pool, the usage's own weekly window (and its burn rate) belongs to Argon.
-  const antigravity=settings.provider==='antigravity';
+  const antigravity=provider==='antigravity';
   const argonPool=antigravity&&usage?.weeklyIsArgon===true;
   const ownWeekly={percent:usage?.weekRemainingPercent,countdown:formatResetCountdown(usage?.weekResetsAt,true),burn:formatBurnRate(usage?.weekBurnRatePerHour)};
   const weekly=argonPool?{percent:usage?.geminiWeekRemainingPercent,countdown:formatResetCountdown(usage?.geminiWeekResetsAt,true),burn:''}:ownWeekly;
@@ -336,7 +338,7 @@ function CapsuleReadings({settings,usage,isLoading}:{settings:OverlaySettings;us
         <div className="overlay-meta-row"><span className="overlay-countdown">{quota.countdown}</span>{settings.showBurnRate&&quota.burn&&<span className="overlay-burn-rate" title={quota.key==='five'?burnRatePresentation(usage,t):undefined}>{quota.burn}</span>}</div>
       </div>
     </React.Fragment>)}
-    {settings.showCredits&&((settings.provider!=='claude'&&settings.provider!=='antigravity')||Boolean(usage?.hasCredits))&&<>
+    {settings.showCredits&&((provider!=='claude'&&provider!=='antigravity')||Boolean(usage?.hasCredits))&&<>
       {layout==='grouped'&&<span aria-hidden="true" className="overlay-divider"/>}
       <div className="overlay-credit" role="group" aria-label={t('creditsLabel')}><div className="overlay-reading"><span className="overlay-label">{layout==='stacks'?t('creditsLabel'):'CR'}</span><span className="overlay-value">{credit}</span></div>{layout==='stacks'&&<span className="overlay-countdown">{t('balanceLabel')}</span>}</div>
     </>}

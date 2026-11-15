@@ -43,22 +43,10 @@ pub fn bridge_path() -> Option<PathBuf> {
     std::env::current_exe().ok()?.parent().map(|dir| dir.join(BRIDGE_EXE))
 }
 
-fn read_settings(path: &Path) -> Result<Value, String> {
-    match fs::read_to_string(path) {
-        Ok(raw) if raw.trim().is_empty() => Ok(Value::Null),
-        Ok(raw) => serde_json::from_str(&raw).map_err(|error| {
-            format!("Claude Code settings are not valid JSON ({error}); fix {} before connecting", path.display())
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Value::Null),
-        Err(error) => Err(format!("Could not read {}: {error}", path.display())),
-    }
-}
+use agent_bridge::{backup_once, read_bridge_config, read_json_doc};
 
-fn read_bridge_config(runtime_dir: &Path) -> BridgeConfig {
-    fs::read_to_string(runtime_dir.join(shared::BRIDGE_FILE))
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+fn read_settings(path: &Path) -> Result<Value, String> {
+    read_json_doc(path, "Claude Code settings")
 }
 
 pub fn status(settings_path: Option<&Path>, runtime_dir: &Path, bridge: Option<&Path>) -> ClaudeConnectionStatus {
@@ -68,10 +56,7 @@ pub fn status(settings_path: Option<&Path>, runtime_dir: &Path, bridge: Option<&
         None => (Default::default(), Some("Could not locate the Claude Code settings folder".into())),
     };
     let snapshot = shared::read_snapshot(runtime_dir);
-    let guard: GuardState = fs::read_to_string(runtime_dir.join(shared::GUARD_STATE_FILE))
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
+    let guard: GuardState = agent_bridge::read_json(&runtime_dir.join(shared::GUARD_STATE_FILE)).unwrap_or_default();
     ClaudeConnectionStatus {
         status_line: connection.status_line,
         hooks: connection.hooks,
@@ -95,10 +80,7 @@ pub fn connect(settings_path: &Path, runtime_dir: &Path, bridge: &Path) -> Resul
         return Err(format!("{BRIDGE_EXE} is missing next to the overlay executable"));
     }
     let mut settings = read_settings(settings_path)?;
-    let backup = settings_path.with_extension(format!("json.{BACKUP_SUFFIX}"));
-    if settings_path.is_file() && !backup.exists() {
-        fs::copy(settings_path, &backup).map_err(|error| format!("Could not back up {}: {error}", settings_path.display()))?;
-    }
+    backup_once(settings_path, BACKUP_SUFFIX)?;
     let previous = shared::connect(&mut settings, bridge)?;
     if previous.is_some() {
         let config = BridgeConfig { chained_status_line: previous };
@@ -114,7 +96,7 @@ pub fn disconnect(settings_path: &Path, runtime_dir: &Path) -> Result<(), String
     if settings.is_null() {
         return Ok(());
     }
-    let config = read_bridge_config(runtime_dir);
+    let config = read_bridge_config(runtime_dir, shared::BRIDGE_FILE);
     shared::disconnect(&mut settings, config.chained_status_line);
     shared::write_json_atomic(settings_path, &settings).map_err(|error| format!("Could not write {}: {error}", settings_path.display()))?;
     match fs::remove_file(runtime_dir.join(shared::BRIDGE_FILE)) {
@@ -123,13 +105,13 @@ pub fn disconnect(settings_path: &Path, runtime_dir: &Path) -> Result<(), String
     }
 }
 
-/// Mirrors the guard switch and thresholds for the hook. The guard is only
-/// armed while Claude is the active provider.
+/// Mirrors the Claude guard switch and thresholds for the hook.
 pub fn write_guard_config(runtime_dir: &Path, settings: &OverlaySettings) -> Result<(), String> {
+    let claude = settings.preference(crate::config::Provider::Claude);
     let config = GuardConfig {
-        enabled: settings.provider == crate::config::Provider::Claude && settings.auto_pause_on_low_quota,
-        five_hour_threshold_percent: settings.auto_pause_five_hour_threshold_percent,
-        weekly_threshold_percent: settings.auto_pause_weekly_threshold_percent,
+        enabled: claude.monitor_enabled && claude.protection_enabled,
+        five_hour_threshold_percent: claude.five_hour_threshold_percent,
+        weekly_threshold_percent: claude.weekly_threshold_percent,
         locale: crate::commands::resolve_locale(&settings.language).to_string(),
     };
     shared::write_json_atomic(&runtime_dir.join(shared::GUARD_FILE), &config).map_err(|e| e.to_string())
@@ -164,13 +146,13 @@ mod tests {
         connect(&settings_path, &runtime, &bridge).unwrap();
         let current = status(Some(&settings_path), &runtime, Some(&bridge));
         assert!(current.status_line && current.hooks && current.bridge_available && current.error.is_none());
-        assert_eq!(read_bridge_config(&runtime).chained_command(), Some("bash ~/.claude/line.sh"));
+        assert_eq!(read_bridge_config(&runtime, shared::BRIDGE_FILE).chained_command(), Some("bash ~/.claude/line.sh"));
         let backup = settings_path.with_extension("json.codex-overlay.bak");
         assert_eq!(serde_json::from_str::<Value>(&fs::read_to_string(&backup).unwrap()).unwrap(), original);
 
         // A second connect keeps the chained statusline instead of chaining the helper.
         connect(&settings_path, &runtime, &bridge).unwrap();
-        assert_eq!(read_bridge_config(&runtime).chained_command(), Some("bash ~/.claude/line.sh"));
+        assert_eq!(read_bridge_config(&runtime, shared::BRIDGE_FILE).chained_command(), Some("bash ~/.claude/line.sh"));
 
         disconnect(&settings_path, &runtime).unwrap();
         let restored: Value = serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -204,13 +186,17 @@ mod tests {
     #[test]
     fn the_guard_is_only_armed_for_the_claude_provider() {
         let (_, runtime, _) = dirs("guard");
-        let mut settings = OverlaySettings { auto_pause_on_low_quota: true, language: "zh-CN".into(), ..Default::default() };
+        let mut settings = OverlaySettings { language: "zh-CN".into(), ..Default::default() };
+        settings.preference_mut(crate::config::Provider::Codex).protection_enabled = true;
         write_guard_config(&runtime, &settings).unwrap();
         let read = || serde_json::from_str::<GuardConfig>(&fs::read_to_string(runtime.join(shared::GUARD_FILE)).unwrap()).unwrap();
         assert!(!read().enabled);
-        settings.provider = crate::config::Provider::Claude;
+        settings.preference_mut(crate::config::Provider::Claude).protection_enabled = true;
         write_guard_config(&runtime, &settings).unwrap();
         assert_eq!(read(), GuardConfig { enabled: true, five_hour_threshold_percent: 5, weekly_threshold_percent: 2, locale: "zh-CN".into() });
+        settings.preference_mut(crate::config::Provider::Claude).monitor_enabled = false;
+        write_guard_config(&runtime, &settings).unwrap();
+        assert!(!read().enabled);
         let _ = fs::remove_dir_all(runtime.parent().unwrap());
     }
 }

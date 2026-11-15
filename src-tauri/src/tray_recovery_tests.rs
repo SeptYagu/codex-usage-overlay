@@ -120,7 +120,7 @@ fn native_recovery_keeps_one_window_and_releases_it_on_the_owner_thread() {
     let baseline = count();
     let app = tauri::Builder::default().any_thread().build(context).unwrap();
     let presentation = || tray_presentation(&OverlaySettings::default(), None, TrayReadStatus::Pending);
-    let tray = app.handle().create_tray(presentation()).unwrap();
+    let tray = crate::tray::create_tray_icon(app.handle(), presentation()).unwrap();
     let original = tray.with_inner_tray_icon(|inner| inner.window_handle() as usize).unwrap();
     assert_eq!(count(), baseline + 1);
     for _ in 0..100 {

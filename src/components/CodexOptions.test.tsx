@@ -11,7 +11,7 @@ afterEach(cleanup);
 it('allows estimate selection independently of protection and does not modify message settings',async()=>{
   const patch=vi.fn();const view=render(<><BurnRateOptions provider="codex" algorithm="legacy" usage={null} onPatchSettings={patch}/><CodexOptions settings={DEFAULT_SETTINGS} disabled onPatchSettings={patch}/></>);
   await act(async()=>{});fireEvent.change(view.getByRole('combobox'),{target:{value:'weighted'}});
-  expect(patch).toHaveBeenCalledWith({fiveHourBurnRateAlgorithm:'weighted'});
+  expect(patch).toHaveBeenCalledWith({providerPreferences:{codex:{fiveHourBurnRateAlgorithm:'weighted'}}});
   expect((view.getByRole('button',{name:'Use scheduled-continuation template'}) as HTMLButtonElement).disabled).toBe(true);
 });
 it('applies the authoritative continuation preset only after explicit action',async()=>{

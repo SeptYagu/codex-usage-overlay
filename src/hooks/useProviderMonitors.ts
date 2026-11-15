@@ -1,8 +1,20 @@
 import { useEffect, useState } from 'react';
-import { usageIsOlder } from '../usageSource';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { MonitorSnapshot, Provider } from '../types';
+import { CodexUsage, MonitorSnapshot, Provider } from '../types';
+
+export function usageIsOlder(next: CodexUsage, current: CodexUsage): boolean {
+  if (
+    next.sourceKey === current.sourceKey
+    && next.sourceGeneration === current.sourceGeneration
+    && next.presentationRevision !== undefined
+    && current.presentationRevision !== undefined
+    && next.presentationRevision !== current.presentationRevision
+  ) {
+    return next.presentationRevision < current.presentationRevision;
+  }
+  return next.fetchedAt < current.fetchedAt;
+}
 
 export function mergeMonitorSnapshot(current: Partial<Record<Provider, MonitorSnapshot>>, next: MonitorSnapshot) {
   if (!next || !['codex', 'claude', 'dsh', 'antigravity'].includes(next.provider) || !Number.isSafeInteger(next.revision)

@@ -1,40 +1,8 @@
 use super::{triggered_quotas, unix_now, AutoPauseController, BridgeConnection};
-use crate::{commands::AppState, config::{OverlaySettings, Provider}, tray::TrayReadStatus};
+use crate::{commands::ProviderRuntime, config::{OverlaySettings, Provider}, tray::TrayReadStatus};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use tauri::Emitter;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ControlCapabilities {
-    pub cooperative_delivery: bool,
-    pub direct_interrupt: bool,
-    pub completion_observation: bool,
-    pub user_activity_observation: bool,
-    pub continuation_control: bool,
-}
-
-impl Default for ControlCapabilities {
-    fn default() -> Self {
-        // The installed tools/call bridge demonstrates message delivery only.
-        Self {
-            cooperative_delivery: true,
-            direct_interrupt: false,
-            completion_observation: false,
-            user_activity_observation: false,
-            continuation_control: false,
-        }
-    }
-}
-
-impl ControlCapabilities {
-    pub fn can_auto_resume(self) -> bool {
-        self.direct_interrupt
-            && self.completion_observation
-            && self.user_activity_observation
-            && self.continuation_control
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,9 +78,7 @@ pub struct AutoPauseStatus {
     /// Claude protection runs in Claude Code's hooks, so its status only
     /// depends on the quota, never on the Codex bridge.
     pub provider: Provider,
-    pub auto_resume_enabled: bool,
     pub connection: BridgeConnection,
-    pub capabilities: ControlCapabilities,
     pub mode: String,
     pub summary: String,
     pub reason: Option<String>,
@@ -128,8 +94,8 @@ pub struct AutoPauseStatus {
     pub quota_health: String,
     pub reader: Option<crate::codex::reader::ReaderSnapshot>,
     pub targets: Vec<TargetStatus>,
-    pub resume_plans: Vec<super::resume::ResumePlanSummary>,
-    pub resume_state_error: Option<String>,
+    /// In-session thread IDs that accepted a pause request, available for manual resume.
+    pub paused_threads: Vec<String>,
 }
 
 impl AutoPauseStatus {
@@ -138,9 +104,7 @@ impl AutoPauseStatus {
             revision: 0,
             enabled,
             provider: Provider::Codex,
-            auto_resume_enabled: false,
             connection: controller.connection,
-            capabilities: controller.transport.capabilities(),
             mode: "cooperative".into(),
             summary: if enabled { "checking" } else { "off" }.into(),
             reason: None,
@@ -168,8 +132,11 @@ impl AutoPauseStatus {
                     target
                 })
                 .collect(),
-            resume_plans: Vec::new(),
-            resume_state_error: None,
+            paused_threads: if enabled {
+                controller.paused_threads()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -230,15 +197,16 @@ pub struct StatusCache {
     emitted_revision: u64,
 }
 
-pub async fn snapshot(state: &AppState) -> AutoPauseStatus {
+pub async fn snapshot(state: &ProviderRuntime) -> AutoPauseStatus {
     // Keep the same settings-first ordering as the presentation pipeline.
     let settings = state.settings.lock().await;
     let read = *state.tray_read_status.lock().await;
     let usage = state.last_usage.lock().await.clone();
+    let pref = settings.preference(settings.provider);
     let (mut status, running, account_known) = {
         let controller = state.auto_pause.lock().unwrap_or_else(|p| p.into_inner());
         (
-            controller.status(settings.auto_pause_on_low_quota),
+            controller.status(pref.monitor_enabled && pref.protection_enabled),
             controller.running,
             controller.telemetry.account_known,
         )
@@ -247,18 +215,18 @@ pub async fn snapshot(state: &AppState) -> AutoPauseStatus {
     let healthy_interval;
     {
         let polling = state.polling.lock().unwrap_or_else(|p| p.into_inner());
-        healthy_interval = polling.healthy_interval_seconds(&settings);
+        healthy_interval = polling.healthy_interval_seconds(&pref);
         status.effective_interval_seconds = if polling.effective_interval_seconds == 0 {
-            u64::from(settings.refresh_interval_seconds.clamp(15, 3600))
+            u64::from(pref.refresh_interval_seconds.clamp(15, 3600))
         } else {
             polling.effective_interval_seconds
         };
         status.next_poll_at = polling.next_poll_at(std::time::Instant::now(), now);
     }
     status.provider = settings.provider;
-    status.auto_resume_enabled = settings.auto_resume_after_quota_reset && settings.provider == Provider::Codex;
     if matches!(settings.provider, Provider::Claude | Provider::Antigravity) {
         status.targets.clear();
+        status.paused_threads.clear();
     }
     status.last_successful_sample_at = usage.as_ref().map(|v| v.fetched_at);
     let (reader_snapshot, reader_failed, display_only) = {
@@ -279,15 +247,11 @@ pub async fn snapshot(state: &AppState) -> AutoPauseStatus {
         _ => "success",
     }
     .into();
-    if settings.provider == Provider::Codex {
-        let resume = state.resume.lock().await;
-        status.resume_plans = resume.plans();
-        status.resume_state_error = resume.error.clone();
-    }
     if settings.provider == Provider::Dsh {
         let control = state.dsh_control.lock().unwrap_or_else(|p| p.into_inner());
-        status.targets.clear(); status.resume_plans.clear(); status.resume_state_error = None;
-        status.reader = None; status.capabilities = ControlCapabilities::default();
+        status.targets.clear();
+        status.paused_threads.clear();
+        status.reader = None;
         status.mode = "cooperative".into();
         status.confirmed_count = control.accepted;
         status.accepted_request_count = control.accepted;
@@ -363,17 +327,6 @@ fn derive_summary(
         u.five_hour_remaining_percent.is_none() || u.week_remaining_percent.is_none()
     }) {
         Some("quotaUnavailable")
-    } else if let Some(reason) = status.resume_state_error.as_deref() {
-        Some(reason)
-    } else if status.resume_plans.iter().any(|p| {
-        matches!(
-            p.phase,
-            super::resume::ResumePhase::NeedsReview | super::resume::ResumePhase::SubmissionUnknown
-        )
-    }) {
-        Some("resumeNeedsReview")
-    } else if status.auto_resume_enabled && !status.capabilities.can_auto_resume() {
-        Some("resumeUnsupported")
     } else if status.connection == BridgeConnection::Unavailable {
         Some("bridgeUnavailable")
     } else {
@@ -414,7 +367,7 @@ fn derive_summary(
     status.summary = "armed".into();
 }
 
-pub async fn publish(app: &tauri::AppHandle, state: &AppState) {
+pub async fn publish(app: &tauri::AppHandle, state: &ProviderRuntime) {
     let status = snapshot(state).await;
     if !state.is_current() { return; }
     let should_emit = {
@@ -431,17 +384,14 @@ pub async fn publish(app: &tauri::AppHandle, state: &AppState) {
     };
     if should_emit {
         let _ = app.emit("auto_pause_status_changed", &status);
-        crate::tray::repaint_tray(app, state).await;
+        crate::tray::repaint_runtime(app, state).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn cooperative_capabilities_never_allow_automatic_resume() {
-        assert!(!ControlCapabilities::default().can_auto_resume());
-    }
+    use std::sync::Arc;
     #[test]
     fn accepted_requests_are_not_interruption_confirmation() {
         let mut controller = AutoPauseController::new();
@@ -450,18 +400,18 @@ mod tests {
         assert_eq!(status.accepted_request_count, 3);
         assert_eq!(status.confirmed_count, 3);
         assert_eq!(status.confirmed_interruption_count, 0);
-        assert!(!status.capabilities.direct_interrupt);
     }
 
-    fn state(tag: &str) -> (AppState, std::path::PathBuf) {
+    fn state(tag: &str) -> (Arc<crate::commands::AppState>, Arc<ProviderRuntime>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "overlay-protection-status-{tag}-{}",
             std::process::id()
         ));
-        (
-            AppState::for_test(crate::config::ConfigManager::with_runtime_dir(dir.clone())),
-            dir,
-        )
+        let owner = Arc::new(crate::commands::AppState::for_test(
+            crate::config::ConfigManager::with_runtime_dir(dir.clone()),
+        ));
+        let runtime = owner.monitors.get(Provider::Codex);
+        (owner, runtime, dir)
     }
     fn usage(five: Option<u32>) -> crate::codex::CodexUsage {
         crate::codex::CodexUsage {
@@ -480,10 +430,11 @@ mod tests {
     }
     #[tokio::test]
     async fn claude_protection_ignores_the_codex_bridge_and_old_samples() {
-        let (state, dir) = state("claude");
+        let (owner, _, dir) = state("claude");
+        let state = owner.monitors.get(Provider::Claude);
         {
             let mut settings = state.settings.lock().await;
-            settings.auto_pause_on_low_quota = true;
+            settings.preference_mut(Provider::Claude).protection_enabled = true;
             settings.provider = Provider::Claude;
         }
         // The bridge was never probed and the account is unknown: neither
@@ -511,11 +462,11 @@ mod tests {
 
     #[tokio::test]
     async fn snapshots_are_versioned_and_getters_do_not_consume_pending_events() {
-        let (state, dir) = state("ordering");
+        let (_owner, state, dir) = state("ordering");
         let first = snapshot(&state).await;
         assert_eq!(first.summary, "off");
         assert_eq!(snapshot(&state).await.revision, first.revision);
-        state.settings.lock().await.auto_pause_on_low_quota = true;
+        state.settings.lock().await.preference_mut(Provider::Codex).protection_enabled = true;
         *state.last_usage.lock().await = Some(usage(Some(3)));
         *state.tray_read_status.lock().await = TrayReadStatus::Success;
         {
@@ -547,14 +498,14 @@ mod tests {
             "historical acceptance cannot imply an active request"
         );
         assert!(!idle.targets[0].active);
-        state.settings.lock().await.auto_pause_on_low_quota = false;
+        state.settings.lock().await.preference_mut(Provider::Codex).protection_enabled = false;
         assert_eq!(snapshot(&state).await.summary, "off");
         let _ = std::fs::remove_dir(dir);
     }
     #[tokio::test]
     async fn missing_stale_or_failed_quota_cannot_display_armed() {
-        let (state, dir) = state("health");
-        state.settings.lock().await.auto_pause_on_low_quota = true;
+        let (_owner, state, dir) = state("health");
+        state.settings.lock().await.preference_mut(Provider::Codex).protection_enabled = true;
         *state.tray_read_status.lock().await = TrayReadStatus::Success;
         {
             let mut controller = state.auto_pause.lock().unwrap();
@@ -583,18 +534,18 @@ mod tests {
     }
     #[test]
     fn a_failure_backoff_never_extends_the_health_freshness_window() {
-        let settings = OverlaySettings { refresh_interval_seconds: 60, ..Default::default() };
+        let pref = crate::config::ProviderPreference::default_for(Provider::Codex);
         let mut poll = crate::polling::PollState::default();
         let now = std::time::Instant::now();
-        for _ in 0..6 { poll.completed_with_recovery(&settings, None, now, crate::polling::ReadRecovery { transient: true, ..Default::default() }); }
+        for _ in 0..6 { poll.completed_with_recovery(&pref, None, now, crate::polling::ReadRecovery { transient: true, ..Default::default() }); }
         assert_eq!(poll.effective_interval_seconds, 300);
-        assert_eq!(poll.healthy_interval_seconds(&settings), 60);
+        assert_eq!(poll.healthy_interval_seconds(&pref), 60);
     }
 
     #[tokio::test]
     async fn delayed_response_and_retry_are_not_armed_even_with_recent_receipt() {
-        let (state, dir) = state("delayed-health");
-        state.settings.lock().await.auto_pause_on_low_quota = true;
+        let (_owner, state, dir) = state("delayed-health");
+        state.settings.lock().await.preference_mut(Provider::Codex).protection_enabled = true;
         *state.last_usage.lock().await = Some(usage(Some(80)));
         *state.tray_read_status.lock().await = TrayReadStatus::Success;
         {
@@ -623,8 +574,7 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
             Arc,
         };
-        let (state, dir) = state("bounded");
-        let state = Arc::new(state);
+        let (_owner, state, dir) = state("bounded");
         let count = Arc::new(AtomicUsize::new(0));
         {
             let mut controller = state.auto_pause.lock().unwrap();

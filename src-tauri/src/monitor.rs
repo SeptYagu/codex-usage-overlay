@@ -2,22 +2,45 @@
 #[cfg(test)]
 mod tests;
 use crate::{
-    commands::{AppState, UsageEnvelope},
-    config::{OverlaySettings, Provider},
+    codex::CodexUsage,
+    commands::{AppServices, AppState, ProviderRuntime},
+    config::{ConfigManager, OverlaySettings, Provider},
 };
 use serde::Serialize;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::Ordering,
     Arc, RwLock,
 };
-use tauri::{AppHandle, Emitter};
-use tokio::sync::Mutex;
+use tauri::AppHandle;
 
 pub struct Registry {
-    runtimes: RwLock<Vec<Arc<AppState>>>,
-    revision: AtomicU64,
-    snapshot_gate: Mutex<()>,
+    runtimes: RwLock<Vec<Arc<ProviderRuntime>>>,
     tasks: std::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotUsage {
+    #[serde(flatten)]
+    pub usage: CodexUsage,
+    pub source_key: String,
+    pub source_generation: u64,
+    #[serde(flatten)]
+    pub presentation: crate::presentation::Metadata,
+}
+
+pub(crate) fn snapshot_usage(
+    state: &ProviderRuntime,
+    settings: &OverlaySettings,
+    usage: CodexUsage,
+) -> SnapshotUsage {
+    let cache = state.presentation.lock().unwrap_or_else(|p| p.into_inner());
+    SnapshotUsage {
+        usage: cache.current.clone().unwrap_or(usage),
+        source_key: crate::config::source_key_for(state.provider, settings),
+        source_generation: state.source_generation.load(Ordering::Acquire),
+        presentation: cache.metadata.clone(),
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -31,84 +54,118 @@ pub struct Snapshot {
     pub available: bool,
     pub health: String,
     pub error: Option<String>,
-    pub usage: Option<UsageEnvelope>,
-}
-
-pub fn initialize(owner: &Arc<AppState>, settings: &OverlaySettings) {
-    let _ = owner.owner.set(Arc::downgrade(owner));
-    let runtimes = Provider::ALL
-        .into_iter()
-        .map(|provider| runtime(owner, settings, provider, 0))
-        .collect();
-    let _ = owner.monitors.set(Registry {
-        runtimes: RwLock::new(runtimes),
-        revision: AtomicU64::new(0),
-        snapshot_gate: Mutex::new(()),
-        tasks: Default::default(),
-    });
+    pub usage: Option<SnapshotUsage>,
 }
 
 fn runtime(
-    owner: &AppState,
+    services: &Arc<AppServices>,
+    config_manager: &ConfigManager,
     settings: &OverlaySettings,
     provider: Provider,
     generation: u64,
-) -> Arc<AppState> {
-    let scoped = settings.for_provider(provider);
-    let state = AppState::with_services(
-        owner.config_manager.for_source(&scoped),
-        scoped,
-        owner.services.clone(),
-        Some(provider),
-    );
-    state.monitor_enabled.store(
-        settings.preference(provider).monitor_enabled,
-        Ordering::Release,
-    );
-    state.source_generation.store(generation, Ordering::Release);
-    state.applied_settings_revision.store(owner.settings_revision.load(Ordering::Acquire),Ordering::Release);
-    Arc::new(state)
+    applied_settings_revision: u64,
+) -> Arc<ProviderRuntime> {
+    Arc::new(ProviderRuntime::new(
+        services.clone(),
+        config_manager.clone(),
+        settings.clone(),
+        provider,
+        generation,
+        applied_settings_revision,
+    ))
 }
 
 impl Registry {
-    pub fn get(&self, provider: Provider) -> Arc<AppState> {
+    pub fn new(
+        services: &Arc<AppServices>,
+        config_manager: &ConfigManager,
+        settings: &OverlaySettings,
+        applied_settings_revision: u64,
+    ) -> Self {
+        let runtimes = Provider::ALL
+            .into_iter()
+            .map(|provider| {
+                runtime(
+                    services,
+                    config_manager,
+                    settings,
+                    provider,
+                    0,
+                    applied_settings_revision,
+                )
+            })
+            .collect();
+        Self {
+            runtimes: RwLock::new(runtimes),
+            tasks: Default::default(),
+        }
+    }
+
+    pub fn get(&self, provider: Provider) -> Arc<ProviderRuntime> {
         self.runtimes.read().unwrap_or_else(|p| p.into_inner())[provider.index() as usize].clone()
     }
-    pub fn all(&self) -> Vec<Arc<AppState>> {
+    pub fn all(&self) -> Vec<Arc<ProviderRuntime>> {
         self.runtimes
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
     }
 
-    pub async fn synchronize(&self, owner: &Arc<AppState>, settings: &OverlaySettings) {
+    pub async fn synchronize(&self, owner: &Arc<AppState>, settings: &OverlaySettings) -> Vec<Provider> {
+        let mut changed_providers = Vec::new();
         for provider in Provider::ALL {
             let previous = self.get(provider);
-            let _commit = previous.settings_patch.lock().await;
-            let next = settings.for_provider(provider);
+            let _commit = previous.source_commit.lock().await;
+            let mut next = settings.clone();
+            next.provider = provider;
             let old = previous.settings.lock().await.clone();
-            let enabled = settings.preference(provider).monitor_enabled;
-            let changed = serde_json::to_value(&old).ok() != serde_json::to_value(&next).ok()
+            let old_pref = old.preference(provider);
+            let next_pref = next.preference(provider);
+            let enabled = next_pref.monitor_enabled;
+            let global_changed = {
+                let mut g_old = serde_json::to_value(&old).ok();
+                let mut g_next = serde_json::to_value(&next).ok();
+                if let (Some(o), Some(n)) = (
+                    g_old.as_mut().and_then(|v| v.as_object_mut()),
+                    g_next.as_mut().and_then(|v| v.as_object_mut()),
+                ) {
+                    o.remove("providerPreferences");
+                    n.remove("providerPreferences");
+                }
+                g_old != g_next
+            };
+            let changed = global_changed
+                || old_pref != next_pref
                 || previous.monitor_enabled.load(Ordering::Acquire) != enabled;
             if !changed {
                 continue;
             }
+            changed_providers.push(provider);
             let binding_changed =
-                crate::config::source_key(&old) != crate::config::source_key(&next);
+                crate::config::source_key_for(provider, &old)
+                    != crate::config::source_key_for(provider, &next);
             let message_changed = provider == Provider::Codex && (old.auto_pause_five_hour_message != next.auto_pause_five_hour_message || old.auto_pause_weekly_message != next.auto_pause_weekly_message);
-            let urgent = message_changed || old.refresh_interval_seconds != next.refresh_interval_seconds || binding_changed
+            let urgent = message_changed || old_pref.refresh_interval_seconds != next_pref.refresh_interval_seconds || binding_changed
                 || previous.monitor_enabled.load(Ordering::Acquire) != enabled
                 || old.claude_live_polling != next.claude_live_polling
                 || old.antigravity_live_polling != next.antigravity_live_polling
-                || old.auto_pause_on_low_quota != next.auto_pause_on_low_quota
-                || old.auto_pause_five_hour_threshold_percent
-                    != next.auto_pause_five_hour_threshold_percent
-                || old.auto_pause_weekly_threshold_percent
-                    != next.auto_pause_weekly_threshold_percent;
+                || old_pref.protection_enabled != next_pref.protection_enabled
+                || old_pref.five_hour_threshold_percent
+                    != next_pref.five_hour_threshold_percent
+                || old_pref.weekly_threshold_percent
+                    != next_pref.weekly_threshold_percent;
             if binding_changed {
                 let generation = previous.source_generation.fetch_add(1, Ordering::AcqRel) + 1;
                 revoke(&previous).await;
-                let replacement = runtime(owner, settings, provider, generation);
+                previous.revoked.store(true, Ordering::Release);
+                let replacement = runtime(
+                    &owner.services,
+                    &owner.config_manager,
+                    settings,
+                    provider,
+                    generation,
+                    owner.settings_revision.load(Ordering::Acquire),
+                );
                 *replacement
                     .protection_status
                     .lock()
@@ -148,12 +205,12 @@ impl Registry {
                 previous.settings_revision.fetch_add(1, Ordering::AcqRel);
                 previous.applied_settings_revision.store(owner.settings_revision.load(Ordering::Acquire), Ordering::Release);
                 if message_changed || read_changed
-                    || old.auto_pause_on_low_quota != next.auto_pause_on_low_quota
+                    || old_pref.protection_enabled != next_pref.protection_enabled
                     || old.dsh_session_ids != next.dsh_session_ids
-                    || old.auto_pause_five_hour_threshold_percent
-                        != next.auto_pause_five_hour_threshold_percent
-                    || old.auto_pause_weekly_threshold_percent
-                        != next.auto_pause_weekly_threshold_percent
+                    || old_pref.five_hour_threshold_percent
+                        != next_pref.five_hour_threshold_percent
+                    || old_pref.weekly_threshold_percent
+                        != next_pref.weekly_threshold_percent
                 {
                     revoke(&previous).await;
                 }
@@ -171,13 +228,13 @@ impl Registry {
                         .lock()
                         .unwrap_or_else(|p| p.into_inner()) = Default::default();
                 }
-                if old.auto_pause_on_low_quota != next.auto_pause_on_low_quota
+                if old_pref.protection_enabled != next_pref.protection_enabled
                     && provider == Provider::Codex
-                    && next.auto_pause_on_low_quota
+                    && next_pref.protection_enabled
                 {
                     crate::pause_control::probe_bridge_status(&previous);
                 }
-                if urgent {previous.polling.lock().unwrap_or_else(|p|p.into_inner()).recalculate(&next,std::time::Instant::now());}
+                if urgent {previous.polling.lock().unwrap_or_else(|p|p.into_inner()).recalculate(&next_pref,std::time::Instant::now());}
             }
             // Wake the old worker even when its runtime was replaced.
             if urgent {
@@ -189,19 +246,21 @@ impl Registry {
             }
             if urgent {previous.poll_wake.notify_one();}
         }
-        let claude = settings.for_provider(Provider::Claude);
+        owner.services.status_wake.notify_one();
+        let claude = settings;
         if let Err(error) =
-            crate::claude::install::write_guard_config(owner.config_manager.runtime_dir(), &claude)
+            crate::claude::install::write_guard_config(owner.config_manager.runtime_dir(), claude)
         {
             eprintln!("Could not update Claude guard preferences: {error}");
         }
-        let antigravity = settings.for_provider(Provider::Antigravity);
+        let antigravity = settings;
         if let Err(error) = crate::antigravity::install::write_guard_config(
             owner.config_manager.runtime_dir(),
-            &antigravity,
+            antigravity,
         ) {
             eprintln!("Could not update Antigravity guard preferences: {error}");
         }
+        changed_providers
     }
 
     pub fn next(&self, current: Provider) -> Option<Provider> {
@@ -218,75 +277,38 @@ impl Registry {
             })
     }
 
+    pub async fn snapshot(&self, provider: Provider) -> Option<Snapshot> {
+        let state = self.get(provider);
+        snapshot_runtime(&state).await
+    }
     pub async fn snapshots(&self) -> Vec<Snapshot> {
-        let _snapshot = self.snapshot_gate.lock().await;
+        let states = self.all();
+        let Some(first) = states.first() else {
+            return Vec::new();
+        };
+        let _snapshot = first.services.snapshot_gate.lock().await;
         let mut output = Vec::new();
-        for state in self.all() {
-            // A protection request may hold its commit gate through network I/O.
-            // Immutable runtime identities let UI snapshots avoid that gate, so
-            // one provider cannot hold up publication of every other provider.
-            let generation = state.source_generation.load(Ordering::Acquire);
-            if !state.is_current() {
-                continue;
+        for state in &states {
+            if let Some(snapshot) = build_snapshot_locked(state).await {
+                output.push(snapshot);
             }
-            let settings = state.settings.lock().await.clone();
-            let usage = state.last_usage.lock().await.clone();
-            let enabled = state.monitor_enabled.load(Ordering::Acquire);
-            let available = enabled && state.has_reading.load(Ordering::Acquire);
-            let (phase, error) = {
-                let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
-                (reader.phase, reader.failure.as_ref().map(|e| e.to_string()))
-            };
-            let last_error = state
-                .last_refresh_result
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .as_ref()
-                .and_then(|r| r.as_ref().err().cloned());
-            let now = crate::codex::reader::unix_now();
-            let stale = usage.as_ref().is_some_and(|u| {
-                now.saturating_sub(u.fetched_at)
-                    > (settings.refresh_interval_seconds as i64 * 2).max(120)
-            });
-            let health = if !enabled {
-                "disabled"
-            } else if !available && (phase == "error" || phase == "idle") {
-                "needsSetup"
-            } else if phase == "error" {
-                "failed"
-            } else if stale || phase == "stale" {
-                "stale"
-            } else if matches!(phase, "initializing" | "reading" | "retrying") {
-                "checking"
-            } else if usage.is_some() {
-                "current"
-            } else {
-                "checking"
-            };
-            if !state.is_current() || state.source_generation.load(Ordering::Acquire) != generation { continue; }
-            let key = crate::config::source_key(&settings);
-            output.push(Snapshot {
-                provider: settings.provider,
-                source_key: key.clone(),
-                source_generation: generation,
-                revision: self.revision.fetch_add(1, Ordering::AcqRel) + 1,
-                monitor_enabled: enabled,
-                available,
-                health: health.into(),
-                error: error.or(last_error),
-                usage: usage.map(|usage| crate::commands::usage_envelope(&state,&settings,usage)),
-            });
         }
         output
     }
-    pub async fn publish(&self, app: &AppHandle) {
+    pub async fn publish_one<S: crate::tray::TrayPresentationSink>(&self, sink: &S, provider: Provider) {
+        if let Some(snapshot) = self.snapshot(provider).await {
+            sink.publish_snapshot(&snapshot);
+        }
+    }
+    pub async fn publish<S: crate::tray::TrayPresentationSink>(&self, sink: &S) {
         for snapshot in self.snapshots().await {
-            let _ = app.emit("monitor_updated", snapshot);
+            sink.publish_snapshot(&snapshot);
         }
     }
     pub fn track_task(&self, task:tauri::async_runtime::JoinHandle<()>) {self.tasks.lock().unwrap_or_else(|p|p.into_inner()).push(task);}
     pub fn shutdown(&self) {
         for state in self.all() {
+            state.revoked.store(true, Ordering::Release);
             state.monitor_enabled.store(false, Ordering::Release);
             state.source_generation.fetch_add(1, Ordering::AcqRel);
             state
@@ -311,7 +333,71 @@ impl Registry {
     }
 }
 
-async fn revoke(state: &Arc<AppState>) {
+async fn build_snapshot_locked(state: &ProviderRuntime) -> Option<Snapshot> {
+    // A protection request may hold its commit gate through network I/O.
+    // Immutable runtime identities let UI snapshots avoid that gate, so
+    // one provider cannot hold up publication of every other provider.
+    let generation = state.source_generation.load(Ordering::Acquire);
+    if !state.is_current() {
+        return None;
+    }
+    let settings = state.settings.lock().await.clone();
+    let usage = state.last_usage.lock().await.clone();
+    let enabled = state.monitor_enabled.load(Ordering::Acquire);
+    let available = enabled && state.has_reading.load(Ordering::Acquire);
+    let (phase, error) = {
+        let reader = state.reader.lock().unwrap_or_else(|p| p.into_inner());
+        (reader.phase, reader.failure.as_ref().map(|e| e.to_string()))
+    };
+    let last_error = state
+        .last_refresh_result
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .and_then(|r| r.as_ref().err().cloned());
+    let now = crate::codex::reader::unix_now();
+    let stale = usage.as_ref().is_some_and(|u| {
+        now.saturating_sub(u.fetched_at)
+            > (settings.preference(state.provider).refresh_interval_seconds as i64 * 2).max(120)
+    });
+    let health = if !enabled {
+        "disabled"
+    } else if !available && (phase == "error" || phase == "idle") {
+        "needsSetup"
+    } else if phase == "error" {
+        "failed"
+    } else if stale || phase == "stale" {
+        "stale"
+    } else if matches!(phase, "initializing" | "reading" | "retrying") {
+        "checking"
+    } else if usage.is_some() {
+        "current"
+    } else {
+        "checking"
+    };
+    if !state.is_current() || state.source_generation.load(Ordering::Acquire) != generation {
+        return None;
+    }
+    let key = crate::config::source_key_for(state.provider, &settings);
+    Some(Snapshot {
+        provider: state.provider,
+        source_key: key,
+        source_generation: generation,
+        revision: state.services.snapshot_revision.fetch_add(1, Ordering::AcqRel) + 1,
+        monitor_enabled: enabled,
+        available,
+        health: health.into(),
+        error: error.or(last_error),
+        usage: usage.map(|usage| snapshot_usage(state, &settings, usage)),
+    })
+}
+
+async fn snapshot_runtime(state: &ProviderRuntime) -> Option<Snapshot> {
+    let _snapshot = state.services.snapshot_gate.lock().await;
+    build_snapshot_locked(state).await
+}
+
+async fn revoke(state: &Arc<ProviderRuntime>) {
     state.pending_reset_fetches.lock().await.cancel_all();
     state
         .auto_pause
@@ -326,18 +412,13 @@ async fn revoke(state: &Arc<AppState>) {
     crate::pause_control::clear_active_periods(state);
 }
 
-pub fn selected(owner: &Arc<AppState>, provider: Provider) -> Arc<AppState> {
-    owner
-        .monitors
-        .get()
-        .map(|r| r.get(provider))
-        .unwrap_or_else(|| owner.clone())
+pub async fn publish_runtime<S: crate::tray::TrayPresentationSink>(sink: &S, state: &ProviderRuntime) {
+    if let Some(snapshot) = snapshot_runtime(state).await {
+        sink.publish_snapshot(&snapshot);
+    }
 }
 
 pub fn start(app: &AppHandle, owner: &Arc<AppState>) {
-    let Some(registry) = owner.monitors.get() else {
-        return;
-    };
     for provider in Provider::ALL {
         let app = app.clone();
         let weak = Arc::downgrade(owner);
@@ -346,28 +427,26 @@ pub fn start(app: &AppHandle, owner: &Arc<AppState>) {
                 let Some(owner) = weak.upgrade() else {
                     return;
                 };
-                let registry = owner.monitors.get().unwrap();
-                let state = registry.get(provider);
+                let state = owner.monitors.get(provider);
                 crate::polling::wait_until_due(&state).await;
-                if !Arc::ptr_eq(&state, &registry.get(provider)) {
+                if !Arc::ptr_eq(&state, &owner.monitors.get(provider)) {
                     continue;
                 }
                 if state.monitor_enabled.load(Ordering::Acquire) {
                     crate::refresh_provider_background(&app, &state).await;
                 } else {
                     let settings = state.settings.lock().await.clone();
-                    let mut polling = state.polling.lock().unwrap_or_else(|p| p.into_inner());
-                    polling.started(std::time::Instant::now());
-                    polling.recalculate(&settings, std::time::Instant::now());
+                    let pref = settings.preference(state.provider);
+                    {
+                        let mut polling = state.polling.lock().unwrap_or_else(|p| p.into_inner());
+                        polling.started(std::time::Instant::now());
+                        polling.recalculate(&pref, std::time::Instant::now());
+                    }
+                    owner.monitors.publish_one(&app, provider).await;
                 }
-                registry.publish(&app).await;
             }
         });
-        registry
-            .tasks
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(task);
+        owner.monitors.track_task(task);
     }
 }
 
@@ -375,10 +454,7 @@ pub fn start(app: &AppHandle, owner: &Arc<AppState>) {
 pub async fn get_monitor_snapshots(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<Vec<Snapshot>, String> {
-    Ok(match state.monitors.get() {
-        Some(registry) => registry.snapshots().await,
-        None => Vec::new(),
-    })
+    Ok(state.monitors.snapshots().await)
 }
 
 #[tauri::command]
