@@ -23,7 +23,7 @@ const DEFAULT_RETRY_AFTER_SECS: u64 = 120;
 /// Claude Code is asked to renew its login at most this often, so a signed
 /// out CLI is not started every minute.
 const RENEW_INTERVAL: Duration = Duration::from_secs(10 * 60);
-const RENEW_TIMEOUT: Duration = Duration::from_secs(30);
+const WORKER_TIMEOUT: Duration = Duration::from_secs(35);
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub type LiveStep = crate::live_poll::LiveStep<Snapshot>;
@@ -86,22 +86,23 @@ const RENEW_COMMANDS: [&[&str]; 2] = [&["plugin", "list"], &["doctor"]];
 pub async fn renew_login() -> bool {
     let Some(cli) = claude_cli() else { return false };
     let Some(credentials) = credentials_path() else { return false };
-    let home = dirs::home_dir();
+    // The bridge owns a Windows job containing itself and the CLI. Closing the
+    // bridge also closes the job and reaps any CLI descendants, including the
+    // ones a .cmd shim can leave behind after its direct child has exited.
+    let Some(bridge) = super::install::bridge_path().filter(|path| path.is_file()) else { return false };
     renew_with(&credentials, |args| {
-        let mut command = tokio::process::Command::new(&cli);
+        let mut command = tokio::process::Command::new(&bridge);
         command
-            .args(args)
+            .arg("renew")
+            .arg(if args == ["plugin", "list"] { "plugin-list" } else { "doctor" })
+            .arg(&cli)
             .creation_flags(CREATE_NO_WINDOW)
             .kill_on_drop(true)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        // The doctor reads project settings in its working directory.
-        if let Some(home) = &home {
-            command.current_dir(home);
-        }
         async move {
-            let _ = tokio::time::timeout(RENEW_TIMEOUT, command.status()).await;
+            let _ = tokio::time::timeout(WORKER_TIMEOUT, command.status()).await;
         }
     })
     .await

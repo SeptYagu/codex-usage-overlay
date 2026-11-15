@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.2] - 2026-11-14
+
+### Fixed
+- Expired Claude CLI login renewal now runs inside a bounded Windows process job. When `claude plugin list` or `claude doctor` ends or times out, the overlay reaps the whole command tree, including processes left behind by a batch shim. This prevents repeated renewals from accumulating Claude Code and console host processes.
+
 ## [1.9.1] - 2026-11-14
 
 ### Changed
