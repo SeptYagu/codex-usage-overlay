@@ -145,10 +145,18 @@ impl Registry {
                 crate::config::source_key_for(provider, &old)
                     != crate::config::source_key_for(provider, &next);
             let message_changed = provider == Provider::Codex && (old.auto_pause_five_hour_message != next.auto_pause_five_hour_message || old.auto_pause_weekly_message != next.auto_pause_weekly_message);
+            // Every runtime holds the full settings, so source-specific fields
+            // only count for the provider that owns them.
+            let claude_live_changed = provider == Provider::Claude
+                && old.claude_live_polling != next.claude_live_polling;
+            let antigravity_live_changed = provider == Provider::Antigravity
+                && old.antigravity_live_polling != next.antigravity_live_polling;
+            let dsh_sessions_changed =
+                provider == Provider::Dsh && old.dsh_session_ids != next.dsh_session_ids;
             let urgent = message_changed || old_pref.refresh_interval_seconds != next_pref.refresh_interval_seconds || binding_changed
                 || previous.monitor_enabled.load(Ordering::Acquire) != enabled
-                || old.claude_live_polling != next.claude_live_polling
-                || old.antigravity_live_polling != next.antigravity_live_polling
+                || claude_live_changed
+                || antigravity_live_changed
                 || old_pref.protection_enabled != next_pref.protection_enabled
                 || old_pref.five_hour_threshold_percent
                     != next_pref.five_hour_threshold_percent
@@ -190,8 +198,8 @@ impl Registry {
                     [provider.index() as usize] = replacement;
             } else {
                 let read_changed = previous.monitor_enabled.load(Ordering::Acquire) != enabled
-                    || old.claude_live_polling != next.claude_live_polling
-                    || old.antigravity_live_polling != next.antigravity_live_polling;
+                    || claude_live_changed
+                    || antigravity_live_changed;
                 if read_changed {
                     previous.source_generation.fetch_add(1, Ordering::AcqRel);
                     previous
@@ -206,7 +214,7 @@ impl Registry {
                 previous.applied_settings_revision.store(owner.settings_revision.load(Ordering::Acquire), Ordering::Release);
                 if message_changed || read_changed
                     || old_pref.protection_enabled != next_pref.protection_enabled
-                    || old.dsh_session_ids != next.dsh_session_ids
+                    || dsh_sessions_changed
                     || old_pref.five_hour_threshold_percent
                         != next_pref.five_hour_threshold_percent
                     || old_pref.weekly_threshold_percent
@@ -214,13 +222,13 @@ impl Registry {
                 {
                     revoke(&previous).await;
                 }
-                if old.claude_live_polling != next.claude_live_polling {
+                if claude_live_changed {
                     *previous
                         .claude_live
                         .lock()
                         .unwrap_or_else(|p| p.into_inner()) = Default::default();
                 }
-                if old.antigravity_live_polling != next.antigravity_live_polling
+                if antigravity_live_changed
                     || (provider == Provider::Antigravity && old.show_credits != next.show_credits && next.show_credits)
                 {
                     *previous

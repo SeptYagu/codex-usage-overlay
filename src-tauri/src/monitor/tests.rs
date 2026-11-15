@@ -665,3 +665,19 @@ async fn manual_next_starts_from_effective_page_and_disabling_freezes_it_in_one_
     assert!(crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselIntervalSeconds":2}),false).await.is_err());assert_eq!(std::fs::read(owner.config_manager.runtime_dir().join("settings.json")).unwrap(),unchanged);
     let _=std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn source_specific_settings_only_reset_the_provider_that_owns_them() {
+    let (owner, dir) = owner();
+    let generation = |provider| owner.monitors.get(provider).source_generation.load(Ordering::Acquire);
+    let before: Vec<u64> = Provider::ALL.into_iter().map(generation).collect();
+    let mut settings = owner.settings.lock().await.clone();
+    settings.claude_live_polling = !settings.claude_live_polling;
+    settings.antigravity_live_polling = !settings.antigravity_live_polling;
+    settings.dsh_session_ids = vec!["session-a".into()];
+    owner.monitors.synchronize(&owner, &settings).await;
+    assert_eq!(generation(Provider::Codex), before[Provider::Codex.index() as usize]);
+    assert!(generation(Provider::Claude) > before[Provider::Claude.index() as usize]);
+    assert!(generation(Provider::Antigravity) > before[Provider::Antigravity.index() as usize]);
+    let _ = std::fs::remove_dir_all(dir);
+}

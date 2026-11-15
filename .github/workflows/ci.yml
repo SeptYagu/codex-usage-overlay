@@ -56,7 +56,7 @@ jobs:
 
       - name: Rust Unit & Integration Tests
         shell: pwsh
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+        run: cargo test --manifest-path src-tauri/Cargo.toml --workspace --locked
 
       - name: Claude Renewal Process Tree Regression
         shell: pwsh
