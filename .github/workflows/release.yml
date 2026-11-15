@@ -53,7 +53,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed.' }
           node --test integrations/dsh-bridge/test/*.test.js
           if ($LASTEXITCODE -ne 0) { throw 'DSH companion tests failed.' }
-          cargo test --manifest-path src-tauri/Cargo.toml --locked
+          cargo test --manifest-path src-tauri/Cargo.toml --workspace --locked
           if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
           # NSIS and MSI ship every Cargo binary that exists at bundle time, so the
           # bridge helpers are built first.
