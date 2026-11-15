@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.3-preview.2] - 2026-11-15
+
+### Fixed
+- Source-specific settings (`claudeLivePolling`, `antigravityLivePolling`, `dshSessionIds`) no longer reset, revoke and re-poll the provider runtimes that do not own them.
+- The `CI` and `Release overlay` workflows run `cargo test --workspace`, so the `agent-bridge` guard and statusline tests are part of the gate again.
+
 ## [1.9.3-preview.1] - 2026-11-14
 
 ### Changed
