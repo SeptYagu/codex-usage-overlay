@@ -8,6 +8,8 @@ use tauri::{
 
 use crate::commands::AppState;
 use crate::config::{ConfigManager, DockPersistence, OverlaySettings, WindowPosition};
+pub use crate::geometry::{select_monitor_by_overlap, PhysicalRect};
+use crate::geometry::{monitor_bounds, select_work_area};
 
 pub const SNAP_MARGIN_LOGICAL: f64 = 16.0;
 pub const PILL_WIDTH_LOGICAL: f64 = 46.0;
@@ -89,34 +91,6 @@ pub struct DockStateInfo {
     pub edge: Option<Edge>,
     pub expanded: bool,
     pub hidden: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PhysicalRect {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl PhysicalRect {
-    /// Right edge, in physical pixels. Widened to `i64` so the arithmetic below can
-    /// never overflow on an extreme virtual-desktop coordinate.
-    pub fn right(&self) -> i64 {
-        self.x as i64 + self.width as i64
-    }
-
-    pub fn bottom(&self) -> i64 {
-        self.y as i64 + self.height as i64
-    }
-
-    /// Overlapping area in square physical pixels; zero when the rectangles only
-    /// touch or miss each other entirely.
-    pub fn intersection_area(&self, other: &PhysicalRect) -> i64 {
-        let width = (self.right().min(other.right()) - (self.x as i64).max(other.x as i64)).max(0);
-        let height = (self.bottom().min(other.bottom()) - (self.y as i64).max(other.y as i64)).max(0);
-        width * height
-    }
 }
 
 /// Centre of a rectangle, saturating rather than wrapping on extreme coordinates.
@@ -564,57 +538,6 @@ pub fn pill_geometry(
     }
 }
 
-/// Picks the host monitor for a released window by intersecting it with every work
-/// area. This is the single authoritative attribution rule for a cross-screen drag.
-///
-/// Totality — every input falls into exactly one of these branches:
-/// 1. the screen with the strictly largest intersection area wins, which is what
-///    makes "dragged more than half onto screen B, released, lands on B" hold;
-/// 2. a tie that involves the host (`fallback_index`, the screen the window came
-///    from) goes to the host, so an exact 50/50 release across a seam does not
-///    change screens;
-/// 3. a tie between two *non-host* screens is broken by the smallest `(x, y)`, so
-///    the outcome cannot depend on `available_monitors()`' enumeration order;
-/// 4. with no overlap anywhere (a staggered-monitor void, or fully off the desktop)
-///    the host screen is returned — never an invented work area — and an
-///    out-of-range `fallback_index` degrades to the first screen, mirroring
-///    `select_work_area`'s chain;
-/// 5. an empty monitor list returns `None` instead of panicking.
-pub fn select_monitor_by_overlap(
-    win: PhysicalRect,
-    monitors: &[(PhysicalRect, f64)],
-    fallback_index: usize,
-) -> Option<(PhysicalRect, f64)> {
-    if monitors.is_empty() {
-        return None;
-    }
-    let host = if fallback_index < monitors.len() { fallback_index } else { 0 };
-    let mut best_area = 0i64;
-    for (work, _) in monitors {
-        best_area = best_area.max(win.intersection_area(work));
-    }
-    if best_area == 0 {
-        return monitors.get(host).copied();
-    }
-    let tied: Vec<usize> = monitors
-        .iter()
-        .enumerate()
-        .filter(|(_, (work, _))| win.intersection_area(work) == best_area)
-        .map(|(index, _)| index)
-        .collect();
-    let index = if tied.contains(&fallback_index) {
-        fallback_index
-    } else {
-        // `tied` is non-empty (it contains at least the maximum), so the `min_by_key`
-        // always has an element; the fallback index keeps the function total.
-        *tied
-            .iter()
-            .min_by_key(|&&index| (monitors[index].0.x, monitors[index].0.y))
-            .unwrap_or(&tied[0])
-    };
-    Some(monitors[index])
-}
-
 /// Clamps `rect` into `work` while keeping its size, returning the corrected
 /// on-screen rectangle.
 fn clamped_rect(rect: PhysicalRect, work: PhysicalRect) -> PhysicalRect {
@@ -688,19 +611,6 @@ pub fn resolve_drag_outcome(
 }
 
 
-pub trait DragOutcomeSessionOps {
-    fn save_position(&mut self, left: f64, top: f64);
-    fn update_dock(&mut self, anchor_center: (i32, i32), edge: Option<Edge>);
-}
-
-pub fn commit_drag_outcome_to_session<W: DragOutcomeSessionOps>(
-    ops: &mut W,
-    outcome: &DragOutcome,
-) {
-    ops.save_position(outcome.anchor.0 as f64, outcome.anchor.1 as f64);
-    ops.update_dock(outcome.anchor_center, outcome.edge);
-}
-
 pub fn restore_startup(window: &WebviewWindow, manager: &DockManager, settings: &OverlaySettings) {
     let size_ok = set_full_size(window, settings).is_ok();
     if size_ok {
@@ -754,7 +664,7 @@ fn monitor_index_for(
     let center = center_of(win);
     monitors
         .iter()
-        .position(|(rect, _)| monitor_contains(*rect, center.0 as f64, center.1 as f64))
+        .position(|(rect, _)| rect.contains_point(center.0 as f64, center.1 as f64))
         .unwrap_or(0)
 }
 
@@ -821,18 +731,13 @@ pub async fn drag_ended(app: &AppHandle, state: &Arc<AppState>) {
     // The anchor is written only here, after the host-screen arbitration, the seam/
     // boundary decision and the reposition above — so what lands on disk is the
     // authoritative final coordinate, and a restart cannot drift.
-    struct LiveDragOps<'a>(&'a Arc<AppState>);
-    impl<'a> DragOutcomeSessionOps for LiveDragOps<'a> {
-        fn save_position(&mut self, left: f64, top: f64) {
-            self.0.config_manager.save_position(&WindowPosition { left, top });
-        }
-        fn update_dock(&mut self, anchor_center: (i32, i32), edge: Option<Edge>) {
-            self.0.dock.set_anchor_center(anchor_center);
-            self.0.dock.finish_drag(edge);
-            self.0.dock.save_docked(edge);
-        }
-    }
-    commit_drag_outcome_to_session(&mut LiveDragOps(&state), &outcome);
+    state.config_manager.save_position(&WindowPosition {
+        left: outcome.anchor.0 as f64,
+        top: outcome.anchor.1 as f64,
+    });
+    state.dock.set_anchor_center(outcome.anchor_center);
+    state.dock.finish_drag(outcome.edge);
+    state.dock.save_docked(outcome.edge);
     emit_state(app, &state.dock);
 }
 
@@ -1404,48 +1309,6 @@ fn clamp_position(
     )
 }
 
-fn monitor_bounds(monitor: &tauri::Monitor) -> (PhysicalRect, f64) {
-    let area = monitor.work_area();
-    (
-        PhysicalRect {
-            x: area.position.x,
-            y: area.position.y,
-            width: area.size.width,
-            height: area.size.height,
-        },
-        monitor.scale_factor(),
-    )
-}
-
-fn monitor_contains(rect: PhysicalRect, x: f64, y: f64) -> bool {
-    let left = rect.x as f64;
-    let top = rect.y as f64;
-    x >= left && x < left + rect.width as f64 && y >= top && y < top + rect.height as f64
-}
-
-/// Picks the work area that owns `point`. When the point lies outside every
-/// monitor (e.g. a saved anchor on a display that is no longer attached) it
-/// falls back to the monitor under the window and then the first available one,
-/// so the window is always clamped into a usable area.
-fn select_work_area(
-    monitors: &[(PhysicalRect, f64)],
-    fallback: usize,
-    point: Option<(f64, f64)>,
-) -> Option<(PhysicalRect, f64)> {
-    if let Some((x, y)) = point {
-        if let Some(found) = monitors
-            .iter()
-            .find(|(rect, _)| monitor_contains(*rect, x, y))
-        {
-            return Some(*found);
-        }
-    }
-    monitors
-        .get(fallback)
-        .or_else(|| monitors.first())
-        .copied()
-}
-
 fn work_area_for_point(
     window: &WebviewWindow,
     point: Option<(f64, f64)>,
@@ -1909,7 +1772,7 @@ mod tests {
         let clamped = resolve_drag_outcome(overshot, a, 1.0, &monitors, false, 175);
         assert_eq!(clamped.anchor, (0, 400));
         assert_ne!(clamped.anchor, (overshot.x, overshot.y));
-        assert!(monitor_contains(a, clamped.anchor.0 as f64, clamped.anchor.1 as f64));
+        assert!(a.contains_point(clamped.anchor.0 as f64, clamped.anchor.1 as f64));
         assert_eq!(clamped.anchor_center, center_of(clamped.rect));
 
         // Folded release: the persisted anchor is the corrected expanded
@@ -1924,7 +1787,7 @@ mod tests {
         let crossed = resolve_drag_outcome(mostly_b, monitors[1].0, 1.0, &monitors, true, 175);
         assert_eq!(crossed.anchor, (1920, 200));
         assert_ne!(crossed.anchor, (mostly_b.x, mostly_b.y));
-        assert!(monitor_contains(monitors[1].0, crossed.anchor.0 as f64, crossed.anchor.1 as f64));
+        assert!(monitors[1].0.contains_point(crossed.anchor.0 as f64, crossed.anchor.1 as f64));
     }
 
     #[test]
@@ -2335,31 +2198,5 @@ mod tests {
         // monitor under the window so the window stays on screen.
         let selected = select_work_area(&monitors, 0, Some((-9999.0, 300.0))).unwrap();
         assert_eq!(selected.0, primary.0);
-    }
-
-    #[test]
-    fn commit_drag_outcome_to_session_persists_anchor_coordinates() {
-        struct MockDragOps {
-            pos: (f64, f64),
-            dock: ((i32, i32), Option<Edge>),
-        }
-        impl DragOutcomeSessionOps for MockDragOps {
-            fn save_position(&mut self, left: f64, top: f64) {
-                self.pos = (left, top);
-            }
-            fn update_dock(&mut self, anchor_center: (i32, i32), edge: Option<Edge>) {
-                self.dock = (anchor_center, edge);
-            }
-        }
-        let outcome = DragOutcome {
-            rect: PhysicalRect { x: 10, y: 20, width: 200, height: 100 },
-            anchor: (345, 678),
-            anchor_center: (445, 728),
-            edge: Some(Edge::Top),
-        };
-        let mut ops = MockDragOps { pos: (0.0, 0.0), dock: ((0, 0), None) };
-        commit_drag_outcome_to_session(&mut ops, &outcome);
-        assert_eq!(ops.pos, (345.0, 678.0));
-        assert_eq!(ops.dock, ((445, 728), Some(Edge::Top)));
     }
 }

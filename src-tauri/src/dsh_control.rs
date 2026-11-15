@@ -1,6 +1,6 @@
 //! Opt-in cooperative DSH pause control. Never calls the local Codex bridge.
 //! A receipt means accepted steering input, never a confirmed interruption.
-use crate::{codex::RawCodexUsage, commands::AppState, config::{OverlaySettings, Provider}};
+use crate::{codex::RawCodexUsage, commands::ProviderRuntime, config::{OverlaySettings, Provider}};
 use std::{collections::HashSet, sync::{Arc, atomic::Ordering}};
 
 #[derive(Default, Clone)]
@@ -23,15 +23,16 @@ impl ControlState {
 }
 
 fn trigger_cycles(settings: &OverlaySettings, raw: &RawCodexUsage, now: i64) -> Vec<String> {
-    if settings.provider != Provider::Dsh || !settings.auto_pause_on_low_quota
+    let pref = settings.preference(Provider::Dsh);
+    if settings.provider != Provider::Dsh || !(pref.monitor_enabled && pref.protection_enabled)
         || settings.dsh_instance_id.is_empty() || settings.dsh_base_url.is_empty()
         || settings.dsh_account_id.is_empty() || settings.dsh_session_ids.is_empty()
         || raw.account_id.as_deref() != Some(settings.dsh_account_id.as_str())
         || raw.fetched_at > now.saturating_add(5) || now.saturating_sub(raw.fetched_at) > 60 {
         return Vec::new();
     }
-    [(&raw.five_hour, settings.dsh_five_hour_threshold_percent, "five"),
-        (&raw.weekly, settings.dsh_weekly_threshold_percent, "week")]
+    [(&raw.five_hour, pref.five_hour_threshold_percent, "five"),
+        (&raw.weekly, pref.weekly_threshold_percent, "week")]
         .into_iter().filter_map(|(quota, threshold, name)| {
             let used = quota.used_percent?;
             let reset = quota.resets_at?;
@@ -43,14 +44,14 @@ fn trigger_cycles(settings: &OverlaySettings, raw: &RawCodexUsage, now: i64) -> 
         }).collect()
 }
 
-pub fn schedule(state: &Arc<AppState>, settings: OverlaySettings, raw: RawCodexUsage, generation: u64) {
+pub fn schedule(state: &Arc<ProviderRuntime>, settings: OverlaySettings, raw: RawCodexUsage, generation: u64) {
     let cycles = trigger_cycles(&settings, &raw, crate::codex::reader::unix_now());
     if cycles.is_empty() { return; }
     let revision = state.settings_revision.load(Ordering::Acquire);
     let (epoch, targets, keys) = {
         let mut control = state.dsh_control.lock().unwrap_or_else(|p| p.into_inner());
         if control.running { return; }
-        let source = crate::config::source_key(&settings);
+        let source = crate::config::source_key_for(Provider::Dsh, &settings);
         let targets: Vec<_> = settings.dsh_session_ids.iter().filter(|id| cycles.iter().any(|cycle|
             !control.attempted.contains(&format!("{source}:{}:{id}:{cycle}", settings.dsh_account_id)))).cloned().collect();
         if targets.is_empty() { return; }
@@ -68,7 +69,7 @@ pub fn schedule(state: &Arc<AppState>, settings: OverlaySettings, raw: RawCodexU
     tauri::async_runtime::spawn(async move {
         // The commit lock serializes source changes with the actual request.
         // No network result from a previous binding may control a new source.
-        let _commit = state.settings_patch.lock().await;
+        let _commit = state.source_commit.lock().await;
         let current = state.settings.lock().await.clone();
         let valid = state.monitor_enabled.load(Ordering::Acquire) && state.is_current()
             && state.source_generation.load(Ordering::Acquire) == generation
@@ -105,9 +106,10 @@ mod tests {
     use super::*;
     use crate::codex::QuotaSnapshot;
     fn setup() -> (OverlaySettings, RawCodexUsage) {
-        let settings = OverlaySettings { provider: Provider::Dsh, auto_pause_on_low_quota: true,
+        let mut settings = OverlaySettings { provider: Provider::Dsh,
             dsh_base_url: "http://127.0.0.1:1".into(), dsh_instance_id: "instance".into(),
             dsh_account_id: "account".into(), dsh_session_ids: vec!["session".into()], ..Default::default() };
+        settings.preference_mut(Provider::Dsh).protection_enabled = true;
         let raw = RawCodexUsage { account_id: Some("account".into()),
             five_hour: QuotaSnapshot { used_percent: Some(100.0), resets_at: Some(2000), ..Default::default() },
             weekly: QuotaSnapshot { used_percent: Some(60.0), resets_at: Some(9000), ..Default::default() },
@@ -120,14 +122,15 @@ mod tests {
         settings.migrate();
         let dir = std::env::temp_dir().join(format!("overlay-dsh-freeze-{}-{}", std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let owner = Arc::new(AppState::new(crate::config::ConfigManager::with_runtime_dir(dir.clone()), settings.clone()));
-        crate::monitor::initialize(&owner, &settings);
-        let runtime = crate::monitor::selected(&owner, Provider::Dsh);
+        let owner = Arc::new(crate::commands::AppState::new(crate::config::ConfigManager::with_runtime_dir(dir.clone()), settings.clone()));
+        let runtime = owner.monitors.get(Provider::Dsh);
         let frozen = crate::commands::freeze_dsh_connection(&runtime).await;
         raw.fetched_at = crate::codex::reader::unix_now();
         raw.five_hour.resets_at = Some(raw.fetched_at + 3600);
         raw.weekly.resets_at = Some(raw.fetched_at + 7200);
-        schedule(&runtime, settings.for_provider(Provider::Dsh), raw, runtime.source_generation.load(Ordering::Acquire));
+        let mut scoped = settings;
+        scoped.provider = Provider::Dsh;
+        schedule(&runtime, scoped, raw, runtime.source_generation.load(Ordering::Acquire));
         assert!(runtime.dsh_control.lock().unwrap().running);
         drop(frozen);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -179,9 +182,9 @@ mod tests {
         let (mut settings, mut raw) = setup();
         raw.five_hour.used_percent = Some(97.0);
         assert!(trigger_cycles(&settings, &raw, 1000).is_empty());
-        settings.dsh_five_hour_threshold_percent = 3;
+        settings.preference_mut(Provider::Dsh).five_hour_threshold_percent = 3;
         raw.weekly.used_percent = Some(100.0);
         assert_eq!(trigger_cycles(&settings, &raw, 1000), vec!["five:2000", "week:9000"]);
-        assert_eq!(settings.auto_pause_five_hour_threshold_percent, 5);
+        assert_eq!(settings.preference(Provider::Codex).five_hour_threshold_percent, 5);
     }
 }

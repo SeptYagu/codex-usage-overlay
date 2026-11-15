@@ -206,18 +206,14 @@ pub fn effective(state: &AppState) -> Provider {
 
 async fn inputs(owner: &Arc<AppState>, settings: &OverlaySettings, now: i64) -> Vec<Candidate> {
     let mut result = vec![];
-    let Some(registry) = owner.monitors.get() else {
-        return result;
-    };
-    for state in registry.all() {
-        let provider = state.runtime_provider.unwrap();
+    for state in owner.monitors.all() {
+        let provider = state.provider;
         if !settings.preference(provider).carousel_included
             || !state.monitor_enabled.load(Ordering::Acquire)
             || !state.is_current()
         {
             continue;
         }
-        let scoped = state.settings.lock().await.clone();
         let blocked = state
             .reader
             .lock()
@@ -237,10 +233,11 @@ async fn inputs(owner: &Arc<AppState>, settings: &OverlaySettings, now: i64) -> 
             continue;
         }
         let usage = state.last_usage.lock().await;
+        let refresh_interval_seconds = settings.preference(provider).refresh_interval_seconds;
         let valid = usage.as_ref().is_some_and(|u| {
             u.fetched_at <= now + 5
                 && now.saturating_sub(u.fetched_at)
-                    <= (scoped.refresh_interval_seconds as i64 * 2).max(120)
+                    <= (refresh_interval_seconds as i64 * 2).max(120)
                 && (u.five_hour_remaining_percent.is_some()
                     || u.week_remaining_percent.is_some()
                     || (u.has_credits && u.credits_balance.is_some()))
@@ -248,7 +245,7 @@ async fn inputs(owner: &Arc<AppState>, settings: &OverlaySettings, now: i64) -> 
         if valid && state.has_reading.load(Ordering::Acquire) && state.is_current() {
             result.push(Candidate {
                 provider,
-                source_key: crate::config::source_key(&scoped),
+                source_key: crate::config::source_key_for(provider, settings),
                 source_generation: state.source_generation.load(Ordering::Acquire),
             });
         }
@@ -296,7 +293,6 @@ async fn update_locked<S: TrayPresentationSink>(
 ) -> Snapshot {
     let candidates = inputs(owner, settings, crate::codex::reader::unix_now()).await;
     let reasons = pauses(owner, sink.app_handle());
-    let identities = owner.monitors.get().map(|r| r.all()).unwrap_or_default();
     let native = sink
         .app_handle()
         .and_then(|app| app.get_webview_window("main"))
@@ -336,13 +332,9 @@ async fn update_locked<S: TrayPresentationSink>(
         }
         display.advance(candidates, reasons, now, tick, resumed);
         let provider = display.snapshot.effective_provider;
-        let selected = identities
-            .iter()
-            .find(|s| s.runtime_provider == Some(provider));
-        display.snapshot.source_key = crate::config::source_key(&settings.for_provider(provider));
-        display.snapshot.source_generation = selected
-            .map(|s| s.source_generation.load(Ordering::Acquire))
-            .unwrap_or(0);
+        let selected = owner.monitors.get(provider);
+        display.snapshot.source_key = crate::config::source_key_for(provider, settings);
+        display.snapshot.source_generation = selected.source_generation.load(Ordering::Acquire);
         display.snapshot.settings_revision = owner.settings_revision.load(Ordering::Acquire);
         let changed = display.snapshot != before;
         if changed {
@@ -412,9 +404,7 @@ pub fn start(app: &tauri::AppHandle, owner: &Arc<AppState>) {
             tick(&app, &owner, now, resumed).await;
         }
     });
-    if let Some(registry) = owner.monitors.get() {
-        registry.track_task(task);
-    }
+    owner.monitors.track_task(task);
 }
 #[tauri::command]
 pub async fn get_display_state(

@@ -1,50 +1,50 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
-import { OverlaySettings } from '../types';
+import { OverlaySettings, Provider } from '../types';
+import { providerPreference } from '../providerSettings';
 import { useProtectionStatus } from '../hooks/useProtectionStatus';
 
-export function ProtectionStatusView({ settings, compact = false, onPatchSettings }: {
+export function ProtectionStatusView({ settings, provider, compact = false }: {
   settings: OverlaySettings;
+  provider?: Provider;
   compact?: boolean;
-  onPatchSettings?: (patch: Partial<OverlaySettings>) => void;
 }) {
   const { t } = useTranslation();
-  const { status: observedStatus, unavailable } = useProtectionStatus(settings.provider);
+  const targetProvider = provider ?? settings.provider;
+  const pref = providerPreference(settings, targetProvider);
+  const protectionEnabled = pref.monitorEnabled && pref.protectionEnabled;
+  const { status: observedStatus, unavailable } = useProtectionStatus(targetProvider);
   // Never render a previous provider's local resume actions after switching.
-  const status = observedStatus?.provider === settings.provider ? observedStatus : null;
-  const dsh = settings.provider === 'dsh';
+  const status = observedStatus?.provider === targetProvider ? observedStatus : null;
+  const dsh = targetProvider === 'dsh';
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
-  const [actionError, setActionError] = useState(false);
   const [resumingThreadId, setResumingThreadId] = useState<string | null>(null);
   const [resumeError, setResumeError] = useState<string | null>(null);
   useEffect(() => {
     const timer = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
     return () => clearInterval(timer);
   }, []);
-  const summary = !settings.autoPauseOnLowQuota ? 'off' : unavailable ? 'needsAttention' : status?.summary ?? 'checking';
+  const summary = !protectionEnabled ? 'off' : unavailable ? 'needsAttention' : status?.summary ?? 'checking';
   const label = t(`protectionSummaries.${summary}`);
   if (compact) {
     return <div role="status" aria-label={t('protectionStatus')} className="tray-menu-item text-xs opacity-80">{label}</div>;
   }
-  const capable = !dsh && !!status?.capabilities.directInterrupt && status.capabilities.completionObservation
-    && status.capabilities.userActivityObservation && status.capabilities.continuationControl;
   const reason = unavailable ? 'statusUnavailable' : status?.reason;
   const reader = status?.reader;
   const reading = reader && ['initializing', 'reading'].includes(reader.phase);
   const retrying = reader && (reader.phase === 'retrying' || (reading && reader.attempt > 1));
   const lastFailure = reader?.lastFailure;
   const cancel = async () => {
-    setActionError(false);
     setResumeError(null);
-    try { await invoke('cancel_resume_plans', { provider: settings.provider }); }
-    catch { setActionError(true); }
+    try { await invoke('cancel_resume_plans', { provider: targetProvider }); }
+    catch { setResumeError('generic'); }
   };
   const resume = async (threadId: string) => {
     setResumingThreadId(threadId);
     setResumeError(null);
     try {
-      await invoke('resume_chat', { threadId, provider: settings.provider });
+      await invoke('resume_chat', { threadId, provider: targetProvider });
     } catch (err: unknown) {
       const errMsg = typeof err === 'string' ? err : err instanceof Error ? err.message : '';
       setResumeError(errMsg.includes('quotaStillLow') ? 'quotaStillLow' : errMsg.includes('quotaStale') ? 'quotaStale' : 'generic');
@@ -62,7 +62,7 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
       : reader?.phase === 'error' && status?.nextPollAt != null && <p>
         {t('quotaReadRetryCountdown', { seconds: Math.max(0, status.nextPollAt - now) })}
       </p>}
-    {settings.autoPauseOnLowQuota && status?.lastSuccessfulSampleAt != null && <p className="text-[11px] text-slate-500 dark:text-slate-400">
+    {protectionEnabled && status?.lastSuccessfulSampleAt != null && <p className="text-[11px] text-slate-500 dark:text-slate-400">
       {t('protectionSampleAge', { seconds: Math.max(0, now - status.lastSuccessfulSampleAt), interval: status.effectiveIntervalSeconds })}
     </p>}
     <details className="text-slate-500 dark:text-slate-400">
@@ -75,46 +75,28 @@ export function ProtectionStatusView({ settings, compact = false, onPatchSetting
         })}</p>}
         {reader?.lastSuccess && <p>{t('quotaReadTiming', { milliseconds: reader.lastSuccess.elapsedMs, attempt: reader.lastSuccess.attempt })}</p>}
         <p>{t('protectionCooperative')}</p>
-        {!capable && <p>{t(dsh ? 'dshResumeUnavailable' : 'protectionResumeUnavailable')}</p>}
-        {onPatchSettings && <label className="flex items-center justify-between gap-3 py-1">
-          <span>{t('autoResumeAfterQuotaReset')}</span>
-          <input type="checkbox" aria-label={t('autoResumeAfterQuotaReset')}
-            checked={!dsh && settings.autoResumeAfterQuotaReset}
-            disabled={dsh || (!settings.autoResumeAfterQuotaReset && (!capable || !settings.autoPauseOnLowQuota))}
-            onChange={event => {
-              if (!event.target.checked || (capable && settings.autoPauseOnLowQuota)) {
-                onPatchSettings({ autoResumeAfterQuotaReset: event.target.checked });
-              }
-            }}
-            className="w-4 h-4 accent-cyan-500 disabled:cursor-not-allowed" />
-        </label>}
+        {dsh && <p>{t('dshResumeUnavailable')}</p>}
         {status && <p>{t('protectionCounts', { accepted: status.acceptedRequestCount, stopped: dsh ? 0 : status.confirmedInterruptionCount })}</p>}
         {status?.targets.map(target => <p key={target.periodId} title={target.threadId}>
           {t('protectionChat', { id: target.threadId.slice(0, 12) })}: {t(`protectionPhases.${dsh && target.phase === 'interrupted' ? 'accepted' : target.phase}`, { defaultValue: target.phase })}
           {!target.active && <> · {t('protectionHistorical')}</>}
         </p>)}
-        {!dsh && status?.resumePlans.map(plan => <div key={plan.id} className="flex items-center justify-between gap-2 py-0.5">
-          <span>{t('protectionChat', { id: plan.threadId })}: {t(`resumePhases.${plan.phase}`, { defaultValue: plan.phase })}</span>
-          {['ready', 'waitingForQuota', 'needsReview'].includes(plan.phase) && (
-            <button
-              type="button"
-              onClick={() => resume(plan.threadId)}
-              disabled={resumingThreadId === plan.threadId}
-              className="px-2 py-0.5 text-[11px] font-medium bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white rounded cursor-pointer transition-colors"
-            >
-              {resumingThreadId === plan.threadId ? t('resumingChat') : t('resumeChat')}
-            </button>
-          )}
+        {!dsh && status?.pausedThreads.map(threadId => <div key={threadId} className="flex items-center justify-between gap-2 py-0.5">
+          <span>{t('protectionChat', { id: threadId })}</span>
+          <button
+            type="button"
+            onClick={() => resume(threadId)}
+            disabled={resumingThreadId === threadId}
+            className="px-2 py-0.5 text-[11px] font-medium bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white rounded cursor-pointer transition-colors"
+          >
+            {resumingThreadId === threadId ? t('resumingChat') : t('resumeChat')}
+          </button>
         </div>)}
-        {!dsh && status?.resumePlans.some(plan => ['needsReview', 'submissionUnknown'].includes(plan.phase))
-          && <p>{t('protectionManualReview')}</p>}
-        {status?.resumeStateError && <p role="alert">{t(`protectionReasons.${status.resumeStateError}`)}</p>}
-        {!dsh && status?.resumePlans.some(plan => ['waitingForQuota', 'ready', 'needsReview'].includes(plan.phase))
+        {!dsh && (status?.pausedThreads.length ?? 0) > 0
           && <button type="button" onClick={cancel} className="underline">{t('cancelResumePlans')}</button>}
         {resumeError && <p role="alert" className="text-amber-700 dark:text-amber-300">
           {resumeError === 'quotaStillLow' ? t('quotaStillLow') : resumeError === 'quotaStale' ? t('protectionReasons.quotaStale') : t('resumeFailed')}
         </p>}
-        {actionError && <p role="alert">{t('protectionReasons.resumeStateWriteFailed')}</p>}
       </div>
     </details>
   </div>;

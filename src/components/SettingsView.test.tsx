@@ -78,7 +78,7 @@ describe('settings tabs', () => {
     expect(onPatchSettings).toHaveBeenCalledWith({providerPreferences:{dsh:{weeklyResetNotification:false}}}, false);
   });
   it('keeps protection thresholds and zero-capable DSH ranges independent', async () => {
-    const { panel, onPatchSettings } = await mount({autoPauseOnLowQuota:true});
+    const { panel, onPatchSettings } = await mount({ providerPreferences: { ...DEFAULT_SETTINGS.providerPreferences, codex: { ...DEFAULT_SETTINGS.providerPreferences.codex, protectionEnabled: true } } });
     const threshold = panel('codex').getByRole('slider', {name:'5-hour quota threshold'}) as HTMLInputElement;
     expect(threshold.min).toBe('1');
     fireEvent.change(threshold, {target:{value:'9'}});
@@ -86,12 +86,12 @@ describe('settings tabs', () => {
     expect((panel('dsh').getByRole('slider', {name:'5-hour quota threshold'}) as HTMLInputElement).min).toBe('0');
   });
   it('disables protection controls for a disabled source without hiding other tabs', async () => {
-    const {panel} = await mount({providerPreferences:{codex:{monitorEnabled:false,protectionEnabled:false,fiveHourThresholdPercent:5,weeklyThresholdPercent:2}}});
+    const {panel} = await mount({ providerPreferences: { ...DEFAULT_SETTINGS.providerPreferences, codex: { ...DEFAULT_SETTINGS.providerPreferences.codex, monitorEnabled: false, protectionEnabled: false } } });
     expect((panel('codex').getByRole('checkbox',{name:'Pause Codex when quota runs low'}) as HTMLInputElement).disabled).toBe(true);
     expect(panel('claude').getByRole('checkbox',{name:'Monitor this provider'})).toBeTruthy();
   });
   it('preserves a legal nonstandard refresh value instead of selecting a different default', async () => {
-    const {panel} = await mount({refreshIntervalSeconds:47});
+    const {panel} = await mount({ providerPreferences: { ...DEFAULT_SETTINGS.providerPreferences, codex: { ...DEFAULT_SETTINGS.providerPreferences.codex, refreshIntervalSeconds: 47 } } });
     expect((panel('codex').getByRole('combobox',{name:'Refresh Interval'}) as HTMLSelectElement).value).toBe('47');
   });
   it('queries global installation and permission status only once', async () => {

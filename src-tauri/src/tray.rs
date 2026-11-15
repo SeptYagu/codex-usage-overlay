@@ -5,10 +5,11 @@ use std::time::{Duration, Instant};
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Position, Size,
-    WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry,
+    WebviewUrl, WebviewWindowBuilder, Wry,
 };
 use crate::codex::CodexUsage;
 use crate::config::OverlaySettings;
+pub use crate::geometry::{monitor_work_area, select_best_work_area_index, MonitorWorkArea, PhysicalRectF as PhysicalRect};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum TrayReadStatus {
@@ -37,8 +38,8 @@ pub trait TrayPresentationSink {
     fn publish_display(&self, display:&crate::display::Snapshot) {
         if let Some(app)=self.app_handle(){let _=app.emit("display_updated",display);}
     }
-    fn publish_usage(&self, usage:crate::commands::UsageEnvelope) {
-        if let Some(app)=self.app_handle(){let _=app.emit("usage_updated",usage);}
+    fn publish_snapshot(&self, snapshot: &crate::monitor::Snapshot) {
+        if let Some(app) = self.app_handle() { let _ = app.emit("monitor_updated", snapshot); }
     }
 }
 
@@ -213,7 +214,7 @@ pub fn tray_presentation(
 
 /// Rotation must identify local Codex just as clearly as the other providers.
 /// This atomic flag avoids taking the display mutex under the tray gate.
-pub fn runtime_presentation(state:&crate::commands::AppState,settings:&OverlaySettings,usage:Option<&CodexUsage>,status:TrayReadStatus)->TrayPresentation {
+pub fn runtime_presentation(state:&crate::commands::ProviderRuntime,settings:&OverlaySettings,usage:Option<&CodexUsage>,status:TrayReadStatus)->TrayPresentation {
     let mut frame=tray_presentation(settings,usage,status);
     if state.carousel_enabled.load(Ordering::Acquire)&&settings.provider==crate::config::Provider::Codex&&!frame.tooltip.contains("Codex") {frame.tooltip=format!("Codex | {}",frame.tooltip);}
     frame
@@ -222,10 +223,12 @@ pub fn runtime_presentation(state:&crate::commands::AppState,settings:&OverlaySe
 /// Lock settings first in every presentation entry point so refresh/settings
 /// races cannot repaint a saved new preference with an older snapshot.
 pub async fn repaint_tray<S: TrayPresentationSink>(sink: &S, state: &crate::commands::AppState) {
-    let selected = if state.runtime_provider.is_none() { state.monitors.get().map(|r| {
-        r.get(crate::config::Provider::ALL[state.displayed_provider.load(Ordering::Acquire) as usize])
-    }) } else { None };
-    let state = selected.as_deref().unwrap_or(state);
+    let displayed = crate::config::Provider::ALL[state.displayed_provider.load(Ordering::Acquire) as usize];
+    let runtime = state.monitors.get(displayed);
+    repaint_runtime(sink, &runtime).await;
+}
+
+pub async fn repaint_runtime<S: TrayPresentationSink>(sink: &S, state: &crate::commands::ProviderRuntime) {
     if !state.is_displayed() { return; }
     let protection = crate::pause_control::status::snapshot(state).await;
     let settings = state.settings.lock().await;
@@ -233,7 +236,7 @@ pub async fn repaint_tray<S: TrayPresentationSink>(sink: &S, state: &crate::comm
     let usage = state.last_usage.lock().await;
     let mut presentation = runtime_presentation(state,&settings, usage.as_ref(), *status);
     if protection.enabled {
-        presentation.tooltip.push_str("\n");
+        presentation.tooltip.push('\n');
         presentation.tooltip.push_str(protection.tooltip(&settings.language));
     }
     let _tray = state.tray_gate.lock().unwrap_or_else(|p| p.into_inner());
@@ -430,79 +433,43 @@ impl TrayMenuFocusState {
 }
 
 
-pub trait TrayStartupSink {
-    type Output;
-    fn create_tray(&self, presentation: TrayPresentation) -> Self::Output;
+pub(crate) fn startup_tray_presentation(settings: &OverlaySettings) -> TrayPresentation {
+    tray_presentation(settings, None, TrayReadStatus::Pending)
 }
 
-pub fn setup_tray<S: TrayStartupSink>(sink: &S, settings: &OverlaySettings) -> S::Output {
-    sink.create_tray(tray_presentation(settings, None, TrayReadStatus::Pending))
-}
-
-impl TrayStartupSink for AppHandle {
-    type Output = Result<TrayIcon<Wry>, tauri::Error>;
-
-    fn create_tray(&self, presentation: TrayPresentation) -> Self::Output {
-        let app = self;
-
-        let tray = TrayIconBuilder::with_id(TRAY_ID)
-            .tooltip(presentation.tooltip)
-            .icon(presentation.icon)
-            .show_menu_on_left_click(false)
-            .on_tray_icon_event(|tray, event| {
-                let app = tray.app_handle();
-                match event {
-                    TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Down, .. } => {
-                        handle_tray_left_event(app, TrayLeftEvent::Down);
-                    }
-                    TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => {
-                        handle_tray_left_event(app, TrayLeftEvent::Up);
-                    }
-                    TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
-                        handle_tray_left_event(app, TrayLeftEvent::DoubleClick);
-                    }
-                    TrayIconEvent::Click { button: MouseButton::Right, button_state: MouseButtonState::Up, .. } => {
-                        handle_tray_click(app);
-                    }
-                    _ => {}
+pub(crate) fn create_tray_icon(
+    app: &AppHandle,
+    presentation: TrayPresentation,
+) -> Result<TrayIcon<Wry>, tauri::Error> {
+    let tray = TrayIconBuilder::with_id(TRAY_ID)
+        .tooltip(presentation.tooltip)
+        .icon(presentation.icon)
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            let app = tray.app_handle();
+            match event {
+                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Down, .. } => {
+                    handle_tray_left_event(app, TrayLeftEvent::Down);
                 }
-            })
-            .build(app)?;
+                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => {
+                    handle_tray_left_event(app, TrayLeftEvent::Up);
+                }
+                TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
+                    handle_tray_left_event(app, TrayLeftEvent::DoubleClick);
+                }
+                TrayIconEvent::Click { button: MouseButton::Right, button_state: MouseButtonState::Up, .. } => {
+                    handle_tray_click(app);
+                }
+                _ => {}
+            }
+        })
+        .build(app)?;
 
-        Ok(tray)
-    }
+    Ok(tray)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrayMenuWindowEffect {
-    Open,
-    Hide,
-    None,
-}
-
-/// Arbitrates what window action must follow a click gate decision.
-pub fn plan_tray_click_effect(action: TrayMenuClickAction) -> TrayMenuWindowEffect {
-    match action {
-        TrayMenuClickAction::Open => TrayMenuWindowEffect::Open,
-        TrayMenuClickAction::Hide => TrayMenuWindowEffect::Hide,
-        TrayMenuClickAction::Ignore => TrayMenuWindowEffect::None,
-    }
-}
-
-pub trait TrayClickWindowOps {
-    fn open_menu(&mut self);
-    fn hide_menu(&mut self);
-}
-
-pub fn execute_tray_click_effect<W: TrayClickWindowOps>(
-    ops: &mut W,
-    effect: TrayMenuWindowEffect,
-) {
-    match effect {
-        TrayMenuWindowEffect::Open => ops.open_menu(),
-        TrayMenuWindowEffect::Hide => ops.hide_menu(),
-        TrayMenuWindowEffect::None => {}
-    }
+pub fn setup_tray(app: &AppHandle, settings: &OverlaySettings) -> Result<TrayIcon<Wry>, tauri::Error> {
+    create_tray_icon(app, startup_tray_presentation(settings))
 }
 
 fn tray_menu_toggle_action(visible: bool) -> TrayMenuClickAction {
@@ -525,19 +492,15 @@ pub fn handle_tray_click(app: &AppHandle) {
 }
 
 fn apply_tray_menu_action(app: &AppHandle, action: TrayMenuClickAction) {
-    let effect = plan_tray_click_effect(action);
-    struct LiveClickOps<'a>(&'a AppHandle);
-    impl<'a> TrayClickWindowOps for LiveClickOps<'a> {
-        fn open_menu(&mut self) {
-            open_tray_menu_window(self.0);
-        }
-        fn hide_menu(&mut self) {
-            if let Some(window) = self.0.get_webview_window(TRAY_MENU_WINDOW_LABEL) {
+    match action {
+        TrayMenuClickAction::Open => open_tray_menu_window(app),
+        TrayMenuClickAction::Hide => {
+            if let Some(window) = app.get_webview_window(TRAY_MENU_WINDOW_LABEL) {
                 let _ = window.hide();
             }
         }
+        TrayMenuClickAction::Ignore => {}
     }
-    execute_tray_click_effect(&mut LiveClickOps(app), effect);
 }
 
 pub fn handle_menu_action(app: &AppHandle, id: &str) {
@@ -731,57 +694,6 @@ pub fn compute_tray_anchor_with_fallback(
     resolve_tray_icon_anchor_box(rect_result, fallback_work)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrayMenuShowAction {
-    SetSize { width: u32, height: u32 },
-    SetPosition { x: i32, y: i32 },
-    Show,
-    NoteShown,
-    SetFocus,
-    ScheduleGraceCheck,
-}
-
-pub trait TrayMenuShowOps {
-    fn set_size(&mut self, width: u32, height: u32);
-    fn set_position(&mut self, x: i32, y: i32);
-    fn show(&mut self);
-    fn note_shown(&mut self);
-    fn set_focus(&mut self);
-    fn schedule_grace_check(&mut self);
-}
-
-pub fn execute_tray_menu_show_action<W: TrayMenuShowOps>(
-    ops: &mut W,
-    action: TrayMenuShowAction,
-) {
-    match action {
-        TrayMenuShowAction::SetSize { width, height } => ops.set_size(width, height),
-        TrayMenuShowAction::SetPosition { x, y } => ops.set_position(x, y),
-        TrayMenuShowAction::Show => ops.show(),
-        TrayMenuShowAction::NoteShown => ops.note_shown(),
-        TrayMenuShowAction::SetFocus => ops.set_focus(),
-        TrayMenuShowAction::ScheduleGraceCheck => ops.schedule_grace_check(),
-    }
-}
-
-pub fn drive_tray_menu_show_sequence<F: FnMut(TrayMenuShowAction)>(
-    placement: &TrayMenuPlacement,
-    mut emit_action: F,
-) {
-    emit_action(TrayMenuShowAction::SetSize {
-        width: placement.width,
-        height: placement.height,
-    });
-    emit_action(TrayMenuShowAction::SetPosition {
-        x: placement.x,
-        y: placement.y,
-    });
-    emit_action(TrayMenuShowAction::Show);
-    emit_action(TrayMenuShowAction::NoteShown);
-    emit_action(TrayMenuShowAction::SetFocus);
-    emit_action(TrayMenuShowAction::ScheduleGraceCheck);
-}
-
 /// What one layout request may do to the popup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayMenuLayoutMode {
@@ -803,21 +715,6 @@ pub fn plan_tray_menu_layout_mode(generation: u64, shown_generation: u64, visibl
         TrayMenuLayoutMode::Resize
     } else {
         TrayMenuLayoutMode::Skip
-    }
-}
-
-pub fn drive_tray_menu_layout<F: FnMut(TrayMenuShowAction)>(
-    mode: TrayMenuLayoutMode,
-    placement: &TrayMenuPlacement,
-    mut emit_action: F,
-) {
-    match mode {
-        TrayMenuLayoutMode::Open => drive_tray_menu_show_sequence(placement, emit_action),
-        TrayMenuLayoutMode::Resize => {
-            emit_action(TrayMenuShowAction::SetSize { width: placement.width, height: placement.height });
-            emit_action(TrayMenuShowAction::SetPosition { x: placement.x, y: placement.y });
-        }
-        TrayMenuLayoutMode::Skip => {}
     }
 }
 
@@ -900,37 +797,15 @@ pub fn layout_tray_menu(
         height_logical,
         width_logical,
     );
-    struct LiveShowOps<'a> {
-        window: &'a WebviewWindow,
-        app: &'a AppHandle,
-    }
-    impl<'a> TrayMenuShowOps for LiveShowOps<'a> {
-        fn set_size(&mut self, width: u32, height: u32) {
-            let _ = self.window.set_size(Size::Physical(PhysicalSize::new(width, height)));
-        }
-        fn set_position(&mut self, x: i32, y: i32) {
-            let _ = self.window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
-        }
-        fn show(&mut self) {
-            let _ = self.window.show();
-        }
-        fn note_shown(&mut self) {
-            note_tray_menu_shown(self.app);
-        }
-        fn set_focus(&mut self) {
-            let _ = self.window.set_focus();
-        }
-        fn schedule_grace_check(&mut self) {
-            schedule_tray_menu_grace_check(self.app);
-        }
-    }
-    let mut show_ops = LiveShowOps { window: &window, app };
+    let _ = window.set_size(Size::Physical(PhysicalSize::new(placement.width, placement.height)));
+    let _ = window.set_position(Position::Physical(PhysicalPosition::new(placement.x, placement.y)));
     if mode == TrayMenuLayoutMode::Open {
         TRAY_MENU_SHOWN_GENERATION.store(generation, Ordering::SeqCst);
+        let _ = window.show();
+        note_tray_menu_shown(app);
+        let _ = window.set_focus();
+        schedule_tray_menu_grace_check(app);
     }
-    drive_tray_menu_layout(mode, &placement, |action| {
-        execute_tray_menu_show_action(&mut show_ops, action);
-    });
     Ok(placement.height_logical)
 }
 
@@ -1030,68 +905,6 @@ fn center_settings_window(window: &tauri::WebviewWindow) {
     let _ = window.center();
 }
 
-fn monitor_work_area(monitor: &tauri::Monitor) -> MonitorWorkArea {
-    let work = monitor.work_area();
-    MonitorWorkArea {
-        left: work.position.x as f64,
-        top: work.position.y as f64,
-        width: work.size.width as f64,
-        height: work.size.height as f64,
-        scale_factor: monitor.scale_factor(),
-    }
-}
-
-/// Axis-aligned rectangle in physical pixels.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PhysicalRect {
-    pub left: f64,
-    pub top: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
-impl PhysicalRect {
-    pub fn new(left: f64, top: f64, width: f64, height: f64) -> Self {
-        Self { left, top, width, height }
-    }
-
-    pub fn right(&self) -> f64 {
-        self.left + self.width
-    }
-
-    pub fn bottom(&self) -> f64 {
-        self.top + self.height
-    }
-
-    /// Overlapping area with `other`; zero when they only touch or miss entirely.
-    pub fn intersection_area(&self, other: &PhysicalRect) -> f64 {
-        let width = (self.right().min(other.right()) - self.left.max(other.left)).max(0.0);
-        let height = (self.bottom().min(other.bottom()) - self.top.max(other.top)).max(0.0);
-        width * height
-    }
-}
-
-/// A monitor work area in physical pixels, decoupled from `tauri::Monitor` so the
-/// placement maths stays pure and unit-testable.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MonitorWorkArea {
-    pub left: f64,
-    pub top: f64,
-    pub width: f64,
-    pub height: f64,
-    pub scale_factor: f64,
-}
-
-impl MonitorWorkArea {
-    pub fn rect(&self) -> PhysicalRect {
-        PhysicalRect::new(self.left, self.top, self.width, self.height)
-    }
-
-    fn has_usable_scale(&self) -> bool {
-        self.scale_factor.is_finite() && self.scale_factor > 0.0
-    }
-}
-
 /// The resolved physical geometry to apply to the settings window.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SettingsPlacement {
@@ -1130,22 +943,9 @@ pub fn select_work_area(
     work_areas: &[MonitorWorkArea],
     geometry: &crate::config::SettingsWindowGeometry,
 ) -> Option<usize> {
-    let mut best: Option<(usize, f64)> = None;
-    for (index, work) in work_areas.iter().enumerate() {
-        if !work.has_usable_scale() {
-            continue;
-        }
-        let area = projected_physical_rect(geometry, work.scale_factor)
-            .intersection_area(&work.rect());
-        let is_better = match best {
-            Some((_, best_area)) => area > best_area,
-            None => true,
-        };
-        if area > 0.0 && is_better {
-            best = Some((index, area));
-        }
-    }
-    best.map(|(index, _)| index)
+    select_best_work_area_index(work_areas, |work| {
+        projected_physical_rect(geometry, work.scale_factor)
+    })
 }
 
 fn place_within_work_area(
@@ -1267,14 +1067,14 @@ fn sample_pixel(
     let mut color = [27.0, 30.0, 38.0, 255.0 * plate_alpha];
 
     // Plate rim, light enough to outline the icon on a dark taskbar
-    if r >= 14.2 && r <= 15.0 {
+    if (14.2..=15.0).contains(&r) {
         color = [118.0, 128.0, 146.0, 255.0 * plate_alpha];
     }
 
     // Weekly-only promotes Weekly to the large primary track.
     let primary_pct = if mode == TrayQuotaMode::WeeklyOnly { week_pct } else { five_hour_pct };
     // Outer ring: radius 12.0, width 2.4 (from 10.8 to 13.2)
-    if r >= 10.8 && r <= 13.2 {
+    if (10.8..=13.2).contains(&r) {
         let max_angle = match primary_pct {
             Some(p) => 2.0 * std::f64::consts::PI * (p.clamp(0.0, 100.0) / 100.0),
             None => 0.0,
@@ -1289,7 +1089,7 @@ fn sample_pixel(
     }
 
     // Inner ring: radius 7.5, width 2.2 (from 6.4 to 8.6)
-    if mode == TrayQuotaMode::FiveHourAndWeekly && r >= 6.4 && r <= 8.6 {
+    if mode == TrayQuotaMode::FiveHourAndWeekly && (6.4..=8.6).contains(&r) {
         let max_angle = match week_pct {
             Some(p) => 2.0 * std::f64::consts::PI * (p.clamp(0.0, 100.0) / 100.0),
             None => 0.0,
@@ -1353,15 +1153,10 @@ mod tests {
     }
 
     impl crate::commands::UsageSource for OfflineTray {
-        async fn read_usage(&self, _: &crate::commands::AppState) -> Result<crate::codex::RawCodexUsage, String> {
+        async fn read_usage(&self, _: &crate::commands::ProviderRuntime) -> Result<crate::codex::RawCodexUsage, String> {
             self.reads.fetch_add(1, Ordering::SeqCst);
             self.next_usage.lock().unwrap().take().expect("display changes must not fetch usage")
         }
-    }
-
-    impl TrayStartupSink for OfflineTray {
-        type Output = ();
-        fn create_tray(&self, presentation: TrayPresentation) { self.present(presentation); }
     }
 
     impl OfflineTray {
@@ -1439,20 +1234,21 @@ mod tests {
                 let config = ConfigManager::with_runtime_dir(dir.clone());
                 let initial = OverlaySettings { show_five_hour_quota: initial_dual, language: "en-US".into(), ..Default::default() };
                 config.save_settings_checked(&initial).unwrap();
-                let state = Arc::new(crate::commands::AppState::for_test(config.clone()));
+                let owner = Arc::new(crate::commands::AppState::for_test(config.clone()));
+                let state = owner.monitors.get(crate::config::Provider::Codex);
                 let sink = OfflineTray::default();
                 // This is the actual startup entry, including persisted false.
-                setup_tray(&sink, &config.load_settings());
+                sink.present(startup_tray_presentation(&config.load_settings()));
                 sink.assert_frame(initial_dual, None, None, "Codex Usage Overlay");
                 for dual in [!initial_dual, initial_dual] {
-                    crate::commands::apply_settings_patch(&sink, &state, serde_json::json!({"showFiveHourQuota": dual}), false).await.unwrap();
+                    crate::commands::apply_settings_patch(&sink, &owner, serde_json::json!({"showFiveHourQuota": dual}), false).await.unwrap();
                     sink.assert_frame(dual, None, None, "Codex Usage Overlay");
                 }
                 // First failure and toggles without cached usage.
                 *sink.next_usage.lock().unwrap() = Some(Err("offline read failure".into()));
                 assert!(crate::commands::refresh_usage(&sink, &state).await.is_err());
                 sink.assert_frame(initial_dual, None, None, "Failed to read Codex usage");
-                crate::commands::apply_settings_patch(&sink, &state, serde_json::json!({"showFiveHourQuota": !initial_dual, "language": "zh-CN"}), false).await.unwrap();
+                crate::commands::apply_settings_patch(&sink, &owner, serde_json::json!({"showFiveHourQuota": !initial_dual, "language": "zh-CN"}), false).await.unwrap();
                 sink.assert_frame(!initial_dual, None, None, "Codex 用量读取失败");
                 assert!(state.last_usage.lock().await.is_none());
 
@@ -1485,7 +1281,7 @@ mod tests {
                     for credits in [true, false] {
                         for burn in [true, false] {
                             let before = std::fs::read(config.burn_rate_state_path()).unwrap();
-                            crate::commands::apply_settings_patch(&sink, &state, serde_json::json!({"showFiveHourQuota": dual, "showBurnRate": burn, "showCredits": credits}), false).await.unwrap();
+                            crate::commands::apply_settings_patch(&sink, &owner, serde_json::json!({"showFiveHourQuota": dual, "showBurnRate": burn, "showCredits": credits}), false).await.unwrap();
                             let text = format!("{}WK 30%{}", if dual { "5H 80% | " } else { "" }, if credits { " | CR 12.50" } else { "" });
                             sink.assert_frame(dual, Some(80.0), Some(30.0), &text);
                             assert_eq!(*state.last_usage.lock().await, Some(usage.clone()));
@@ -1495,8 +1291,9 @@ mod tests {
                             let saved = config.load_settings();
                             assert_eq!(saved.show_five_hour_quota, dual);
                             assert_eq!(saved.show_burn_rate, burn);
-                            assert!(saved.five_hour_reset_notification);
-                            assert_eq!(saved.refresh_interval_seconds, 60);
+                            let codex_pref = saved.preference(crate::config::Provider::Codex);
+                            assert!(codex_pref.five_hour_reset_notification);
+                            assert_eq!(codex_pref.refresh_interval_seconds, 60);
                         }
                     }
                 }
@@ -1505,7 +1302,7 @@ mod tests {
                 assert!(crate::commands::refresh_usage(&sink, &state).await.is_err());
                 sink.assert_frame(false, Some(80.0), Some(30.0), "Codex 用量读取失败");
                 for dual in [true, false] {
-                    crate::commands::apply_settings_patch(&sink, &state, serde_json::json!({"showFiveHourQuota": dual, "language": "zh-Hant"}), false).await.unwrap();
+                    crate::commands::apply_settings_patch(&sink, &owner, serde_json::json!({"showFiveHourQuota": dual, "language": "zh-Hant"}), false).await.unwrap();
                     sink.assert_frame(dual, Some(80.0), Some(30.0), "Codex 用量讀取失敗");
                     assert_eq!(*state.last_usage.lock().await, Some(usage.clone()));
                 }
@@ -1903,13 +1700,6 @@ mod tests {
     }
 
     #[test]
-    fn tray_click_effect_dispatches_hide_and_never_reopens() {
-        assert_eq!(plan_tray_click_effect(TrayMenuClickAction::Open), TrayMenuWindowEffect::Open);
-        assert_eq!(plan_tray_click_effect(TrayMenuClickAction::Hide), TrayMenuWindowEffect::Hide);
-        assert_eq!(plan_tray_click_effect(TrayMenuClickAction::Ignore), TrayMenuWindowEffect::None);
-    }
-
-    #[test]
     fn tray_icon_anchor_box_degrades_when_tray_rect_fails() {
         let fallback_work = Some((0, 0, 1920, 1080));
         let error_res: Result<Option<(i32, i32, i32, i32)>, String> = Err("overflow flyout".into());
@@ -1927,56 +1717,16 @@ mod tests {
     }
 
     #[test]
-    fn show_sequence_emits_note_shown_and_grace_check_in_exact_order() {
-        let placement = TrayMenuPlacement {
-            x: 100,
-            y: 200,
-            width: 300,
-            height: 400,
-            height_logical: 400.0,
-        };
-        let mut actions = Vec::new();
-        drive_tray_menu_show_sequence(&placement, |a| actions.push(a));
-        assert_eq!(
-            actions,
-            vec![
-                TrayMenuShowAction::SetSize { width: 300, height: 400 },
-                TrayMenuShowAction::SetPosition { x: 100, y: 200 },
-                TrayMenuShowAction::Show,
-                TrayMenuShowAction::NoteShown,
-                TrayMenuShowAction::SetFocus,
-                TrayMenuShowAction::ScheduleGraceCheck,
-            ]
-        );
-    }
-
-    #[test]
     fn a_closed_menu_never_reopens_itself_when_its_content_changes_size() {
-        let placement = TrayMenuPlacement { x: 100, y: 200, width: 300, height: 400, height_logical: 400.0 };
-        let run = |generation: u64, shown: u64, visible: bool| {
-            let mut actions = Vec::new();
-            drive_tray_menu_layout(plan_tray_menu_layout_mode(generation, shown, visible), &placement, |a| actions.push(a));
-            actions
-        };
-        let shows = |actions: &[TrayMenuShowAction]| actions.iter().any(|a| matches!(a, TrayMenuShowAction::Show | TrayMenuShowAction::SetFocus));
-
         // A tray click starts generation 3: its first layout shows the popup.
         assert_eq!(plan_tray_menu_layout_mode(3, 2, false), TrayMenuLayoutMode::Open);
-        assert!(shows(&run(3, 2, false)));
         // The open popup's content changes size: it is placed again, not refocused.
-        assert_eq!(
-            run(3, 3, true),
-            vec![
-                TrayMenuShowAction::SetSize { width: 300, height: 400 },
-                TrayMenuShowAction::SetPosition { x: 100, y: 200 },
-            ]
-        );
+        assert_eq!(plan_tray_menu_layout_mode(3, 3, true), TrayMenuLayoutMode::Resize);
         // After the popup closes, a status change (e.g. auto-pause) relayouts the
         // hidden page with the same generation: nothing may happen.
         assert_eq!(plan_tray_menu_layout_mode(3, 3, false), TrayMenuLayoutMode::Skip);
-        assert!(run(3, 3, false).is_empty());
         // Only the next click, generation 4, shows it again.
-        assert!(shows(&run(4, 3, false)));
+        assert_eq!(plan_tray_menu_layout_mode(4, 3, false), TrayMenuLayoutMode::Open);
     }
 
     #[test]
@@ -1987,31 +1737,11 @@ mod tests {
 
         // Inside grace window (100ms < 180ms): MUST defer, should_hide == false
         let inside = shown_at + Duration::from_millis(100);
-        assert_eq!(should_hide_on_tray_menu_blur(&mut focus, inside), false);
+        assert!(!should_hide_on_tray_menu_blur(&mut focus, inside));
 
         // Outside grace window (250ms > 180ms): MUST hide immediately
         let outside = shown_at + Duration::from_millis(250);
-        assert_eq!(should_hide_on_tray_menu_blur(&mut focus, outside), true);
-    }
-
-    #[test]
-    fn execute_tray_click_effect_dispatches_exact_window_ops() {
-        struct MockOps(Vec<&'static str>);
-        impl TrayClickWindowOps for MockOps {
-            fn open_menu(&mut self) { self.0.push("open"); }
-            fn hide_menu(&mut self) { self.0.push("hide"); }
-        }
-        let mut ops = MockOps(Vec::new());
-        execute_tray_click_effect(&mut ops, TrayMenuWindowEffect::Hide);
-        assert_eq!(ops.0, vec!["hide"]);
-
-        let mut ops2 = MockOps(Vec::new());
-        execute_tray_click_effect(&mut ops2, TrayMenuWindowEffect::Open);
-        assert_eq!(ops2.0, vec!["open"]);
-
-        let mut ops3 = MockOps(Vec::new());
-        execute_tray_click_effect(&mut ops3, TrayMenuWindowEffect::None);
-        assert!(ops3.0.is_empty());
+        assert!(should_hide_on_tray_menu_blur(&mut focus, outside));
     }
 
     #[test]
@@ -2020,22 +1750,5 @@ mod tests {
         let err_res: Result<Option<(i32, i32, i32, i32)>, String> = Err("overflow flyout".into());
         let anchor = compute_tray_anchor_with_fallback(err_res, fallback_work);
         assert_eq!(anchor, Some((1920, 1080, 0, 0)));
-    }
-
-    #[test]
-    fn execute_tray_menu_show_action_delegates_each_variant() {
-        struct MockShowOps(Vec<&'static str>);
-        impl TrayMenuShowOps for MockShowOps {
-            fn set_size(&mut self, _w: u32, _h: u32) { self.0.push("size"); }
-            fn set_position(&mut self, _x: i32, _y: i32) { self.0.push("pos"); }
-            fn show(&mut self) { self.0.push("show"); }
-            fn note_shown(&mut self) { self.0.push("note_shown"); }
-            fn set_focus(&mut self) { self.0.push("focus"); }
-            fn schedule_grace_check(&mut self) { self.0.push("grace_check"); }
-        }
-        let mut ops = MockShowOps(Vec::new());
-        execute_tray_menu_show_action(&mut ops, TrayMenuShowAction::NoteShown);
-        execute_tray_menu_show_action(&mut ops, TrayMenuShowAction::ScheduleGraceCheck);
-        assert_eq!(ops.0, vec!["note_shown", "grace_check"]);
     }
 }

@@ -3,11 +3,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::{async_runtime::JoinHandle, AppHandle, Emitter};
+use tauri::{async_runtime::JoinHandle, AppHandle, Emitter, Manager};
 
 use crate::codex::CodexUsage;
-use crate::commands::AppState;
-use crate::config::{ConfigManager, SoundMode};
+use crate::commands::{AppState, ProviderRuntime};
+use crate::config::{ConfigManager, Provider, SoundMode};
 use crate::tray::{TrayPresentationSink, TrayReadStatus};
 
 const POST_RESET_GRACE_SECS: i64 = 30;
@@ -146,7 +146,7 @@ fn advance_cycle(
     }
 }
 
-pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Arc<AppState>, usage: &CodexUsage) {
+pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Arc<ProviderRuntime>, usage: &CodexUsage) {
     let settings = {
         let settings = state.settings.lock().await;
         let mut status = state.tray_read_status.lock().await;
@@ -162,21 +162,23 @@ pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Ar
         }
         settings.clone()
     };
-    sink.publish_usage(crate::commands::usage_envelope(state, &settings, usage.clone()));
+    crate::monitor::publish_runtime(sink, state).await;
     if let Some(app) = sink.app_handle() {
         if state.is_displayed() {
-            let owner = state.owner.get().and_then(|w| w.upgrade()).unwrap_or_else(|| state.clone());
-            crate::dock::keep_docked_in_work_area(app, &owner).await;
+            if let Some(owner) = app.try_state::<Arc<AppState>>() {
+                crate::dock::keep_docked_in_work_area(app, owner.inner()).await;
+            }
         }
 
+        let pref = settings.preference(state.provider);
         if let Err(error) = maybe_notify_cycle(
             app,
             state,
             QuotaKind::FiveHour,
             usage.five_hour_resets_at,
-            settings.five_hour_reset_notification,
-            settings.five_hour_sound_mode,
-            settings.five_hour_sound_path.clone(),
+            pref.five_hour_reset_notification,
+            pref.five_hour_sound_mode,
+            pref.five_hour_sound_path.clone(),
             &settings.language,
         )
         .await
@@ -188,9 +190,9 @@ pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Ar
             state,
             QuotaKind::Week,
             usage.week_resets_at,
-            settings.weekly_reset_notification,
-            settings.weekly_sound_mode,
-            settings.weekly_sound_path.clone(),
+            pref.weekly_reset_notification,
+            pref.weekly_sound_mode,
+            pref.weekly_sound_path.clone(),
             &settings.language,
         )
         .await
@@ -202,7 +204,7 @@ pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Ar
 
 async fn maybe_notify_cycle(
     app: &AppHandle,
-    state: &Arc<AppState>,
+    state: &Arc<ProviderRuntime>,
     kind: QuotaKind,
     new_resets_at: Option<i64>,
     enabled: bool,
@@ -249,7 +251,7 @@ struct QuotaResetEvent {
 
 async fn record_notify_error(
     app: &AppHandle,
-    state: &Arc<AppState>,
+    state: &Arc<ProviderRuntime>,
     kind: QuotaKind,
     error: String,
 ) {
@@ -265,15 +267,19 @@ async fn record_notify_error(
 
 fn show_quota_reset(
     app: &AppHandle,
-    state: &Arc<AppState>,
+    state: &Arc<ProviderRuntime>,
     kind: QuotaKind,
     sound_mode: SoundMode,
     sound_path: Option<String>,
     language: &str,
 ) -> Result<(), String> {
     let (base_title, body) = notification_copy(kind, language);
-    let provider = state.runtime_provider.map(|p| p.key()).unwrap_or("codex");
-    let provider = match provider { "claude" => "Claude", "dsh" => "DSH", "antigravity" => "Antigravity", _ => "Codex" };
+    let provider = match state.provider {
+        Provider::Claude => "Claude",
+        Provider::Dsh => "DSH",
+        Provider::Antigravity => "Antigravity",
+        Provider::Codex => "Codex",
+    };
     let title = format!("{provider} — {base_title}");
     let title = title.as_str();
     match sound_mode {
@@ -282,7 +288,7 @@ fn show_quota_reset(
             #[cfg(windows)]
             if let (Some(path), Some(audio)) = (sound_path.filter(|path| !path.is_empty()), state.audio.get()) {
                 let toast_result = show_toast(title, body, None, &app.config().identifier);
-                audio.enqueue_notification(path.into(), kind, state.runtime_provider.unwrap_or(crate::config::Provider::Codex));
+                audio.enqueue_notification(path.into(), kind, state.provider);
                 return toast_result;
             }
             #[cfg(not(windows))]
@@ -453,7 +459,7 @@ fn post_reset_fetch_target(existing: Option<i64>, accepted: Option<i64>, now: i6
 
 async fn schedule_post_reset_fetch(
     _app: &AppHandle,
-    state: &Arc<AppState>,
+    state: &Arc<ProviderRuntime>,
     kind: QuotaKind,
     accepted_boundary: Option<i64>,
 ) {

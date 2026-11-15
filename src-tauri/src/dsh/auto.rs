@@ -281,13 +281,13 @@ pub(crate) async fn reconcile<S: TrayPresentationSink>(
     allow_setup: bool,
 ) {
     let settings = state.settings.lock().await.clone();
-    if !crate::commands::dsh_monitor_enabled(state, &settings) {
+    if !crate::commands::dsh_monitor_enabled(&settings) {
         return;
     }
     let Some(epoch) = state.dsh_auto.ticket() else {
         return;
     };
-    let generation = crate::monitor::selected(state, Provider::Dsh).source_generation.load(Ordering::Acquire);
+    let generation = state.monitors.get(Provider::Dsh).source_generation.load(Ordering::Acquire);
     let directory = state.config_manager.runtime_dir().join("dsh-bridges");
     let mut candidates = match discover(&directory).await {
         Ok(candidates) => candidates,
@@ -437,8 +437,8 @@ async fn commit<S: TrayPresentationSink>(
     prepared: Option<PreparedConnection>,
 ) -> Result<(), String> {
     let _commit = state.settings_patch.lock().await;
-    let runtime = crate::monitor::selected(state, Provider::Dsh);
-    let source_commit = if runtime.runtime_provider.is_some() { Some(runtime.settings_patch.lock().await) } else { None };
+    let runtime = state.monitors.get(Provider::Dsh);
+    let source_commit = runtime.source_commit.lock().await;
     let replacing_connection = prepared.is_some();
     let (next, source_changed, settings_changed) = {
         let mut settings = state.settings.lock().await;
@@ -453,7 +453,7 @@ async fn commit<S: TrayPresentationSink>(
         if control.epoch != epoch
             || control.suspended
             || control.setting_up
-            || !crate::commands::dsh_monitor_enabled(state, &settings)
+            || !crate::commands::dsh_monitor_enabled(&settings)
             || !runtime.is_current()
             || runtime.source_generation.load(Ordering::Acquire) != generation
         {
@@ -483,7 +483,7 @@ async fn commit<S: TrayPresentationSink>(
         if prepared.is_some() || next.dsh_account_id != settings.dsh_account_id {
             next.dsh_session_ids.clear();
         }
-        let source_changed = !crate::config::same_source(&settings.for_provider(Provider::Dsh), &next.for_provider(Provider::Dsh));
+        let source_changed = !crate::config::same_source_for(Provider::Dsh, &settings, &next);
         let settings_changed = source_changed || next.dsh_profile_id != settings.dsh_profile_id;
         if settings_changed {
             state.config_manager.save_settings_checked(&next)?;
@@ -511,12 +511,13 @@ async fn commit<S: TrayPresentationSink>(
         }
     }
     if source_changed {
-        state
+        let runtime = state.monitors.get(Provider::Dsh);
+        runtime
             .polling
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .request_now(std::time::Instant::now());
-        state.poll_wake.notify_one();
+        runtime.poll_wake.notify_one();
         crate::tray::repaint_tray(sink, state).await;
     }
     let restart_required = {
@@ -546,12 +547,12 @@ pub(crate) async fn setup<S: TrayPresentationSink>(
     explicit: bool,
 ) {
     let settings = state.settings.lock().await.clone();
-    if !crate::commands::dsh_monitor_enabled(state, &settings) { return; }
+    if !crate::commands::dsh_monitor_enabled(&settings) { return; }
     if explicit {
         let _commit = state.settings_patch.lock().await;
         let settings = state.settings.lock().await.clone();
-        if !crate::commands::dsh_monitor_enabled(state, &settings) { return; }
-        let runtime = crate::monitor::selected(state, Provider::Dsh);
+        if !crate::commands::dsh_monitor_enabled(&settings) { return; }
+        let runtime = state.monitors.get(Provider::Dsh);
         let frozen = crate::commands::freeze_dsh_connection(&runtime).await;
         state.dsh_auto.retry(&state.dsh);
         drop(frozen);

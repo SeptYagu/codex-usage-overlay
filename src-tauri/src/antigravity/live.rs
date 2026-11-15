@@ -7,62 +7,21 @@ use serde_json::Value;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 use super::shared::{self, Snapshot};
 use crate::codex::reader::{FailureKind, ReadFailure, ReadStage};
+#[cfg(test)]
+pub use crate::live_poll::MIN_INTERVAL;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
-/// Caps `agy` invocations when protection or UI polls more frequently.
-pub const MIN_INTERVAL: Duration = Duration::from_secs(60);
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Cached outcome between background polls.
-#[derive(Debug, Default)]
-pub struct LiveState {
-    pub answer: Option<(Instant, Snapshot)>,
-    pub failure: Option<ReadFailure>,
-    next_request: Option<Instant>,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum LiveStep {
-    Answer(Snapshot),
-    Failure(ReadFailure),
-    Request,
-}
-
-impl LiveState {
-    pub fn step(&self, now: Instant) -> LiveStep {
-        if self.next_request.is_none_or(|at| now >= at) {
-            return LiveStep::Request;
-        }
-        match (&self.failure, &self.answer) {
-            (Some(failure), _) => LiveStep::Failure(failure.clone()),
-            (None, Some((_, snapshot))) => LiveStep::Answer(snapshot.clone()),
-            (None, None) => LiveStep::Request,
-        }
-    }
-
-    pub fn record(&mut self, now: Instant, result: &Result<Snapshot, ReadFailure>) {
-        let wait = match result {
-            Ok(snapshot) => {
-                self.answer = Some((now, snapshot.clone()));
-                self.failure = None;
-                MIN_INTERVAL
-            }
-            Err(failure) => {
-                self.failure = Some(failure.clone());
-                failure
-                    .retry_after_seconds
-                    .map_or(MIN_INTERVAL, Duration::from_secs)
-                    .max(MIN_INTERVAL)
-            }
-        };
-        self.next_request = Some(now + wait);
-    }
-}
+pub type LiveState = crate::live_poll::LiveState<Snapshot>;
+pub type LiveStep = crate::live_poll::LiveStep<Snapshot>;
 
 /// Locates the `agy` CLI executable on `PATH` or standard Windows/user install paths.
 pub fn cli_path() -> Option<PathBuf> {

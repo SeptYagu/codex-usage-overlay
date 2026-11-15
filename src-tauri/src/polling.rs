@@ -1,5 +1,5 @@
 //! One polling policy for background, manual and reset-triggered reads.
-use crate::{codex::CodexUsage, config::OverlaySettings};
+use crate::{codex::CodexUsage, config::ProviderPreference};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
@@ -30,26 +30,26 @@ impl PollState {
     #[cfg(test)]
     pub fn completed(
         &mut self,
-        settings: &OverlaySettings,
+        pref: &ProviderPreference,
         usage: Option<&CodexUsage>,
         now: Instant,
     ) {
-        self.completed_with_recovery(settings, usage, now, ReadRecovery::default());
+        self.completed_with_recovery(pref, usage, now, ReadRecovery::default());
     }
 
-    pub fn completed_with_recovery(&mut self, settings: &OverlaySettings, usage: Option<&CodexUsage>, now: Instant, recovery: ReadRecovery) {
+    pub fn completed_with_recovery(&mut self, pref: &ProviderPreference, usage: Option<&CodexUsage>, now: Instant, recovery: ReadRecovery) {
         self.recovery = recovery;
         self.server_not_before = recovery.retry_after_seconds.and_then(|secs| now.checked_add(Duration::from_secs(secs)));
         self.last_completed = Some(now);
+        let active_protection = pref.monitor_enabled && pref.protection_enabled;
         if let Some(usage) = usage {
             self.failures = 0;
-            if !settings.auto_pause_on_low_quota {
+            if !active_protection {
                 self.fast = false;
                 self.recovery_samples = 0;
             } else {
-                let (five_threshold, week_threshold) = if settings.provider == crate::config::Provider::Dsh {
-                    (settings.dsh_five_hour_threshold_percent, settings.dsh_weekly_threshold_percent)
-                } else { (settings.auto_pause_five_hour_threshold_percent, settings.auto_pause_weekly_threshold_percent) };
+                let five_threshold = pref.five_hour_threshold_percent;
+                let week_threshold = pref.weekly_threshold_percent;
                 let near = usage.five_hour_remaining_percent.is_some_and(|v| {
                     v <= five_threshold
                         .saturating_add(5)
@@ -80,15 +80,16 @@ impl PollState {
             self.failures = self.failures.saturating_add(1);
             self.recovery_samples = 0;
         }
-        self.recalculate(settings, now);
+        self.recalculate(pref, now);
     }
 
-    pub fn recalculate(&mut self, settings: &OverlaySettings, now: Instant) {
-        let normal = u64::from(settings.refresh_interval_seconds.clamp(15, 3600));
-        if !settings.auto_pause_on_low_quota {
+    pub fn recalculate(&mut self, pref: &ProviderPreference, now: Instant) {
+        let normal = u64::from(pref.refresh_interval_seconds.clamp(15, 3600));
+        let active_protection = pref.monitor_enabled && pref.protection_enabled;
+        if !active_protection {
             self.fast = false;
         }
-        let base = if settings.auto_pause_on_low_quota && self.fast {
+        let base = if active_protection && self.fast {
             15
         } else {
             normal
@@ -116,8 +117,8 @@ impl PollState {
         self.server_not_before.filter(|at| *at > now).map(|at| at.duration_since(now))
     }
 
-    pub fn healthy_interval_seconds(&self, settings: &OverlaySettings) -> u64 {
-        if settings.auto_pause_on_low_quota && self.fast { 15 } else { u64::from(settings.refresh_interval_seconds.clamp(15, 3600)) }
+    pub fn healthy_interval_seconds(&self, pref: &ProviderPreference) -> u64 {
+        if pref.monitor_enabled && pref.protection_enabled && self.fast { 15 } else { u64::from(pref.refresh_interval_seconds.clamp(15, 3600)) }
     }
 
     pub fn deadline(&mut self, now: Instant) -> Instant {
@@ -138,7 +139,7 @@ impl PollState {
     }
 }
 
-pub async fn wait_until_due(state: &crate::commands::AppState) {
+pub async fn wait_until_due(state: &crate::commands::ProviderRuntime) {
     loop {
         let wake = state.poll_wake.notified();
         tokio::pin!(wake);
@@ -173,82 +174,80 @@ mod tests {
             antigravity: Default::default(),
         }
     }
-    fn settings() -> OverlaySettings {
-        OverlaySettings {
-            auto_pause_on_low_quota: true,
-            ..Default::default()
+    fn pref(provider: crate::config::Provider) -> ProviderPreference {
+        ProviderPreference {
+            protection_enabled: true,
+            ..ProviderPreference::default_for(provider)
         }
     }
     #[test]
     fn near_boundaries_and_two_sample_recovery_control_cadence() {
         let now = Instant::now();
         let mut poll = PollState::default();
-        let settings = settings();
+        let p = pref(crate::config::Provider::Codex);
         poll.started(now);
-        poll.completed(&settings, Some(&usage(Some(11), Some(8))), now);
+        poll.completed(&p, Some(&usage(Some(11), Some(8))), now);
         assert_eq!(poll.effective_interval_seconds, 60);
-        poll.completed(&settings, Some(&usage(Some(10), Some(8))), now);
+        poll.completed(&p, Some(&usage(Some(10), Some(8))), now);
         assert_eq!(poll.effective_interval_seconds, 15);
-        poll.completed(&settings, Some(&usage(Some(13), Some(10))), now);
+        poll.completed(&p, Some(&usage(Some(13), Some(10))), now);
         assert_eq!(poll.effective_interval_seconds, 15);
-        poll.completed(&settings, Some(&usage(Some(13), None)), now);
-        poll.completed(&settings, Some(&usage(Some(13), Some(10))), now);
+        poll.completed(&p, Some(&usage(Some(13), None)), now);
+        poll.completed(&p, Some(&usage(Some(13), Some(10))), now);
         assert_eq!(poll.effective_interval_seconds, 15);
-        poll.completed(&settings, Some(&usage(Some(13), Some(10))), now);
+        poll.completed(&p, Some(&usage(Some(13), Some(10))), now);
         assert_eq!(poll.effective_interval_seconds, 60);
-        poll.completed(&settings, Some(&usage(Some(90), Some(7))), now);
+        poll.completed(&p, Some(&usage(Some(90), Some(7))), now);
         assert_eq!(poll.effective_interval_seconds, 15);
     }
     #[test]
     fn dsh_cadence_uses_its_own_thresholds_not_local_codex_defaults() {
         let now = Instant::now();
-        let mut settings = settings();
-        settings.provider = crate::config::Provider::Dsh;
+        let mut p = pref(crate::config::Provider::Dsh);
         let mut poll = PollState::default();
-        poll.completed(&settings, Some(&usage(Some(9), Some(9))), now);
+        poll.completed(&p, Some(&usage(Some(9), Some(9))), now);
         assert_eq!(poll.effective_interval_seconds, 60, "DSH 0% thresholds ignore local 5%/2%");
-        poll.completed(&settings, Some(&usage(Some(5), Some(9))), now);
+        poll.completed(&p, Some(&usage(Some(5), Some(9))), now);
         assert_eq!(poll.effective_interval_seconds, 15);
-        settings.dsh_five_hour_threshold_percent = 10;
-        poll.completed(&settings, Some(&usage(Some(15), Some(50))), now);
+        p.five_hour_threshold_percent = 10;
+        poll.completed(&p, Some(&usage(Some(15), Some(50))), now);
         assert_eq!(poll.effective_interval_seconds, 15);
     }
     #[test]
     fn errors_back_off_and_long_reads_do_not_catch_up() {
         let now = Instant::now();
         let mut poll = PollState::default();
-        let settings = settings();
+        let p = pref(crate::config::Provider::Codex);
         poll.started(now);
         poll.completed(
-            &settings,
+            &p,
             Some(&usage(Some(5), Some(50))),
             now + Duration::from_secs(20),
         );
         assert_eq!(poll.deadline(now), now + Duration::from_secs(25));
         for expected in [30, 60, 120, 240, 300, 300] {
-            poll.completed(&settings, None, now);
+            poll.completed(&p, None, now);
             assert_eq!(poll.effective_interval_seconds, expected);
         }
-        poll.completed(&settings, Some(&usage(Some(5), Some(50))), now);
+        poll.completed(&p, Some(&usage(Some(5), Some(50))), now);
         assert_eq!(poll.effective_interval_seconds, 15);
     }
     #[test]
     fn transient_recovery_starts_after_completion_and_does_not_reset_on_settings_changes() {
         let now = Instant::now();
         let mut poll = PollState::default();
-        let mut settings = settings();
+        let p = pref(crate::config::Provider::Codex);
         for expected in [15, 30, 60, 120, 240, 300, 300] {
             poll.started(now);
             let completed = now + Duration::from_secs(45);
-            poll.completed_with_recovery(&settings, None, completed, ReadRecovery { transient: true, ..Default::default() });
+            poll.completed_with_recovery(&p, None, completed, ReadRecovery { transient: true, ..Default::default() });
             assert_eq!(poll.effective_interval_seconds, expected);
             assert_eq!(poll.deadline(completed), completed + Duration::from_secs(expected));
-            settings.language = "en-US".into();
-            poll.recalculate(&settings, completed);
+            poll.recalculate(&p, completed);
             assert_eq!(poll.effective_interval_seconds, expected);
-            assert_eq!(poll.healthy_interval_seconds(&settings), 60);
+            assert_eq!(poll.healthy_interval_seconds(&p), 60);
         }
-        poll.completed(&settings, Some(&usage(Some(80), Some(80))), now);
+        poll.completed(&p, Some(&usage(Some(80), Some(80))), now);
         assert_eq!(poll.effective_interval_seconds, 60);
     }
 
@@ -256,14 +255,14 @@ mod tests {
     fn server_delay_and_display_only_recovery_are_respected() {
         let now = Instant::now();
         let mut poll = PollState::default();
-        let settings = settings();
+        let p = pref(crate::config::Provider::Codex);
         poll.started(now);
-        poll.completed_with_recovery(&settings, None, now, ReadRecovery { transient: true, retry_after_seconds: Some(90), display_only: false });
+        poll.completed_with_recovery(&p, None, now, ReadRecovery { transient: true, retry_after_seconds: Some(90), display_only: false });
         poll.request_now(now + Duration::from_secs(1));
         assert_eq!(poll.deadline(now), now + Duration::from_secs(90));
         assert_eq!(poll.server_wait(now), Some(Duration::from_secs(90)));
         let received = now + Duration::from_secs(100);
-        poll.completed_with_recovery(&settings, Some(&usage(Some(70), Some(80))), received, ReadRecovery { display_only: true, ..Default::default() });
+        poll.completed_with_recovery(&p, Some(&usage(Some(70), Some(80))), received, ReadRecovery { display_only: true, ..Default::default() });
         assert_eq!(poll.deadline(received), received + Duration::from_secs(15));
         assert_eq!(poll.server_wait(received), None);
     }
@@ -272,12 +271,12 @@ mod tests {
     fn disabling_and_immediate_wake_replace_the_old_deadline() {
         let now = Instant::now();
         let mut poll = PollState::default();
-        let mut settings = settings();
+        let mut p = pref(crate::config::Provider::Codex);
         poll.started(now);
-        poll.completed(&settings, Some(&usage(Some(0), Some(0))), now);
-        settings.auto_pause_on_low_quota = false;
-        settings.refresh_interval_seconds = 300;
-        poll.recalculate(&settings, now);
+        poll.completed(&p, Some(&usage(Some(0), Some(0))), now);
+        p.protection_enabled = false;
+        p.refresh_interval_seconds = 300;
+        poll.recalculate(&p, now);
         assert_eq!(poll.effective_interval_seconds, 300);
         assert_eq!(poll.deadline(now), now + Duration::from_secs(300));
         poll.request_now(now);
@@ -287,17 +286,18 @@ mod tests {
     #[tokio::test]
     async fn a_settings_wakeup_interrupts_an_old_sleep_without_waiting_for_its_deadline() {
         let dir = std::env::temp_dir().join(format!("overlay-poll-wakeup-{}", std::process::id()));
-        let state = std::sync::Arc::new(crate::commands::AppState::for_test(
+        let owner = crate::commands::AppState::for_test(
             crate::config::ConfigManager::with_runtime_dir(dir.clone()),
-        ));
+        );
+        let state = owner.monitors.get(crate::config::Provider::Codex);
         {
             let mut polling = state.polling.lock().unwrap();
             polling.started(Instant::now());
-            let settings = OverlaySettings {
+            let p = ProviderPreference {
                 refresh_interval_seconds: 300,
-                ..Default::default()
+                ..ProviderPreference::default_for(crate::config::Provider::Codex)
             };
-            polling.recalculate(&settings, Instant::now());
+            polling.recalculate(&p, Instant::now());
         }
         let waiter = {
             let state = state.clone();

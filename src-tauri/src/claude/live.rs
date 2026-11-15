@@ -14,13 +14,11 @@ use std::time::{Duration, Instant};
 
 use super::shared::{self, Snapshot, WindowSnapshot};
 use crate::codex::reader::{FailureKind, ReadFailure, ReadStage};
+pub use crate::live_poll::MIN_INTERVAL;
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 const TIMEOUT: Duration = Duration::from_secs(20);
-/// The endpoint is asked at most this often, also while protection polls
-/// every 15 seconds near a threshold.
-pub const MIN_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_RETRY_AFTER_SECS: u64 = 120;
 /// Claude Code is asked to renew its login at most this often, so a signed
 /// out CLI is not started every minute.
@@ -28,53 +26,30 @@ const RENEW_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const RENEW_TIMEOUT: Duration = Duration::from_secs(30);
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-/// What live reading remembers between polls.
+pub type LiveStep = crate::live_poll::LiveStep<Snapshot>;
+
+/// What live reading remembers between polls, including login renewal backoff.
 #[derive(Debug, Default)]
 pub struct LiveState {
-    /// The last answer and when it arrived.
-    pub answer: Option<(Instant, Snapshot)>,
-    /// The last failed request, kept until a request succeeds.
-    pub failure: Option<ReadFailure>,
-    /// No request is made before this instant: the minimum interval after an
-    /// answer, the server's `Retry-After` after a refusal.
-    next_request: Option<Instant>,
+    poll: crate::live_poll::LiveState<Snapshot>,
     last_renewal: Option<Instant>,
 }
 
-#[derive(Debug, PartialEq)]
-pub enum LiveStep {
-    Answer(Snapshot),
-    Failure(ReadFailure),
-    Request,
+impl std::ops::Deref for LiveState {
+    type Target = crate::live_poll::LiveState<Snapshot>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.poll
+    }
+}
+
+impl std::ops::DerefMut for LiveState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.poll
+    }
 }
 
 impl LiveState {
-    pub fn step(&self, now: Instant) -> LiveStep {
-        if self.next_request.is_none_or(|at| now >= at) {
-            return LiveStep::Request;
-        }
-        match (&self.failure, &self.answer) {
-            (Some(failure), _) => LiveStep::Failure(failure.clone()),
-            (None, Some((_, snapshot))) => LiveStep::Answer(snapshot.clone()),
-            (None, None) => LiveStep::Request,
-        }
-    }
-
-    pub fn record(&mut self, now: Instant, result: &Result<Snapshot, ReadFailure>) {
-        let wait = match result {
-            Ok(snapshot) => {
-                self.answer = Some((now, snapshot.clone()));
-                self.failure = None;
-                MIN_INTERVAL
-            }
-            Err(failure) => {
-                self.failure = Some(failure.clone());
-                failure.retry_after_seconds.map_or(MIN_INTERVAL, Duration::from_secs).max(MIN_INTERVAL)
-            }
-        };
-        self.next_request = Some(now + wait);
-    }
-
     /// Takes the renewal slot when an expired or refused login may be renewed.
     pub fn take_renewal(&mut self, now: Instant, failure: &ReadFailure) -> bool {
         let due = failure.kind == FailureKind::Authentication

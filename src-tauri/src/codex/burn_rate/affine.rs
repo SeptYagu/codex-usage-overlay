@@ -1,6 +1,13 @@
 //! Continuous causal calibration. No retrospective reconstruction of predictions.
 use serde::{Deserialize, Serialize};
-use super::personal::MaturedOutcome;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AffineSample {
+    pub elapsed_seconds: i64,
+    pub observed_delta: f64,
+    pub fixed_predicted_delta: f64,
+    pub confidence: f64,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all="camelCase", default)]
@@ -37,7 +44,7 @@ impl AffineCalibration {
         let result=(x+trust*(slope*x+offset-x)).clamp(0.75*x,1.5*x)*12.;
         (result.is_finite() && result>=0.).then_some(result)
     }
-    pub fn learn(&mut self, base:f64, f:&MaturedOutcome, at:i64) {
+    pub fn learn(&mut self, base:f64, f:&AffineSample, at:i64) {
         let x=base/12.;let y=f.observed_delta*300./f.elapsed_seconds as f64;
         if !x.is_finite() || !y.is_finite() || x<0. || y<0. || !(300..=390).contains(&f.elapsed_seconds)
             || !(x*x).is_finite() || !(x*y).is_finite() { return; }
@@ -52,14 +59,11 @@ impl AffineCalibration {
 pub fn recover<'de,D:serde::Deserializer<'de>>(d:D)->Result<AffineCalibration,D::Error>{
     let value=serde_json::Value::deserialize(d)?;Ok(serde_json::from_value(value).unwrap_or_default())
 }
-pub fn recover_rate<'de,D:serde::Deserializer<'de>>(d:D)->Result<Option<f64>,D::Error>{
-    let v=serde_json::Value::deserialize(d)?;Ok(v.as_f64().filter(|v|v.is_finite() && *v>=0.))
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn feedback()->MaturedOutcome { MaturedOutcome{elapsed_seconds:300,predicted_delta:3.,observed_delta:4.,confidence:1.,published_predicted_delta:Some(3.),fixed_predicted_delta:3.,shadow_predicted_delta:Some(3.)} }
+    fn feedback()->AffineSample { AffineSample{elapsed_seconds:300,observed_delta:4.,fixed_predicted_delta:3.,confidence:1.} }
     #[test]
     fn neutral_and_trained_rates_are_continuous_monotone_and_bounded() {
         let mut model=AffineCalibration::default();assert_eq!(model.rate(36.),Some(36.));
@@ -74,21 +78,5 @@ mod tests {
         f=feedback();f.confidence=0.;let n=model.n;model.learn(36.,&f,1600);assert_eq!(model.n,n*0.99);
         let mut bad=model.clone();bad.version=99;assert!(!bad.valid(Some(1600)));
         let restored:AffineCalibration=serde_json::from_value(serde_json::to_value(&model).unwrap()).unwrap();assert_eq!(restored.rate(36.),model.rate(36.));
-    }
-}
-
-#[cfg(test)]
-mod cross_language_tests {
-    use super::*;
-    #[test]
-    fn every_synthetic_origin_matches_the_independent_javascript_trajectory() {
-        let csv=include_str!("../../../tests/fixtures/affine-parity.csv");let mut model=AffineCalibration::default();let mut count=0;
-        for line in csv.lines().skip(1) {
-            let v:Vec<f64>=line.split(',').map(|v|v.parse().unwrap()).collect();
-            let actual=model.rate(v[0]).unwrap();assert!((actual-v[6]).abs()<=1e-9*v[6].abs().max(1.));
-            let f=MaturedOutcome{elapsed_seconds:v[1] as i64,predicted_delta:v[4],observed_delta:v[2],confidence:v[3],published_predicted_delta:None,fixed_predicted_delta:v[4],shadow_predicted_delta:None};
-            model.learn(v[0],&f,v[5] as i64);assert!(model.valid(Some(v[5] as i64)));count+=1;
-        }
-        assert_eq!(count,96);
     }
 }

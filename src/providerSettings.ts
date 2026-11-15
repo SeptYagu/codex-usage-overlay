@@ -1,31 +1,7 @@
-import { OverlaySettings, Provider, ProviderPreference, SettingsPatch } from './types';
+import { defaultProviderPreference, OverlaySettings, Provider, ProviderPreference, SettingsPatch } from './types';
 
 export function providerPreference(settings: OverlaySettings, provider: Provider): ProviderPreference {
-  return settings.providerPreferences?.[provider] ?? {
-    monitorEnabled: true,
-    protectionEnabled: settings.provider === provider && settings.autoPauseOnLowQuota,
-    fiveHourThresholdPercent: provider === 'dsh' ? settings.dshFiveHourThresholdPercent : settings.autoPauseFiveHourThresholdPercent,
-    weeklyThresholdPercent: provider === 'dsh' ? settings.dshWeeklyThresholdPercent : settings.autoPauseWeeklyThresholdPercent,
-  };
-}
-
-export function settingsForProvider(settings: OverlaySettings, provider: Provider): OverlaySettings {
-  const preference = providerPreference(settings, provider);
-  return { ...settings, provider,
-    fiveHourBurnRateAlgorithm: preference.fiveHourBurnRateAlgorithm ?? (provider === 'codex' ? settings.fiveHourBurnRateAlgorithm ?? 'legacy' : 'legacy'),
-    refreshIntervalSeconds: preference.refreshIntervalSeconds ?? settings.refreshIntervalSeconds,
-    fiveHourResetNotification: preference.fiveHourResetNotification ?? settings.fiveHourResetNotification,
-    weeklyResetNotification: preference.weeklyResetNotification ?? settings.weeklyResetNotification,
-    fiveHourSoundMode: preference.fiveHourSoundMode ?? settings.fiveHourSoundMode,
-    weeklySoundMode: preference.weeklySoundMode ?? settings.weeklySoundMode,
-    fiveHourSoundPath: preference.fiveHourSoundPath === undefined ? settings.fiveHourSoundPath : preference.fiveHourSoundPath,
-    weeklySoundPath: preference.weeklySoundPath === undefined ? settings.weeklySoundPath : preference.weeklySoundPath,
-    autoPauseOnLowQuota: preference.monitorEnabled && preference.protectionEnabled,
-    autoPauseFiveHourThresholdPercent: preference.fiveHourThresholdPercent,
-    autoPauseWeeklyThresholdPercent: preference.weeklyThresholdPercent,
-    dshFiveHourThresholdPercent: provider === 'dsh' ? preference.fiveHourThresholdPercent : settings.dshFiveHourThresholdPercent,
-    dshWeeklyThresholdPercent: provider === 'dsh' ? preference.weeklyThresholdPercent : settings.dshWeeklyThresholdPercent,
-  };
+  return settings.providerPreferences?.[provider] ?? defaultProviderPreference(provider);
 }
 
 export function mergeSettingsPatch(settings: OverlaySettings, patch: SettingsPatch): OverlaySettings {

@@ -19,14 +19,13 @@ fn owner() -> (Arc<AppState>, std::path::PathBuf) {
     settings.migrate();
     config.save_settings_checked(&settings).unwrap();
     let owner = Arc::new(AppState::new(config, settings.clone()));
-    initialize(&owner, &settings);
     (owner, dir)
 }
 
 #[derive(Default)]
 struct Source {
     display_events:StdMutex<Vec<crate::display::Snapshot>>,
-    usage_events:StdMutex<Vec<crate::commands::UsageEnvelope>>,
+    snapshot_events:StdMutex<Vec<crate::monitor::Snapshot>>,
     frames: StdMutex<Vec<Frame>>,
     reads: AtomicUsize,
 }
@@ -37,7 +36,7 @@ struct Frame {
 }
 impl TrayPresentationSink for Source {
     fn publish_display(&self,snapshot:&crate::display::Snapshot){self.display_events.lock().unwrap().push(snapshot.clone());}
-    fn publish_usage(&self,usage:crate::commands::UsageEnvelope){self.usage_events.lock().unwrap().push(usage);}
+    fn publish_snapshot(&self,snapshot:&crate::monitor::Snapshot){self.snapshot_events.lock().unwrap().push(snapshot.clone());}
     fn present(&self, frame: TrayPresentation) {
         self.frames.lock().unwrap().push(Frame {
             tooltip: frame.tooltip,
@@ -70,16 +69,16 @@ fn sample(provider: Provider) -> RawCodexUsage {
     }
 }
 impl UsageSource for Source {
-    async fn read_usage(&self, state: &AppState) -> Result<RawCodexUsage, String> {
+    async fn read_usage(&self, state: &ProviderRuntime) -> Result<RawCodexUsage, String> {
         self.reads.fetch_add(1, Ordering::SeqCst);
-        Ok(sample(state.settings.lock().await.provider))
+        Ok(sample(state.provider))
     }
 }
 
 #[tokio::test]
 async fn background_reads_have_separate_caches_files_and_do_not_repaint_the_selected_tray() {
     let (owner, dir) = owner();
-    let registry = owner.monitors.get().unwrap();
+    let registry = &owner.monitors;
     let source = Source::default();
     let runtimes = registry.all();
     let (a, b, c, d) = tokio::join!(
@@ -207,7 +206,7 @@ async fn background_reads_have_separate_caches_files_and_do_not_repaint_the_sele
 async fn protection_preferences_are_independent_and_disabling_a_monitor_revokes_only_its_runtime() {
     let (owner, dir) = owner();
     let source = Source::default();
-    let registry = owner.monitors.get().unwrap();
+    let registry = &owner.monitors;
     crate::commands::apply_settings_patch(
         &source,
         &owner,
@@ -222,7 +221,8 @@ async fn protection_preferences_are_independent_and_disabling_a_monitor_revokes_
             .settings
             .lock()
             .await
-            .auto_pause_on_low_quota
+            .preference(Provider::Claude)
+            .protection_enabled
     );
     assert!(
         !registry
@@ -230,7 +230,8 @@ async fn protection_preferences_are_independent_and_disabling_a_monitor_revokes_
             .settings
             .lock()
             .await
-            .auto_pause_on_low_quota
+            .preference(Provider::Codex)
+            .protection_enabled
     );
     crate::commands::apply_settings_patch(
         &source,
@@ -246,7 +247,8 @@ async fn protection_preferences_are_independent_and_disabling_a_monitor_revokes_
             .settings
             .lock()
             .await
-            .auto_pause_on_low_quota
+            .preference(Provider::Claude)
+            .protection_enabled
     );
     let guard: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.join("claude-guard.json")).unwrap()).unwrap();
@@ -267,7 +269,7 @@ async fn protection_preferences_are_independent_and_disabling_a_monitor_revokes_
     .await
     .unwrap();
     let claude = registry.get(Provider::Claude);
-    assert!(!claude.settings.lock().await.auto_pause_on_low_quota);
+    assert!(!claude.settings.lock().await.preference(Provider::Claude).monitor_enabled);
     assert!(refresh_usage(&source, &claude).await.is_err());
     assert_eq!(
         registry
@@ -299,13 +301,13 @@ async fn reconnect_freezes_old_context_before_transport_changes_and_cancels_queu
         task::Poll,
     };
     let (owner, dir) = owner();
-    let registry = owner.monitors.get().unwrap();
+    let registry = &owner.monitors;
     let dsh = registry.get(Provider::Dsh);
     let source = Source::default();
     let generation = dsh.source_generation.load(Ordering::Acquire);
     dsh.dsh_control.lock().unwrap().running = true;
     // An already dispatched action owns this gate until its transport finishes.
-    let active_action = dsh.settings_patch.lock().await;
+    let active_action = dsh.source_commit.lock().await;
     let mut freeze = Box::pin(crate::commands::freeze_dsh_connection(&dsh));
     poll_fn(|cx| {
         assert!(freeze.as_mut().poll(cx).is_pending());
@@ -346,11 +348,11 @@ async fn reconnect_freezes_old_context_before_transport_changes_and_cancels_queu
 #[tokio::test]
 async fn account_rebinding_replaces_only_its_source_and_keeps_control_status_revisions_monotonic() {
     let (owner, dir) = owner();
-    let registry = owner.monitors.get().unwrap();
+    let registry = &owner.monitors;
     let codex = registry.get(Provider::Codex);
     let old = registry.get(Provider::Dsh);
     {
-        let _pending_action = old.settings_patch.lock().await;
+        let _pending_action = old.source_commit.lock().await;
         let snapshots =
             tokio::time::timeout(std::time::Duration::from_secs(2), registry.snapshots())
                 .await
@@ -401,8 +403,8 @@ impl TrayPresentationSink for SlowSource {
     }
 }
 impl UsageSource for SlowSource {
-    async fn read_usage(&self, state: &AppState) -> Result<RawCodexUsage, String> {
-        let provider = state.settings.lock().await.provider;
+    async fn read_usage(&self, state: &ProviderRuntime) -> Result<RawCodexUsage, String> {
+        let provider = state.provider;
         if provider == Provider::Codex {
             self.started.add_permits(1);
             self.release.acquire().await.unwrap().forget();
@@ -414,7 +416,7 @@ impl UsageSource for SlowSource {
 #[tokio::test]
 async fn slow_reads_do_not_block_other_providers_and_display_changes_do_not_cancel_them() {
     let (owner, dir) = owner();
-    let registry = owner.monitors.get().unwrap();
+    let registry = &owner.monitors;
     let source = Arc::new(SlowSource {
         started: tokio::sync::Semaphore::new(0),
         release: tokio::sync::Semaphore::new(0),
@@ -458,7 +460,7 @@ async fn slow_reads_do_not_block_other_providers_and_display_changes_do_not_canc
 #[tokio::test]
 async fn disabling_during_a_read_discards_the_result_and_does_not_train_or_repaint() {
     let (owner, dir) = owner();
-    let registry = owner.monitors.get().unwrap();
+    let registry = &owner.monitors;
     let codex = registry.get(Provider::Codex);
     let source = Arc::new(SlowSource {
         started: tokio::sync::Semaphore::new(0),
@@ -491,7 +493,7 @@ async fn disabling_during_a_read_discards_the_result_and_does_not_train_or_repai
 #[test]
 fn migration_preserves_only_the_previously_enabled_protection_and_source_store_paths() {
     for provider in Provider::ALL {
-        let mut legacy: OverlaySettings = serde_json::from_value(serde_json::json!({
+        let mut legacy = crate::config::OverlaySettings::from_json_migrated(&serde_json::json!({
             "provider": provider, "scalePercent": 175, "backgroundTransparencyPercent":23,
             "showCredits":true,"refreshIntervalSeconds":60,"language":"en-US","autoStart":false,
             "autoCheckUpdates":true,"fiveHourResetNotification":true,"weeklyResetNotification":true,
@@ -511,7 +513,7 @@ fn migration_preserves_only_the_previously_enabled_protection_and_source_store_p
     }
     let (owner, dir) = owner();
     let weak = Arc::downgrade(&owner);
-    let registry = owner.monitors.get().unwrap();
+    let registry = &owner.monitors;
     assert_eq!(
         registry
             .get(Provider::Codex)
@@ -536,42 +538,42 @@ fn migration_preserves_only_the_previously_enabled_protection_and_source_store_p
 
 #[tokio::test]
 async fn provider_preference_patch_is_persisted_and_only_reconfigures_its_runtime() {
-    let (owner, dir)=owner(); let registry=owner.monitors.get().unwrap(); let source=Source::default();
+    let (owner, dir)=owner(); let registry=&owner.monitors; let source=Source::default();
     let codex=registry.get(Provider::Codex); let claude=registry.get(Provider::Claude); let dsh=registry.get(Provider::Dsh);
     let codex_revision=codex.settings_revision.load(Ordering::Acquire);
     let dsh_revision=dsh.settings_revision.load(Ordering::Acquire);
     crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"providerPreferences":{"claude":{
         "refreshIntervalSeconds":120,"weeklyResetNotification":false,"fiveHourSoundPath":null
     }}}),false).await.unwrap();
-    assert_eq!(claude.settings.lock().await.refresh_interval_seconds,120);
-    assert!(!claude.settings.lock().await.weekly_reset_notification);
+    assert_eq!(claude.settings.lock().await.preference(Provider::Claude).refresh_interval_seconds,120);
+    assert!(!claude.settings.lock().await.preference(Provider::Claude).weekly_reset_notification);
     assert_eq!(codex.settings_revision.load(Ordering::Acquire),codex_revision);
     assert_eq!(dsh.settings_revision.load(Ordering::Acquire),dsh_revision);
     assert_eq!(source.reads.load(Ordering::SeqCst),0);
-    assert_eq!(owner.config_manager.load_settings().for_provider(Provider::Claude).refresh_interval_seconds,120);
-    assert!(owner.config_manager.load_settings().for_provider(Provider::Codex).weekly_reset_notification);
+    assert_eq!(owner.config_manager.load_settings().preference(Provider::Claude).refresh_interval_seconds,120);
+    assert!(owner.config_manager.load_settings().preference(Provider::Codex).weekly_reset_notification);
     registry.shutdown();drop(codex);drop(claude);drop(dsh);drop(owner);std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
 async fn algorithm_selection_reprojects_cache_without_reading_training_or_clearing_an_error() {
     use crate::config::FiveHourBurnRateAlgorithm as Algorithm;
-    let (owner,dir)=owner();let registry=owner.monitors.get().unwrap();let codex=registry.get(Provider::Codex);let source=Source::default();
+    let (owner,dir)=owner();let registry=&owner.monitors;let codex=registry.get(Provider::Codex);let source=Source::default();
     refresh_usage(&source,&codex).await.unwrap();
     crate::commands::process_usage_error(&source,&codex).await;
     let memory=codex.burn_rate.lock().await.test_snapshot();
     let file=std::fs::read(codex.config_manager.burn_rate_state_path()).unwrap();
     let fetched=codex.last_usage.lock().await.as_ref().unwrap().fetched_at;
     let revision=codex.presentation.lock().unwrap().metadata.presentation_revision;
-    let count=source.usage_events.lock().unwrap().len();
-    crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"fiveHourBurnRateAlgorithm":"weighted"}),false).await.unwrap();
+    let count=source.snapshot_events.lock().unwrap().len();
+    crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"providerPreferences":{"codex":{"fiveHourBurnRateAlgorithm":"weighted"}}}),false).await.unwrap();
     assert_eq!(source.reads.load(Ordering::SeqCst),1);
     assert_eq!(codex.burn_rate.lock().await.test_snapshot(),memory);
     assert_eq!(std::fs::read(codex.config_manager.burn_rate_state_path()).unwrap(),file);
     assert_eq!(codex.last_usage.lock().await.as_ref().unwrap().fetched_at,fetched);
     assert!(matches!(*codex.tray_read_status.lock().await,crate::tray::TrayReadStatus::Error));
-    let events=source.usage_events.lock().unwrap();assert_eq!(events.len(),count+1);
-    let event=events.last().unwrap();assert_eq!(event.presentation.presentation_revision,revision+1);
+    let events=source.snapshot_events.lock().unwrap();assert_eq!(events.len(),count+1);
+    let event=events.last().unwrap().usage.as_ref().unwrap();assert_eq!(event.presentation.presentation_revision,revision+1);
     assert_eq!(event.presentation.requested_algorithm,Some(Algorithm::Weighted));
     assert_eq!(event.presentation.settings_revision,owner.settings_revision.load(Ordering::Acquire));drop(events);
     registry.shutdown();drop(codex);drop(owner);std::fs::remove_dir_all(dir).unwrap();
@@ -579,10 +581,10 @@ async fn algorithm_selection_reprojects_cache_without_reading_training_or_cleari
 
 #[tokio::test]
 async fn reprojection_keeps_the_codex_tray_label_while_the_carousel_is_on() {
-    let (owner,dir)=owner();let registry=owner.monitors.get().unwrap();let codex=registry.get(Provider::Codex);let source=Source::default();
+    let (owner,dir)=owner();let registry=&owner.monitors;let codex=registry.get(Provider::Codex);let source=Source::default();
     refresh_usage(&source,&codex).await.unwrap();
     owner.carousel_enabled.store(true,Ordering::Release);
-    {let _commit=codex.settings_patch.lock().await;crate::presentation::reproject_locked(&source,&codex).await;}
+    {let _commit=codex.source_commit.lock().await;crate::presentation::reproject_locked(&source,&codex).await;}
     let tooltip=source.frames.lock().unwrap().last().expect("the reprojection must repaint the tray").tooltip.clone();
     assert!(tooltip.contains("Codex"),"tooltip lost the provider label: {tooltip}");
     registry.shutdown();drop(codex);drop(owner);std::fs::remove_dir_all(dir).unwrap();
@@ -590,12 +592,13 @@ async fn reprojection_keeps_the_codex_tray_label_while_the_carousel_is_on() {
 
 #[tokio::test]
 async fn fast_protection_cadence_does_not_report_learning_paused_from_the_normal_interval() {
-    let (owner,dir)=owner();let registry=owner.monitors.get().unwrap();let codex=registry.get(Provider::Codex);let source=Source::default();
+    let (owner,dir)=owner();let registry=&owner.monitors;let codex=registry.get(Provider::Codex);let source=Source::default();
     refresh_usage(&source,&codex).await.unwrap();
-    {let _commit=codex.settings_patch.lock().await;
-        let settings={let mut s=codex.settings.lock().await;s.refresh_interval_seconds=120;s.auto_pause_on_low_quota=true;s.five_hour_burn_rate_algorithm=crate::config::FiveHourBurnRateAlgorithm::Personalized;s.clone()};
+    {let _commit=codex.source_commit.lock().await;
+        let settings={let mut s=codex.settings.lock().await;let p=s.preference_mut(Provider::Codex);p.refresh_interval_seconds=120;p.protection_enabled=true;p.five_hour_burn_rate_algorithm=crate::config::FiveHourBurnRateAlgorithm::Personalized;s.clone()};
         let mut usage=codex.last_usage.lock().await.clone().unwrap();usage.five_hour_remaining_percent=Some(5);
-        codex.polling.lock().unwrap().completed(&settings,Some(&usage),std::time::Instant::now());
+        let pref = settings.preference(Provider::Codex);
+        codex.polling.lock().unwrap().completed(&pref,Some(&usage),std::time::Instant::now());
         codex.presentation.lock().unwrap().source.as_mut().unwrap().candidates.learning="active";
         crate::presentation::reproject_locked(&source,&codex).await;
         assert_eq!(codex.presentation.lock().unwrap().metadata.personal_learning_status,Some("active"));
@@ -609,7 +612,7 @@ async fn fast_protection_cadence_does_not_report_learning_paused_from_the_normal
 
 #[tokio::test]
 async fn carousel_ticks_publish_effective_cache_selection_without_writes_reads_or_runtime_changes() {
-    let (owner,dir)=owner();let source=Source::default();let registry=owner.monitors.get().unwrap();
+    let (owner,dir)=owner();let source=Source::default();let registry=&owner.monitors;
     for state in registry.all(){refresh_usage(&source,&state).await.unwrap();}
     crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselEnabled":true}),false).await.unwrap();
     let saved=std::fs::read(owner.config_manager.runtime_dir().join("settings.json")).unwrap();
@@ -631,7 +634,7 @@ async fn carousel_ticks_publish_effective_cache_selection_without_writes_reads_o
 }
 #[tokio::test]
 async fn carousel_filters_selected_fresh_identity_bound_sources_and_retains_transient_cached_readings() {
-    let (owner,dir)=owner();let source=Source::default();let registry=owner.monitors.get().unwrap();
+    let (owner,dir)=owner();let source=Source::default();let registry=&owner.monitors;
     for state in registry.all(){refresh_usage(&source,&state).await.unwrap();}
     crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselEnabled":true,"providerPreferences":{"dsh":{"carouselIncluded":false},"antigravity":{"carouselIncluded":false}}}),false).await.unwrap();
     let claude=registry.get(Provider::Claude);claude.reader.lock().unwrap().failure=Some(crate::codex::reader::ReadFailure::timeout(crate::codex::reader::ReadStage::Quota));
@@ -646,7 +649,7 @@ async fn carousel_filters_selected_fresh_identity_bound_sources_and_retains_tran
 }
 #[tokio::test]
 async fn manual_next_starts_from_effective_page_and_disabling_freezes_it_in_one_save() {
-    let (owner,dir)=owner();let source=Source::default();let registry=owner.monitors.get().unwrap();
+    let (owner,dir)=owner();let source=Source::default();let registry=&owner.monitors;
     for state in registry.all(){refresh_usage(&source,&state).await.unwrap();}
     crate::commands::apply_settings_patch(&source,&owner,serde_json::json!({"quotaCarouselEnabled":true}),false).await.unwrap();
     let now=std::time::Instant::now();crate::display::tick(&source,&owner,now+std::time::Duration::from_secs(9),false).await;

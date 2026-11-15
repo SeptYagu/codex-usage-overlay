@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import { mergeSettingsPatch } from './providerSettings';
 import i18n, { matchSupportedLocale } from './i18n';
-import { CodexUsage, DEFAULT_SETTINGS, OverlaySettings, SettingsEnvelope, DisplayState } from './types';
+import { CodexUsage, DEFAULT_SETTINGS, OverlaySettings, SettingsEnvelope, DisplayState, MonitorSnapshot, Provider } from './types';
 
 const tauri = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -12,7 +12,7 @@ const tauri = vi.hoisted(() => ({
   setTitle: vi.fn(async () => {}),
   setSize: vi.fn(async () => {}),
   windowLabel: 'settings',
-  usageRegistration: null as Promise<void> | null,
+  monitorRegistration: null as Promise<void> | null,
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: tauri.invoke }));
@@ -29,7 +29,7 @@ vi.mock('@tauri-apps/api/window', () => ({
 vi.mock('@tauri-apps/api/event', () => ({
   listen: async (name: string, callback: (event: { payload: unknown }) => void) => {
     tauri.listeners.set(name, callback);
-    if (name === 'usage_updated' && tauri.usageRegistration) await tauri.usageRegistration;
+    if (name === 'monitor_updated' && tauri.monitorRegistration) await tauri.monitorRegistration;
     return () => { if(tauri.listeners.get(name)===callback)tauri.listeners.delete(name); };
   },
 }));
@@ -41,7 +41,13 @@ const savedSettings: OverlaySettings = {
   showCredits: false,
   showFiveHourQuota: true,
   showBurnRate: true,
-  refreshIntervalSeconds: 300,
+  providerPreferences: {
+    ...DEFAULT_SETTINGS.providerPreferences,
+    codex: {
+      ...DEFAULT_SETTINGS.providerPreferences.codex,
+      refreshIntervalSeconds: 300,
+    },
+  },
   language: 'en-US',
   overlayLayout: 'stacks',
   autoStart: false,
@@ -58,7 +64,7 @@ let serverRevision: number;
 
 beforeEach(async () => {
   tauri.windowLabel = 'settings';
-  tauri.usageRegistration = null;
+  tauri.monitorRegistration = null;
   tauri.invoke.mockReset();
   tauri.listeners.clear();
   serverSettings = { ...savedSettings };
@@ -92,7 +98,7 @@ describe('settings synchronization', () => {
     expect(layout.value).toBe('grouped');
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', { patch: { overlayLayout: 'grouped' } }));
     expect(serverSettings.scalePercent).toBe(220);
-    expect(serverSettings.weeklyResetNotification).toBe(true);
+    expect(serverSettings.providerPreferences.codex.weeklyResetNotification).toBe(true);
   });
 
   it('keeps quota notifications independent and patches sound mode by field', async () => {
@@ -105,7 +111,7 @@ describe('settings synchronization', () => {
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
       patch: { providerPreferences: {codex:{ fiveHourResetNotification: false }} },
     }));
-    expect(serverSettings.weeklyResetNotification).toBe(true);
+    expect(serverSettings.providerPreferences.codex.weeklyResetNotification).toBe(true);
 
     fireEvent.change(codex.getByRole('combobox', { name: 'Weekly quota reset notification Alert sound' }), {
       target: { value: 'custom' },
@@ -271,14 +277,32 @@ describe('main usage startup', () => {
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
   });
 
-  function mockCache(response: CodexUsage | null | Promise<CodexUsage | null>) {
+  const makeSnapshot = (
+    provider: Provider,
+    usage: CodexUsage | null,
+    revision: number,
+    sourceKey: string = provider,
+    sourceGeneration = 0,
+  ): MonitorSnapshot => ({
+    provider,
+    sourceKey,
+    sourceGeneration,
+    revision,
+    monitorEnabled: true,
+    available: Boolean(usage),
+    health: usage ? 'current' : 'checking',
+    error: null,
+    usage,
+  });
+
+  function mockSnapshots(response: MonitorSnapshot[] | Promise<MonitorSnapshot[]>) {
     tauri.invoke.mockImplementation(async (command: string) => {
       if (command === 'get_settings') return { revision: 0, settings: DEFAULT_SETTINGS };
       if (command === 'get_dock_state') {
         return { docked: false, edge: null, expanded: true, hidden: false };
       }
-      if (command === 'get_last_usage') {
-        expect(tauri.listeners.has('usage_updated')).toBe(true);
+      if (command === 'get_monitor_snapshots') {
+        expect(tauri.listeners.has('monitor_updated')).toBe(true);
         return response;
       }
       if (command === 'fetch_usage') throw new Error('startup must not fetch');
@@ -289,15 +313,10 @@ describe('main usage startup', () => {
   it('switches to cached background readings immediately and never displays another provider’s late update', async () => {
     const codex = { ...cached, sourceKey: 'codex', sourceGeneration: 0 };
     const claude = { ...cached, fiveHourRemainingPercent: 41, sourceKey: 'claude', sourceGeneration: 0 };
-    const snapshot = (provider: 'codex' | 'claude', usage: CodexUsage, revision: number) => ({
-      provider, sourceKey: provider, sourceGeneration: 0, revision, monitorEnabled: true, available: true,
-      health: 'current', error: null, usage,
-    });
     tauri.invoke.mockImplementation(async (command: string) => {
       if (command === 'get_settings') return { revision: 0, settings: DEFAULT_SETTINGS, sourceKey: 'codex', sourceGeneration: 0 };
       if (command === 'get_dock_state') return { docked: false, edge: null, expanded: true, hidden: false };
-      if (command === 'get_last_usage') return codex;
-      if (command === 'get_monitor_snapshots') return [snapshot('codex', codex, 1), snapshot('claude', claude, 2)];
+      if (command === 'get_monitor_snapshots') return [makeSnapshot('codex', codex, 1), makeSnapshot('claude', claude, 2)];
       if (command === 'cycle_display_provider') return { revision: 1, settings: { ...DEFAULT_SETTINGS, provider: 'claude' }, sourceKey: 'claude', sourceGeneration: 0 };
       if (command === 'fetch_usage') throw new Error('Switching must use cache');
       return null;
@@ -307,99 +326,113 @@ describe('main usage startup', () => {
     const logo = await screen.findByRole('button', { name: 'Showing Local Codex. Click to show Claude.' });
     fireEvent.click(logo);
     await screen.findByText('41%');
-    act(() => tauri.listeners.get('monitor_updated')!({ payload: snapshot('codex', { ...codex, fiveHourRemainingPercent: 12 }, 3) }));
+    act(() => tauri.listeners.get('monitor_updated')!({ payload: makeSnapshot('codex', { ...codex, fiveHourRemainingPercent: 12 }, 3) }));
     expect(screen.queryByText('12%')).toBeNull();
     expect(screen.getByText('41%')).toBeTruthy();
-    act(() => tauri.listeners.get('monitor_updated')!({ payload: snapshot('claude', { ...claude, fiveHourRemainingPercent: 40 }, 4) }));
+    act(() => tauri.listeners.get('monitor_updated')!({ payload: makeSnapshot('claude', { ...claude, fiveHourRemainingPercent: 40 }, 4) }));
     expect(screen.getByText('40%')).toBeTruthy();
     expect(tauri.invoke).not.toHaveBeenCalledWith('fetch_usage');
   });
 
-  it('orders display events, rejects mismatched source generations and keeps auto pages through ordinary settings saves',async()=>{
-    const hydration=deferred<DisplayState>();
-    const codex={...cached,sourceKey:'codex',sourceGeneration:0};
-    const claude={...cached,fiveHourRemainingPercent:41,sourceKey:'claude',sourceGeneration:1};
-    const selected:DisplayState={revision:2,settingsRevision:0,effectiveProvider:'claude',manualProvider:'codex',sourceKey:'claude',sourceGeneration:1,carouselEnabled:false,intervalSeconds:8,candidates:[],pauseReasons:[],status:'off'};
-    tauri.invoke.mockImplementation(async(command:string)=>{
-      if(command==='get_settings')return {revision:0,settings:DEFAULT_SETTINGS,sourceKey:'codex',sourceGeneration:0};
-      if(command==='get_display_state')return hydration.promise;
-      if(command==='get_dock_state')return {docked:false,edge:null,expanded:true,hidden:false};
-      if(command==='get_monitor_snapshots')return [{provider:'codex',sourceKey:'codex',sourceGeneration:0,revision:1,monitorEnabled:true,available:true,health:'current',error:null,usage:codex},{provider:'claude',sourceKey:'claude',sourceGeneration:0,revision:2,monitorEnabled:true,available:true,health:'current',error:null,usage:{...claude,sourceGeneration:0}}];
+  it('orders display events, rejects mismatched source generations and keeps auto pages through ordinary settings saves', async () => {
+    const hydration = deferred<DisplayState>();
+    const codex = { ...cached, sourceKey: 'codex', sourceGeneration: 0 };
+    const claude = { ...cached, fiveHourRemainingPercent: 41, sourceKey: 'claude', sourceGeneration: 1 };
+    const selected: DisplayState = { revision: 2, settingsRevision: 0, effectiveProvider: 'claude', manualProvider: 'codex', sourceKey: 'claude', sourceGeneration: 1, carouselEnabled: false, intervalSeconds: 8, candidates: [], pauseReasons: [], status: 'off' };
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === 'get_settings') return { revision: 0, settings: DEFAULT_SETTINGS, sourceKey: 'codex', sourceGeneration: 0 };
+      if (command === 'get_display_state') return hydration.promise;
+      if (command === 'get_dock_state') return { docked: false, edge: null, expanded: true, hidden: false };
+      if (command === 'get_monitor_snapshots') return [makeSnapshot('codex', codex, 1), makeSnapshot('claude', { ...claude, sourceGeneration: 0 }, 2, 'claude', 0)];
       return null;
     });
-    const view=render(<App/>);await screen.findByText('69%');
-    act(()=>tauri.listeners.get('display_updated')!({payload:selected}));expect(screen.queryByText('69%')).toBeNull();expect(screen.queryByText('41%')).toBeNull();
-    act(()=>tauri.listeners.get('usage_updated')!({payload:claude}));expect(screen.getByText('41%')).toBeTruthy();
-    act(()=>tauri.listeners.get('settings_updated')!({payload:{revision:1,settings:{...DEFAULT_SETTINGS,language:'en-US'},sourceKey:'codex',sourceGeneration:0}}));expect(screen.getByText('41%')).toBeTruthy();
-    await act(async()=>hydration.resolve({...selected,revision:1,effectiveProvider:'codex',sourceKey:'codex',sourceGeneration:0}));expect(screen.getByText('41%')).toBeTruthy();
-    act(()=>tauri.listeners.get('usage_updated')!({payload:{...codex,fetchedAt:9999999999,fiveHourRemainingPercent:12}}));expect(screen.queryByText('12%')).toBeNull();
-    expect(view.container.querySelector('.overlay-provider svg')?.getAttribute('data-provider')).toBe('claude');expect(tauri.invoke).not.toHaveBeenCalledWith('fetch_usage');
-  });
-
-  it.each([false,true])('keeps early readings in separate source slots with higher foreign generations (StrictMode=%s)',async(strict)=>{
-    const selected:DisplayState={revision:1,settingsRevision:0,effectiveProvider:'codex',manualProvider:'codex',sourceKey:'codex',sourceGeneration:0,carouselEnabled:false,intervalSeconds:8,candidates:[],pauseReasons:[],status:'off'};
-    tauri.invoke.mockImplementation(async(command:string)=>{
-      if(command==='get_settings')return {revision:0,settings:DEFAULT_SETTINGS,sourceKey:'codex',sourceGeneration:0};
-      if(command==='get_display_state')return selected;
-      if(command==='get_dock_state')return {docked:false,edge:null,expanded:true,hidden:false};
-      if(command==='get_last_usage')return {...cached,sourceKey:'codex',sourceGeneration:0};
-      return null;
-    });
-    render(strict?<StrictMode><App/></StrictMode>:<App/>);await screen.findByText('69%');
-    act(()=>{
-      tauri.listeners.get('usage_updated')!({payload:{...cached,fiveHourRemainingPercent:22,sourceKey:'dsh-old',sourceGeneration:8}});
-      tauri.listeners.get('usage_updated')!({payload:{...cached,fiveHourRemainingPercent:41,sourceKey:'claude',sourceGeneration:1}});
-      tauri.listeners.get('display_updated')!({payload:{...selected,revision:2,effectiveProvider:'claude',sourceKey:'claude',sourceGeneration:1}});
-    });
-    expect(await screen.findByText('41%')).toBeTruthy();expect(screen.queryByText('22%')).toBeNull();expect(screen.queryByText('69%')).toBeNull();
-  });
-
-  it('registers the usage listener before reading cache and does not auto-fetch', async () => {
-    mockCache(cached);
-    render(<App />);
-    expect(await screen.findByText('69%')).toBeTruthy();
-    expect(tauri.invoke).toHaveBeenCalledWith('get_last_usage');
+    const view = render(<App />);
+    await screen.findByText('69%');
+    act(() => tauri.listeners.get('display_updated')!({ payload: selected }));
+    expect(screen.queryByText('69%')).toBeNull();
+    expect(screen.queryByText('41%')).toBeNull();
+    act(() => tauri.listeners.get('monitor_updated')!({ payload: makeSnapshot('claude', claude, 3, 'claude', 1) }));
+    expect(screen.getByText('41%')).toBeTruthy();
+    act(() => tauri.listeners.get('settings_updated')!({ payload: { revision: 1, settings: { ...DEFAULT_SETTINGS, language: 'en-US' }, sourceKey: 'codex', sourceGeneration: 0 } }));
+    expect(screen.getByText('41%')).toBeTruthy();
+    await act(async () => hydration.resolve({ ...selected, revision: 1, effectiveProvider: 'codex', sourceKey: 'codex', sourceGeneration: 0 }));
+    expect(screen.getByText('41%')).toBeTruthy();
+    act(() => tauri.listeners.get('monitor_updated')!({ payload: makeSnapshot('codex', { ...codex, fetchedAt: 9999999999, fiveHourRemainingPercent: 12 }, 4) }));
+    expect(screen.queryByText('12%')).toBeNull();
+    expect(view.container.querySelector('.overlay-provider svg')?.getAttribute('data-provider')).toBe('claude');
     expect(tauri.invoke).not.toHaveBeenCalledWith('fetch_usage');
   });
 
-  it.each([0, 1])('keeps a live event over delayed cache with timestamp difference %i', async (difference) => {
-    const cache = deferred<CodexUsage | null>();
-    mockCache(cache.promise);
+  it.each([false, true])('keeps early readings in separate provider snapshot slots across higher foreign generations (StrictMode=%s)', async (strict) => {
+    const selected: DisplayState = { revision: 1, settingsRevision: 0, effectiveProvider: 'codex', manualProvider: 'codex', sourceKey: 'codex', sourceGeneration: 0, carouselEnabled: false, intervalSeconds: 8, candidates: [], pauseReasons: [], status: 'off' };
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === 'get_settings') return { revision: 0, settings: DEFAULT_SETTINGS, sourceKey: 'codex', sourceGeneration: 0 };
+      if (command === 'get_display_state') return selected;
+      if (command === 'get_dock_state') return { docked: false, edge: null, expanded: true, hidden: false };
+      if (command === 'get_monitor_snapshots') return [makeSnapshot('codex', { ...cached, sourceKey: 'codex', sourceGeneration: 0 }, 1)];
+      return null;
+    });
+    render(strict ? <StrictMode><App /></StrictMode> : <App />);
+    await screen.findByText('69%');
+    act(() => {
+      tauri.listeners.get('monitor_updated')!({ payload: makeSnapshot('dsh', { ...cached, fiveHourRemainingPercent: 22, sourceKey: 'dsh-old', sourceGeneration: 8 }, 2, 'dsh-old', 8) });
+      tauri.listeners.get('monitor_updated')!({ payload: makeSnapshot('claude', { ...cached, fiveHourRemainingPercent: 41, sourceKey: 'claude', sourceGeneration: 1 }, 3, 'claude', 1) });
+      tauri.listeners.get('display_updated')!({ payload: { ...selected, revision: 2, effectiveProvider: 'claude', sourceKey: 'claude', sourceGeneration: 1 } });
+    });
+    expect(await screen.findByText('41%')).toBeTruthy();
+    expect(screen.queryByText('22%')).toBeNull();
+    expect(screen.queryByText('69%')).toBeNull();
+  });
+
+  it('registers the monitor listener before reading snapshots and never calls legacy get_last_usage', async () => {
+    mockSnapshots([makeSnapshot('codex', cached, 1)]);
     render(<App />);
-    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('get_last_usage'));
-    const live = { ...cached, fiveHourRemainingPercent: 68, fetchedAt: cached.fetchedAt + difference };
-    act(() => tauri.listeners.get('usage_updated')!({ payload: live }));
+    expect(await screen.findByText('69%')).toBeTruthy();
+    expect(tauri.invoke).toHaveBeenCalledWith('get_monitor_snapshots');
+    expect(tauri.invoke).not.toHaveBeenCalledWith('get_last_usage');
+    expect(tauri.invoke).not.toHaveBeenCalledWith('fetch_usage');
+    expect(tauri.listeners.has('usage_updated')).toBe(false);
+  });
+
+  it('keeps a live snapshot revision over delayed hydration snapshots', async () => {
+    const hydration = deferred<MonitorSnapshot[]>();
+    mockSnapshots(hydration.promise);
+    render(<App />);
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('get_monitor_snapshots'));
+    act(() => tauri.listeners.get('monitor_updated')!({ payload: makeSnapshot('codex', { ...cached, fiveHourRemainingPercent: 68 }, 2) }));
     expect(await screen.findByText('68%')).toBeTruthy();
-    await act(async () => cache.resolve(cached));
+    await act(async () => hydration.resolve([makeSnapshot('codex', cached, 1)]));
     expect(screen.getByText('68%')).toBeTruthy();
     expect(screen.queryByText('69%')).toBeNull();
   });
 
-  it('accepts successive live events in the same second and rejects older samples', async () => {
-    mockCache(cached);
+  it('accepts successive live monitor snapshots in the same second and rejects older samples', async () => {
+    mockSnapshots([makeSnapshot('codex', { ...cached, sourceKey: 'codex', sourceGeneration: 0, presentationRevision: 1 }, 1)]);
     render(<App />);
     await screen.findByText('69%');
-    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fiveHourRemainingPercent: 68 } }));
+    act(() => tauri.listeners.get('monitor_updated')!({ payload: makeSnapshot('codex', { ...cached, sourceKey: 'codex', sourceGeneration: 0, presentationRevision: 2, fiveHourRemainingPercent: 68 }, 2) }));
     expect(screen.getByText('68%')).toBeTruthy();
-    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fiveHourRemainingPercent: 67 } }));
+    act(() => tauri.listeners.get('monitor_updated')!({ payload: makeSnapshot('codex', { ...cached, sourceKey: 'codex', sourceGeneration: 0, presentationRevision: 3, fiveHourRemainingPercent: 67 }, 3) }));
     expect(screen.getByText('67%')).toBeTruthy();
-    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fetchedAt: cached.fetchedAt - 1 } }));
+    act(() => tauri.listeners.get('monitor_updated')!({ payload: makeSnapshot('codex', { ...cached, sourceKey: 'codex', sourceGeneration: 0, presentationRevision: 1, fiveHourRemainingPercent: 69 }, 4) }));
     expect(screen.getByText('67%')).toBeTruthy();
     expect(screen.queryByText('69%')).toBeNull();
   });
 
-  it.each(['provider', 'account', 'sessions', 'instance', 'generation'] as const)('clears %s changes and rejects late source/generation samples even with newer timestamps', async change => {
+  it.each(['provider', 'account', 'sessions', 'instance', 'generation'] as const)('clears %s changes and rejects late source/generation snapshots even with higher revision', async change => {
     const dshSettings: OverlaySettings = { ...DEFAULT_SETTINGS, provider: 'dsh', dshBaseUrl: 'http://dsh.test', dshInstanceId: 'one', dshAccountId: 'a', dshSessionIds: ['s1'] };
     const initialSettings = change === 'provider' ? DEFAULT_SETTINGS : dshSettings;
+    const provider = initialSettings.provider;
     tauri.invoke.mockImplementation(async (command: string) => {
       if (command === 'get_settings') return { revision: 0, settings: initialSettings, sourceKey: 'old-source', sourceGeneration: 1 };
       if (command === 'get_dock_state') return { docked: false, edge: null, expanded: true, hidden: false };
-      if (command === 'get_last_usage') return { ...cached, sourceKey: 'old-source', sourceGeneration: 1 };
+      if (command === 'get_monitor_snapshots') return [makeSnapshot(provider, { ...cached, sourceKey: 'old-source', sourceGeneration: 1 }, 1, 'old-source', 1)];
       return null;
     });
     render(<App />);
     await screen.findByText('69%');
-    const nextSettings = { ...dshSettings,
+    const nextSettings = {
+      ...dshSettings,
       ...(change === 'account' ? { dshAccountId: 'b' } : {}),
       ...(change === 'sessions' ? { dshSessionIds: ['s2'] } : {}),
       ...(change === 'instance' ? { dshInstanceId: 'two' } : {}),
@@ -407,16 +440,13 @@ describe('main usage startup', () => {
     const key = change === 'generation' ? 'old-source' : 'new-source';
     act(() => tauri.listeners.get('settings_updated')!({ payload: { revision: 1, settings: nextSettings, sourceKey: key, sourceGeneration: 2 } }));
     expect(screen.queryByText('69%')).toBeNull();
-    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fetchedAt: cached.fetchedAt + 99999, sourceKey: 'old-source', sourceGeneration: 1 } }));
+    act(() => tauri.listeners.get('monitor_updated')!({ payload: makeSnapshot('dsh', { ...cached, fetchedAt: cached.fetchedAt + 99999, sourceKey: 'old-source', sourceGeneration: 1 }, 2, 'old-source', 1) }));
     expect(screen.queryByText('69%')).toBeNull();
-    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fiveHourRemainingPercent: 68, fetchedAt: cached.fetchedAt - 100, sourceKey: key, sourceGeneration: 2 } }));
-    expect(screen.getByText('68%')).toBeTruthy();
-    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fetchedAt: cached.fetchedAt + 99999 } }));
-    expect(screen.queryByText('69%')).toBeNull();
+    act(() => tauri.listeners.get('monitor_updated')!({ payload: makeSnapshot('dsh', { ...cached, fiveHourRemainingPercent: 68, fetchedAt: cached.fetchedAt - 100, sourceKey: key, sourceGeneration: 2 }, 3, key, 2) }));
     expect(screen.getByText('68%')).toBeTruthy();
   });
 
-  it('holds early identified usage until matching settings and never releases old cache', async () => {
+  it('holds early identified monitor snapshot until matching settings arrive', async () => {
     const initial = deferred<SettingsEnvelope>();
     tauri.invoke.mockImplementation(async (command: string) => {
       if (command === 'get_settings') return initial.promise;
@@ -424,35 +454,34 @@ describe('main usage startup', () => {
       return null;
     });
     render(<App />);
-    await waitFor(() => expect(tauri.listeners.has('usage_updated')).toBe(true));
-    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, sourceKey: 'dsh-now', sourceGeneration: 4 } }));
-    act(() => tauri.listeners.get('usage_updated')!({ payload: { ...cached, fiveHourRemainingPercent: 55, fetchedAt: cached.fetchedAt + 99999, sourceKey: 'dsh-old', sourceGeneration: 3 } }));
+    await waitFor(() => expect(tauri.listeners.has('monitor_updated')).toBe(true));
+    act(() => tauri.listeners.get('monitor_updated')!({ payload: makeSnapshot('dsh', { ...cached, sourceKey: 'dsh-now', sourceGeneration: 4 }, 2, 'dsh-now', 4) }));
     expect(screen.queryByText('69%')).toBeNull();
     await act(async () => initial.resolve({ revision: 3, settings: { ...DEFAULT_SETTINGS, provider: 'dsh' }, sourceKey: 'dsh-now', sourceGeneration: 4 }));
     expect(screen.getByText('69%')).toBeTruthy();
   });
 
-  it('does not start cache hydration after cleanup while registration is pending', async () => {
+  it('does not start snapshot hydration after cleanup while registration is pending', async () => {
     const registration = deferred<void>();
-    tauri.usageRegistration = registration.promise;
-    mockCache(cached);
+    tauri.monitorRegistration = registration.promise;
+    mockSnapshots([makeSnapshot('codex', cached, 1)]);
     const view = render(<App />);
     view.unmount();
     await act(async () => registration.resolve());
-    expect(tauri.invoke).not.toHaveBeenCalledWith('get_last_usage');
-    expect(tauri.listeners.has('usage_updated')).toBe(false);
+    expect(tauri.invoke).not.toHaveBeenCalledWith('get_monitor_snapshots');
+    expect(tauri.listeners.has('monitor_updated')).toBe(false);
   });
 
-  it('allows a pending cache response to finish safely after cleanup', async () => {
-    const cache = deferred<CodexUsage | null>();
-    mockCache(cache.promise);
+  it('allows a pending snapshot response to finish safely after cleanup', async () => {
+    const hydration = deferred<MonitorSnapshot[]>();
+    mockSnapshots(hydration.promise);
     const view = render(<App />);
-    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('get_last_usage'));
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('get_monitor_snapshots'));
     view.unmount();
-    await act(async () => cache.resolve(cached));
-    expect(tauri.listeners.has('usage_updated')).toBe(false);
+    await act(async () => hydration.resolve([makeSnapshot('codex', cached, 1)]));
+    expect(tauri.listeners.has('monitor_updated')).toBe(false);
     expect(view.container.childElementCount).toBe(0);
-    expect(tauri.invoke.mock.calls.filter(([command]) => command === 'get_last_usage')).toHaveLength(1);
+    expect(tauri.invoke.mock.calls.filter(([command]) => command === 'get_monitor_snapshots')).toHaveLength(1);
   });
 });
 
