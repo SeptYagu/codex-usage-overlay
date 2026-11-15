@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.3-preview.1] - 2026-11-14
+
+### Changed
+- Consolidated shared provider bridge logic into the workspace `agent-bridge` crate (`claude-usage-bridge` and `antigravity-usage-bridge`), unified physical rectangle/monitor selection into `geometry.rs`, shared live polling throttling in `live_poll.rs`, and unified the provider bridge settings card into `BridgeConnectionCard.tsx`.
+- Unified backend runtime ownership on `AppServices` and `ProviderRegistry` with direct `settings.json` per-provider preferences (`providerPreferences`) while preserving one-way migration for legacy v1–v4 config files.
+- Unified frontend monitor updates onto a single `monitor_updated` / `get_monitor_snapshots` IPC stream and split monolithic backend modules (`commands/*`, `pause_control/*`).
+- Replaced mock-only tray/dock wrapper traits and intermediate action enums with direct pure planners and tested recovery boundaries, and moved Antigravity hook repair out of periodic status polling.
+- Replaced the 1-second unconditional backend status loop with `status_wake` notifications plus a 15-second fallback probe when Codex protection is enabled.
+
+### Removed
+- Retired unconsumed scalar burn-rate telemetry/replay modules (`personal.rs`, `shadow.rs`, `replay*`, `burn-rate-shadow-evidence.jsonl`), historical handoff/research scripts (`docs/handoff/*`, `scripts/burn-rate-*.mjs`, `scripts/affine-parity-fixture.mjs`), and the permanently disabled `autoResumeAfterQuotaReset` UI/disk state machine (`pause-resume-state.json`), keeping `Legacy`/`Weighted`/`Personalized` (`AffineCalibration`) forecasts, existing `burn-rate-state.json` migration, and in-memory manual thread resume intact.
+
 ## [1.9.2] - 2026-11-14
 
 ### Fixed
