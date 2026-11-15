@@ -59,6 +59,7 @@ jobs:
           # bridge helpers are built first.
           cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin claude-usage-bridge
           if ($LASTEXITCODE -ne 0) { throw 'Claude bridge helper build failed.' }
+          ./scripts/Test-ClaudeRenewProcessTree.ps1 -BridgePath src-tauri/target/release/claude-usage-bridge.exe
           cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin antigravity-usage-bridge
           if ($LASTEXITCODE -ne 0) { throw 'Antigravity bridge helper build failed.' }
           npm run tauri -- build --ci --bundles nsis,msi

@@ -34,12 +34,81 @@ fn main() {
         ["statusline"] => statusline(),
         ["hook", "prompt"] => hook(Hook::Prompt),
         ["hook", "tool"] => hook(Hook::Tool),
+        ["renew", "plugin-list", cli] => std::process::exit(renew(cli, &["plugin", "list"])),
+        ["renew", "doctor", cli] => std::process::exit(renew(cli, &["doctor"])),
         _ => {
             eprintln!("usage: claude-usage-bridge statusline | hook prompt | hook tool");
             std::process::exit(1);
         }
     }
 }
+
+/// Run one bounded login-renewal command inside a kill-on-close Windows job.
+/// The job is created before the CLI starts, so a .cmd shim and every process
+/// it spawns belong to this worker rather than accumulating under the overlay.
+#[cfg(windows)]
+fn renew(cli: &str, args: &[&str]) -> i32 {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    const RENEW_TIMEOUT: Duration = Duration::from_secs(30);
+    let job = match unsafe { CreateJobObjectW(None, PCWSTR::null()) } {
+        Ok(job) => job,
+        Err(_) => return 1,
+    };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let configured = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const std::ffi::c_void,
+            std::mem::size_of_val(&limits) as u32,
+        )
+    };
+    let assigned = configured.and_then(|_| unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) });
+    if assigned.is_err() {
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(job) };
+        return 1; // Do not start an uncontained Claude process.
+    }
+    // Keep the only job handle open until process exit. Windows then kills any
+    // CLI descendants even if the immediate child already exited.
+    let mut command = Command::new(cli);
+    command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    if let Some(home) = dirs::home_dir() {
+        command.current_dir(home); // doctor reads project settings in cwd
+    }
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let result = match command.spawn() {
+        Ok(mut child) => {
+            let started = Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break if status.success() { 0 } else { 1 },
+                    Ok(None) if started.elapsed() < RENEW_TIMEOUT => std::thread::sleep(Duration::from_millis(25)),
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break 1;
+                    }
+                }
+            }
+        }
+        Err(_) => 1,
+    };
+    // main calls process::exit, which closes `job`. Do not close it here:
+    // doing so would also terminate this worker while it is returning.
+    result
+}
+
+#[cfg(not(windows))]
+fn renew(_cli: &str, _args: &[&str]) -> i32 { 1 }
 
 fn unix_now() -> i64 {
     std::time::SystemTime::now()

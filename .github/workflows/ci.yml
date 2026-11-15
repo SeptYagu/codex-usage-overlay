@@ -59,3 +59,10 @@ jobs:
       - name: Rust Unit & Integration Tests
         shell: pwsh
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Claude Renewal Process Tree Regression
+        shell: pwsh
+        run: |
+          cargo build --manifest-path src-tauri/Cargo.toml --locked --bin claude-usage-bridge
+          if ($LASTEXITCODE -ne 0) { throw 'Claude bridge build failed.' }
+          ./scripts/Test-ClaudeRenewProcessTree.ps1 -BridgePath src-tauri/target/debug/claude-usage-bridge.exe
