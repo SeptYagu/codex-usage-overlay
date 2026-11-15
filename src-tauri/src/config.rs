@@ -396,6 +396,36 @@ fn opt_string_field(value: &serde_json::Value) -> Option<String> {
     value.as_str().filter(|s| !s.is_empty() && s.len() <= 4096).map(str::to_string)
 }
 
+/// Drops wrong-typed values inside `providerPreferences` so one bad field falls
+/// back to its inherited or default value instead of failing the whole file.
+fn sanitize_provider_preferences(raw: &serde_json::Value) -> serde_json::Value {
+    let mut value = raw.clone();
+    let Some(root) = value.as_object_mut() else {
+        return value;
+    };
+    let Some(prefs) = root.get_mut("providerPreferences") else {
+        return value;
+    };
+    let Some(entries) = prefs.as_object_mut() else {
+        root.remove("providerPreferences");
+        return value;
+    };
+    entries.retain(|_, entry| entry.is_object());
+    for entry in entries.values_mut().filter_map(|entry| entry.as_object_mut()) {
+        entry.retain(|field, value| match field.as_str() {
+            "monitorEnabled" | "carouselIncluded" | "protectionEnabled"
+            | "fiveHourResetNotification" | "weeklyResetNotification" => value.is_boolean(),
+            "fiveHourThresholdPercent" | "weeklyThresholdPercent" => {
+                value.as_u64().is_some_and(|n| u32::try_from(n).is_ok())
+            }
+            "fiveHourSoundMode" | "weeklySoundMode" => value.is_string(),
+            "fiveHourSoundPath" | "weeklySoundPath" => value.is_null() || value.is_string(),
+            _ => true,
+        });
+    }
+    value
+}
+
 impl OverlaySettings {
     /// Parses a persisted `settings.json` JSON value, losslessly migrating schema v0..=v4
     /// settings into canonical v5 `providerPreferences`.
@@ -405,6 +435,8 @@ impl OverlaySettings {
             .and_then(|v| v.as_u64())
             .map(|v| v.min(u64::from(u32::MAX)) as u32)
             .unwrap_or(0);
+        let sanitized = sanitize_provider_preferences(raw);
+        let raw = &sanitized;
         let mut settings: Self =
             serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
         if !settings.auto_check_updates {
@@ -449,7 +481,8 @@ impl OverlaySettings {
                 .entry(key.into())
                 .or_insert_with(|| ProviderPreference::default_for(provider));
 
-            if raw_version < 2 || empty_prefs || (raw_version < 4 && !has_key("protectionEnabled")) {
+            // An explicit nested switch always wins over the legacy top-level one.
+            if !has_key("protectionEnabled") && (raw_version < 4 || empty_prefs) {
                 pref.protection_enabled =
                     provider == settings.provider && legacy.auto_pause_on_low_quota;
             }
@@ -1260,6 +1293,40 @@ mod independent_preferences_tests {
 #[cfg(test)]
 mod partial_migration_repair_tests {
     use super::*;
+    #[test]
+    fn wrong_typed_nested_values_fall_back_without_resetting_the_file() {
+        let settings = OverlaySettings::from_json_migrated(&serde_json::json!({
+            "schemaVersion": 5, "provider": "claude", "scalePercent": 150,
+            "providerPreferences": {
+                "claude": {"fiveHourSoundMode": null, "monitorEnabled": "yes", "weeklyThresholdPercent": -3,
+                    "fiveHourSoundPath": 7, "protectionEnabled": true, "refreshIntervalSeconds": 120},
+                "dsh": "broken"
+            }
+        })).unwrap();
+        assert_eq!(settings.provider, Provider::Claude);
+        assert_eq!(settings.scale_percent, 150);
+        let claude = settings.preference(Provider::Claude);
+        assert!(claude.monitor_enabled && claude.protection_enabled);
+        assert_eq!(claude.five_hour_sound_mode, SoundMode::Windows);
+        assert_eq!(claude.weekly_threshold_percent, 2);
+        assert_eq!(claude.five_hour_sound_path, None);
+        assert_eq!(claude.refresh_interval_seconds, 120);
+        assert_eq!(settings.preference(Provider::Dsh), ProviderPreference::default_for(Provider::Dsh));
+        let unusable = OverlaySettings::from_json_migrated(&serde_json::json!({"providerPreferences": 3})).unwrap();
+        assert_eq!(unusable.preference(Provider::Codex), ProviderPreference::default_for(Provider::Codex));
+    }
+    #[test]
+    fn early_schemas_keep_an_explicit_nested_protection_switch() {
+        for schema in [0, 1, 2, 3] {
+            let settings = OverlaySettings::from_json_migrated(&serde_json::json!({
+                "schemaVersion": schema, "provider": "codex", "autoPauseOnLowQuota": true,
+                "providerPreferences": {"claude": {"protectionEnabled": true}, "codex": {"protectionEnabled": false}, "dsh": {}}
+            })).unwrap();
+            assert!(settings.preference(Provider::Claude).protection_enabled, "schema {schema}");
+            assert!(!settings.preference(Provider::Codex).protection_enabled, "schema {schema}");
+            assert!(!settings.preference(Provider::Dsh).protection_enabled, "schema {schema}");
+        }
+    }
     #[test]
     fn earlier_partial_migrations_keep_nested_values_and_recover_bad_modes() {
         for schema in [0,1,2] {

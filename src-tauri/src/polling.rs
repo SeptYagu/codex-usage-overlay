@@ -139,6 +139,22 @@ impl PollState {
     }
 }
 
+/// Seconds until a sample fetched at `fetched_at` next crosses a freshness
+/// window: the monitor snapshot's (`2 x refresh`, at least 120 s) or the
+/// protection status's (`2 x healthy`, at least 60 s). `None` once both passed.
+pub fn seconds_until_stale(now: i64, fetched_at: i64, refresh_seconds: u64, healthy_seconds: u64) -> Option<u64> {
+    [
+        refresh_seconds.saturating_mul(2).max(120),
+        healthy_seconds.saturating_mul(2).max(60),
+    ]
+    .into_iter()
+    .filter_map(|window| {
+        let stale_at = fetched_at.saturating_add(window as i64).saturating_add(1);
+        u64::try_from(stale_at.saturating_sub(now)).ok().filter(|wait| *wait > 0)
+    })
+    .min()
+}
+
 pub async fn wait_until_due(state: &crate::commands::ProviderRuntime) {
     loop {
         let wake = state.poll_wake.notified();
@@ -179,6 +195,14 @@ mod tests {
             protection_enabled: true,
             ..ProviderPreference::default_for(provider)
         }
+    }
+    #[test]
+    fn stale_deadline_is_the_next_freshness_window_to_expire() {
+        assert_eq!(seconds_until_stale(1000, 1000, 60, 15), Some(61));
+        assert_eq!(seconds_until_stale(1061, 1000, 60, 15), Some(60));
+        assert_eq!(seconds_until_stale(1120, 1000, 60, 60), Some(1));
+        assert_eq!(seconds_until_stale(1121, 1000, 60, 60), None);
+        assert_eq!(seconds_until_stale(1000, 1000, 300, 300), Some(601));
     }
     #[test]
     fn near_boundaries_and_two_sample_recovery_control_cadence() {

@@ -270,8 +270,20 @@ pub fn run() {
             let status_state = app_state_clone.clone();
             tauri::async_runtime::spawn(async move {
                 loop {
+                    // Staleness is a function of time, so wake when the next
+                    // reading is due to expire instead of on the 15 s fallback.
+                    let mut fallback = 15u64;
                     for runtime in status_state.monitors.all() {
                         let settings = runtime.settings.lock().await.clone();
+                        let pref = settings.preference(runtime.provider);
+                        let fetched_at = runtime.last_usage.lock().await.as_ref().map(|usage| usage.fetched_at);
+                        if let Some(fetched_at) = fetched_at.filter(|_| pref.monitor_enabled) {
+                            let healthy = runtime.polling.lock().unwrap_or_else(|p| p.into_inner()).healthy_interval_seconds(&pref);
+                            if let Some(wait) = polling::seconds_until_stale(
+                                codex::reader::unix_now(), fetched_at, u64::from(pref.refresh_interval_seconds), healthy) {
+                                fallback = fallback.min(wait);
+                            }
+                        }
                         let codex_pref = settings.preference(config::Provider::Codex);
                         if runtime.provider == config::Provider::Codex
                             && codex_pref.monitor_enabled
@@ -284,7 +296,7 @@ pub fn run() {
                     status_state.monitors.publish(&status_handle).await;
                     tokio::select! {
                         _ = status_state.services.status_wake.notified() => {}
-                        _ = tokio::time::sleep(Duration::from_secs(15)) => {}
+                        _ = tokio::time::sleep(Duration::from_secs(fallback)) => {}
                     }
                 }
             });
