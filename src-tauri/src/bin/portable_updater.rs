@@ -1,3 +1,7 @@
+// The helper runs unattended while the overlay restarts; a console-subsystem
+// build would open a terminal window on every portable update.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::{env, error::Error, fs, path::PathBuf, process::Command, thread, time::Duration};
 
 #[cfg(windows)]

@@ -255,16 +255,14 @@ impl Registry {
             if urgent {previous.poll_wake.notify_one();}
         }
         owner.services.status_wake.notify_one();
-        let claude = settings;
         if let Err(error) =
-            crate::claude::install::write_guard_config(owner.config_manager.runtime_dir(), claude)
+            crate::claude::install::write_guard_config(owner.config_manager.runtime_dir(), settings)
         {
             eprintln!("Could not update Claude guard preferences: {error}");
         }
-        let antigravity = settings;
         if let Err(error) = crate::antigravity::install::write_guard_config(
             owner.config_manager.runtime_dir(),
-            antigravity,
+            settings,
         ) {
             eprintln!("Could not update Antigravity guard preferences: {error}");
         }
