@@ -267,7 +267,15 @@ fn install_verified_bytes(
         .arg(&staged_exe)
         .arg(&helper)
         .arg(if exiting { "--no-restart" } else { "--restart" })
-        .args(std::env::args_os().skip(1));
+        .args(std::env::args_os().skip(1))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
     command.spawn().map_err(|error| {
         let _ = std::fs::remove_file(&staged_exe);
         let _ = std::fs::remove_file(&staged_helper);

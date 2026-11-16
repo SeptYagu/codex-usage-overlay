@@ -98,24 +98,87 @@ fn parse_json_output(bytes: &[u8]) -> Option<Value> {
         .find_map(|line| serde_json::from_str::<Value>(line).ok())
 }
 
-async fn run_cli_command(cli: &Path, prompt: &str) -> Result<Value, ReadFailure> {
+fn cli_command(cli: &Path, prompt: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(cli);
     cmd.args(["-p", prompt, "--output-format", "json"])
         .current_dir(std::env::temp_dir())
+        // agy's self-updater re-launches itself with DETACHED_PROCESS and then
+        // runs `agy --version` without hiding it, which escapes CREATE_NO_WINDOW
+        // and opens a console. Quota polls never need to update the CLI;
+        // interactive `agy` sessions keep updating normally.
+        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "true")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
 
-    let child = cmd
+/// Terminates every process a CLI poll started when the poll times out or is
+/// cancelled. `kill_on_drop` only reaches the direct child, which for an
+/// `agy.cmd` shim is `cmd.exe` rather than `agy.exe`. A poll that finishes
+/// normally disarms the guard, leaving any descendants alone.
+#[cfg(windows)]
+struct ProcessTreeGuard {
+    job: windows::Win32::Foundation::HANDLE,
+    armed: bool,
+}
+
+// A job object handle is a kernel handle owned solely by this guard; Win32
+// allows it to be used and closed from any thread.
+#[cfg(windows)]
+unsafe impl Send for ProcessTreeGuard {}
+
+#[cfg(windows)]
+impl ProcessTreeGuard {
+    fn attach(child: &tokio::process::Child) -> Option<Self> {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+
+        let process = child.raw_handle()?;
+        let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.ok()?;
+        let guard = Self { job, armed: true };
+        // Best effort: a failed assignment leaves kill_on_drop as the fallback.
+        unsafe { AssignProcessToJobObject(job, HANDLE(process)) }.ok()?;
+        Some(guard)
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessTreeGuard {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::JobObjects::TerminateJobObject;
+        unsafe {
+            if self.armed {
+                let _ = TerminateJobObject(self.job, 1);
+            }
+            let _ = CloseHandle(self.job);
+        }
+    }
+}
+
+async fn run_cli_command(cli: &Path, prompt: &str) -> Result<Value, ReadFailure> {
+    let child = cli_command(cli, prompt)
         .spawn()
         .map_err(|error| ReadFailure::io(ReadStage::Spawn, &error))?;
+    #[cfg(windows)]
+    let mut tree = ProcessTreeGuard::attach(&child);
     let output = tokio::time::timeout(COMMAND_TIMEOUT, child.wait_with_output())
         .await
         .map_err(|_| ReadFailure::timeout(ReadStage::Quota))?
         .map_err(|error| ReadFailure::io(ReadStage::Quota, &error))?;
+    #[cfg(windows)]
+    if let Some(tree) = tree.as_mut() {
+        tree.disarm();
+    }
 
     let stdout_json = parse_json_output(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -246,5 +309,14 @@ mod tests {
         state.record(t0 + MIN_INTERVAL, &Err(fail.clone()));
         assert_eq!(state.step(t0 + MIN_INTERVAL + Duration::from_secs(10)), LiveStep::Failure(fail));
         assert_eq!(state.step(t0 + MIN_INTERVAL + MIN_INTERVAL), LiveStep::Request);
+    }
+
+    #[test]
+    fn cli_command_disables_agy_self_update() {
+        let cmd = cli_command(Path::new("agy"), "/usage");
+        let disabled = cmd.as_std().get_envs().any(|(key, value)| {
+            key == "AGY_CLI_DISABLE_AUTO_UPDATE" && value == Some(std::ffi::OsStr::new("true"))
+        });
+        assert!(disabled);
     }
 }
