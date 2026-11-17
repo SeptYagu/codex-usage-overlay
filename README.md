@@ -97,6 +97,8 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked
 npm run tauri dev
 ```
 
+开发构建和测试关闭 Rust 增量编译缓存，依赖的调试信息只保留文件名和行号。可在仓库根目录运行 `cargo clean --manifest-path src-tauri/Cargo.toml --profile dev` 清除旧的调试构建产物。
+
 构建并打包发布版：
 
 ```powershell

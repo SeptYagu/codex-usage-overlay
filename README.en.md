@@ -99,6 +99,8 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked
 npm run tauri dev
 ```
 
+Development builds and tests disable Rust's incremental cache and keep dependency debug info to file and line locations. To clear old debug build artifacts, run `cargo clean --manifest-path src-tauri/Cargo.toml --profile dev` from the repository root.
+
 Build and package a release:
 
 ```powershell
