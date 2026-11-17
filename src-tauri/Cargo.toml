@@ -1,6 +1,14 @@
 [workspace]
 members = [".", "crates/agent-bridge"]
 
+[profile.dev]
+# The test profile inherits these settings. Avoid retaining per-target object caches.
+incremental = false
+
+[profile.dev.package."*"]
+# Keep dependency backtrace locations and full debug symbols for workspace crates.
+debug = "line-tables-only"
+
 [package]
 name = "codex-usage-overlay"
 default-run = "codex-usage-overlay"
