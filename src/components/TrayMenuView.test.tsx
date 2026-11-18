@@ -88,10 +88,11 @@ it('remeasures tray content when the language list opens and closes', async () =
     widthLogical: 300,
   }));
   fireEvent.click(screen.getByRole('menuitem', { name: /Language \/ 语言/ }));
+  expect(screen.getByRole('menuitemradio', { name: 'Русский' })).toBeTruthy();
   await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('layout_tray_menu', {
     generation: 3,
     revision: 2,
-    heightLogical: 240,
+    heightLogical: 270,
     widthLogical: 300,
   }));
   fireEvent.click(screen.getByRole('menuitem', { name: /Language \/ 语言/ }));

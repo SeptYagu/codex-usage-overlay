@@ -332,6 +332,11 @@ pub(crate) fn update_notification_copy(language: &str, version: &str, ready: boo
         } else {
             format!("發現新版本 {version}。")
         }),
+        "ru-RU" => ("Обновление Codex Usage Overlay", if ready {
+            format!("Версия {version} загружена и будет установлена при выходе.")
+        } else {
+            format!("Доступна версия {version}.")
+        }),
         _ => ("Codex Usage Overlay update", if ready {
             format!("Version {version} has been downloaded and installs when you quit.")
         } else {
@@ -359,6 +364,8 @@ fn notification_copy(kind: QuotaKind, language: &str) -> (&'static str, &'static
                 "每週額度已完成重置。"
             },
         ),
+        (QuotaKind::FiveHour, "ru-RU") => ("Лимит обновлён", "Пятичасовой лимит обновлён."),
+        (QuotaKind::Week, "ru-RU") => ("Лимит обновлён", "Недельный лимит обновлён."),
         (QuotaKind::FiveHour, _) => ("Quota reset", "Your 5-hour quota has reset."),
         (QuotaKind::Week, _) => ("Quota reset", "Your weekly quota has reset."),
     }

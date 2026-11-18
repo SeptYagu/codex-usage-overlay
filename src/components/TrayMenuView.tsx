@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTranslation } from 'react-i18next';
+import { languageOptions } from '../i18n';
 import { OverlaySettings, DisplayState } from '../types';
 import { APP_VERSION } from '../version';
 import { ProtectionStatusView } from './ProtectionStatus';
@@ -337,12 +338,7 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
         </button>
         {languageOpen && (
           <div role="group" aria-label={t('menuLanguage')} className="ml-3 border-l border-slate-200 dark:border-slate-700 pl-2">
-            {[
-              ['auto', t('autoSystem')],
-              ['en-US', t('languageEnglish')],
-              ['zh-CN', t('languageSimplifiedChinese')],
-              ['zh-Hant', t('languageTraditionalChinese')],
-            ].map(([language, label]) => (
+            {languageOptions.map(([language, label]) => (
               <button
                 key={language}
                 role="menuitemradio"
@@ -350,7 +346,7 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
                 className="tray-menu-item justify-between"
                 onClick={() => chooseLanguage(language)}
               >
-                <span>{label}</span><span>{settings.language === language ? '✓' : ''}</span>
+                <span>{t(label, { defaultValue: 'Русский' })}</span><span>{settings.language === language ? '✓' : ''}</span>
               </button>
             ))}
           </div>

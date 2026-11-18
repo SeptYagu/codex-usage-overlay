@@ -5,6 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { CodexUsage, DockStateInfo, OverlaySettings, MonitorSnapshot, Provider } from '../types';
 import { useTranslation } from 'react-i18next';
+import i18n from '../i18n';
 import { ProviderLogo } from './ProviderLogo';
 
 interface OverlayViewProps {
@@ -18,14 +19,16 @@ interface OverlayViewProps {
 }
 
 function formatResetCountdown(resetsAt: number | null | undefined, weekly = false): string {
-  if (resetsAt === null || resetsAt === undefined) return '--h --m';
+  const russian = i18n.resolvedLanguage === 'ru-RU';
+  const [day, hour, minute] = russian ? [' д', ' ч', ' мин'] : ['d', 'h', 'm'];
+  if (resetsAt === null || resetsAt === undefined) return `--${hour} --${minute}`;
   const remainingSeconds = Math.max(0, resetsAt - Math.floor(Date.now() / 1000));
   const totalMinutes = Math.ceil(remainingSeconds / 60);
   const hours = Math.floor(totalMinutes / 60);
   if (weekly && hours >= 24) {
-    return `${Math.floor(hours / 24)}d ${(hours % 24).toString().padStart(2, '0')}h`;
+    return `${Math.floor(hours / 24)}${day} ${(hours % 24).toString().padStart(2, '0')}${hour}`;
   }
-  return `${hours}h ${(totalMinutes % 60).toString().padStart(2, '0')}m`;
+  return `${hours}${hour} ${(totalMinutes % 60).toString().padStart(2, '0')}${minute}`;
 }
 
 function usageTone(percent: number | null | undefined): string {
@@ -35,9 +38,12 @@ function usageTone(percent: number | null | undefined): string {
 
 export function formatBurnRate(rate: number | null | undefined): string {
   if (rate === null || rate === undefined || !Number.isFinite(rate) || rate < 0) return '—';
-  if (rate > 999) return '>999%/h';
-  if (rate > 0 && rate < 0.05) return '<0.1%/h';
-  return `${rate.toFixed(1)}%/h`;
+  const russian = i18n.resolvedLanguage === 'ru-RU';
+  const unit = russian ? '%/ч' : '%/h';
+  if (rate > 999) return `>999${unit}`;
+  if (rate > 0 && rate < 0.05) return `<${russian ? '0,1' : '0.1'}${unit}`;
+  const value = rate.toFixed(1);
+  return `${russian ? value.replace('.', ',') : value}${unit}`;
 }
 
 /**
@@ -203,11 +209,11 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, us
   };
 
   const visibleQuotas = [
-    { key: 'five', label: layout === 'stacks' ? t('fiveHourLabel') : '5H',
+    { key: 'five', label: layout === 'stacks' ? t('fiveHourLabel') : t('fiveHourShort', { defaultValue: '5H' }),
       percent: usage?.fiveHourRemainingPercent,
       countdown: formatResetCountdown(usage?.fiveHourResetsAt),
       burnRate: formatBurnRate(usage?.fiveHourBurnRatePerHour) },
-    { key: 'week', label: layout === 'stacks' ? t('weeklyLabel') : 'WK',
+    { key: 'week', label: layout === 'stacks' ? t('weeklyLabel') : t('weeklyShort', { defaultValue: 'WK' }),
       percent: usage?.weekRemainingPercent,
       countdown: formatResetCountdown(usage?.weekResetsAt, true),
       burnRate: formatBurnRate(usage?.weekBurnRatePerHour) },
@@ -315,7 +321,8 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, us
 function CapsuleReadings({settings,provider,usage,isLoading}:{settings:OverlaySettings;provider:Provider;usage:CodexUsage|null;isLoading:boolean}) {
   const {t}=useTranslation();const layout=settings.overlayLayout;
   const raw=usage?.creditsDisplay??'—';const numeric=Number(raw);
-  const credit=raw.trim()!==''&&Number.isFinite(numeric)?numeric.toFixed(2):raw;
+  const formattedCredit = raw.trim() !== '' && Number.isFinite(numeric) ? numeric.toFixed(2) : raw;
+  const credit = i18n.resolvedLanguage === 'ru-RU' ? formattedCredit.replace('.', ',') : formattedCredit;
   // Antigravity always reads 5H | Gemini WK | Argon. When Argon is the projected
   // pool, the usage's own weekly window (and its burn rate) belongs to Argon.
   const antigravity=provider==='antigravity';
@@ -325,9 +332,9 @@ function CapsuleReadings({settings,provider,usage,isLoading}:{settings:OverlaySe
   const argon=argonPool?ownWeekly:antigravity&&usage?.argonWeekRemainingPercent!=null
     ?{percent:usage.argonWeekRemainingPercent,countdown:formatResetCountdown(usage.argonWeekResetsAt,true),burn:''}:null;
   const quotas=[
-    {key:'five',label:layout==='stacks'?t('fiveHourLabel'):'5H',percent:usage?.fiveHourRemainingPercent,countdown:formatResetCountdown(usage?.fiveHourResetsAt),burn:formatBurnRate(usage?.fiveHourBurnRatePerHour)},
-    {key:'week',label:layout==='stacks'?t('weeklyLabel'):'WK',...weekly},
-    ...(argon?[{key:'argon',label:layout==='stacks'?t('argonLabel'):'AR',...argon}]:[]),
+    {key:'five',label:layout==='stacks'?t('fiveHourLabel'):t('fiveHourShort', { defaultValue: '5H' }),percent:usage?.fiveHourRemainingPercent,countdown:formatResetCountdown(usage?.fiveHourResetsAt),burn:formatBurnRate(usage?.fiveHourBurnRatePerHour)},
+    {key:'week',label:layout==='stacks'?t('weeklyLabel'):t('weeklyShort', { defaultValue: 'WK' }),...weekly},
+    ...(argon?[{key:'argon',label:layout==='stacks'?t('argonLabel'):t('argonShort', { defaultValue: 'AR' }),...argon}]:[]),
   ].filter(q=>q.key!=='five'||settings.showFiveHourQuota);
   const quotaName=(key:string)=>key==='five'?t('fiveHourLabel'):key==='argon'?t('argonLabel'):t('weeklyLabel');
   return <>
@@ -340,7 +347,7 @@ function CapsuleReadings({settings,provider,usage,isLoading}:{settings:OverlaySe
     </React.Fragment>)}
     {settings.showCredits&&((provider!=='claude'&&provider!=='antigravity')||Boolean(usage?.hasCredits))&&<>
       {layout==='grouped'&&<span aria-hidden="true" className="overlay-divider"/>}
-      <div className="overlay-credit" role="group" aria-label={t('creditsLabel')}><div className="overlay-reading"><span className="overlay-label">{layout==='stacks'?t('creditsLabel'):'CR'}</span><span className="overlay-value">{credit}</span></div>{layout==='stacks'&&<span className="overlay-countdown">{t('balanceLabel')}</span>}</div>
+      <div className="overlay-credit" role="group" aria-label={t('creditsLabel')}><div className="overlay-reading"><span className="overlay-label">{layout==='stacks'?t('creditsLabel'):t('creditsShort', { defaultValue: 'CR' })}</span><span className="overlay-value">{credit}</span></div>{layout==='stacks'&&<span className="overlay-countdown">{t('balanceLabel')}</span>}</div>
     </>}
     {isLoading&&<span role="status" aria-label={t('refreshing')} className="overlay-loading"/>}
   </>;

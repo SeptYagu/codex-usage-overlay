@@ -206,6 +206,7 @@ pub fn run() {
                 let title = match commands::resolve_locale(&initial_settings.language) {
                     "zh-CN" => "设置",
                     "zh-Hant" => "設定",
+                    "ru-RU" => "Настройки",
                     _ => "Settings",
                 };
                 let _ = settings_win.set_title(title);

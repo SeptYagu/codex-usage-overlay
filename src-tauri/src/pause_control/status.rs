@@ -142,6 +142,19 @@ impl AutoPauseStatus {
 
     pub fn tooltip(&self, language: &str) -> &'static str {
         let zh = crate::commands::resolve_locale(language);
+        if zh == "ru-RU" {
+            return match self.summary.as_str() {
+                "off" => "Защита выключена",
+                "armed" => "Защита включена",
+                "quotaLow" if matches!(self.provider, Provider::Claude | Provider::Antigravity) => {
+                    "Запросы блокируются"
+                }
+                "quotaLow" => "Нет работающих чатов",
+                "pauseRequested" => "Запрошена пауза",
+                "needsAttention" => "Проверьте защиту",
+                _ => "Проверка защиты…",
+            };
+        }
         if matches!(self.provider, Provider::Claude | Provider::Antigravity) {
             match (zh, self.summary.as_str()) {
                 ("zh-CN", "armed") => return "额度保护：就绪",
@@ -446,6 +459,7 @@ mod tests {
         let status = snapshot(&state).await;
         assert_eq!((status.provider, status.summary.as_str(), status.reason.as_deref()), (Provider::Claude, "armed", None));
         assert_eq!(status.tooltip("en-US"), "Quota guard: armed");
+        assert_eq!(status.tooltip("ru-RU"), "Защита включена");
 
         old.five_hour_remaining_percent = Some(3);
         *state.last_usage.lock().await = Some(old);

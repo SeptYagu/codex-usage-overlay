@@ -41,6 +41,7 @@ pub fn pause_message_for_locale(locale: &str) -> &'static str {
     match locale {
         "zh-Hant" => PAUSE_MESSAGE_ZH_HANT,
         "zh-CN" => PAUSE_MESSAGE_ZH_CN,
+        "ru-RU" => "Пауза",
         _ => PAUSE_MESSAGE_EN,
     }
 }
@@ -59,6 +60,7 @@ pub fn resume_message_for_locale(locale: &str) -> &'static str {
     match locale {
         "zh-Hant" => RESUME_MESSAGE_ZH_HANT,
         "zh-CN" => RESUME_MESSAGE_ZH_CN,
+        "ru-RU" => "Продолжить",
         _ => RESUME_MESSAGE_EN,
     }
 }
