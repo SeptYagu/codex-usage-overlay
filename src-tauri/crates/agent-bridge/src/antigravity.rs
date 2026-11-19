@@ -110,7 +110,9 @@ impl Snapshot {
             self.active_model_name.as_deref().unwrap_or("")
         )
         .to_ascii_lowercase();
-        if haystack.contains("argon") || haystack.contains("orchestrator") {
+        // Orchestrators name their base model ("Orchestrator (Argon)",
+        // "Orchestrator (Neon)"), and only the Argon one draws on Argon quota.
+        if haystack.contains("argon") {
             PoolKind::Argon
         } else if ["claude", "gpt", "sonnet", "opus", "haiku", "anthropic"]
             .iter()
@@ -855,6 +857,21 @@ mod tests {
         assert_eq!(snap.resolve_pool(PoolKind::Auto), PoolKind::ThirdParty);
         assert_eq!(snap.resolve_pool(PoolKind::Gemini), PoolKind::Gemini);
         assert_eq!(snap.windows_for(PoolKind::Gemini).weekly.unwrap().used_percent, 40.0);
+    }
+
+    #[test]
+    fn auto_pool_follows_the_orchestrator_base_model() {
+        let mut snap = parse_statusline(&sample_input(), NOW).unwrap();
+        snap.active_model_id = None;
+        for (label, pool) in [
+            ("Orchestrator (Argon)", PoolKind::Argon),
+            ("Gemini 4 Argon (Medium)", PoolKind::Argon),
+            ("Orchestrator (Neon)", PoolKind::Gemini),
+            ("Gemini 4 Neon (High)", PoolKind::Gemini),
+        ] {
+            snap.active_model_name = Some(label.into());
+            assert_eq!(snap.resolve_pool(PoolKind::Auto), pool, "{label}");
+        }
     }
 
     #[test]

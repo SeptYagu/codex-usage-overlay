@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The Antigravity `auto` pool sends "Orchestrator (Neon)" to the Gemini pool, where agy now counts it, instead of Argon. Only models whose name includes Argon use the Argon pool.
+
 ## [1.9.3-preview.2] - 2026-11-15
 
 ### Fixed
