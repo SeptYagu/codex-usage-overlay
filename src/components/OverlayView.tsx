@@ -209,11 +209,11 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, us
   };
 
   const visibleQuotas = [
-    { key: 'five', label: layout === 'stacks' ? t('fiveHourLabel') : t('fiveHourShort', { defaultValue: '5H' }),
+    { key: 'five', label: layout === 'stacks' ? t('fiveHourLabel') : t('fiveHourShort'),
       percent: usage?.fiveHourRemainingPercent,
       countdown: formatResetCountdown(usage?.fiveHourResetsAt),
       burnRate: formatBurnRate(usage?.fiveHourBurnRatePerHour) },
-    { key: 'week', label: layout === 'stacks' ? t('weeklyLabel') : t('weeklyShort', { defaultValue: 'WK' }),
+    { key: 'week', label: layout === 'stacks' ? t('weeklyLabel') : t('weeklyShort'),
       percent: usage?.weekRemainingPercent,
       countdown: formatResetCountdown(usage?.weekResetsAt, true),
       burnRate: formatBurnRate(usage?.weekBurnRatePerHour) },
@@ -332,9 +332,9 @@ function CapsuleReadings({settings,provider,usage,isLoading}:{settings:OverlaySe
   const argon=argonPool?ownWeekly:antigravity&&usage?.argonWeekRemainingPercent!=null
     ?{percent:usage.argonWeekRemainingPercent,countdown:formatResetCountdown(usage.argonWeekResetsAt,true),burn:''}:null;
   const quotas=[
-    {key:'five',label:layout==='stacks'?t('fiveHourLabel'):t('fiveHourShort', { defaultValue: '5H' }),percent:usage?.fiveHourRemainingPercent,countdown:formatResetCountdown(usage?.fiveHourResetsAt),burn:formatBurnRate(usage?.fiveHourBurnRatePerHour)},
-    {key:'week',label:layout==='stacks'?t('weeklyLabel'):t('weeklyShort', { defaultValue: 'WK' }),...weekly},
-    ...(argon?[{key:'argon',label:layout==='stacks'?t('argonLabel'):t('argonShort', { defaultValue: 'AR' }),...argon}]:[]),
+    {key:'five',label:layout==='stacks'?t('fiveHourLabel'):t('fiveHourShort'),percent:usage?.fiveHourRemainingPercent,countdown:formatResetCountdown(usage?.fiveHourResetsAt),burn:formatBurnRate(usage?.fiveHourBurnRatePerHour)},
+    {key:'week',label:layout==='stacks'?t('weeklyLabel'):t('weeklyShort'),...weekly},
+    ...(argon?[{key:'argon',label:layout==='stacks'?t('argonLabel'):t('argonShort'),...argon}]:[]),
   ].filter(q=>q.key!=='five'||settings.showFiveHourQuota);
   const quotaName=(key:string)=>key==='five'?t('fiveHourLabel'):key==='argon'?t('argonLabel'):t('weeklyLabel');
   return <>
@@ -347,7 +347,7 @@ function CapsuleReadings({settings,provider,usage,isLoading}:{settings:OverlaySe
     </React.Fragment>)}
     {settings.showCredits&&((provider!=='claude'&&provider!=='antigravity')||Boolean(usage?.hasCredits))&&<>
       {layout==='grouped'&&<span aria-hidden="true" className="overlay-divider"/>}
-      <div className="overlay-credit" role="group" aria-label={t('creditsLabel')}><div className="overlay-reading"><span className="overlay-label">{layout==='stacks'?t('creditsLabel'):t('creditsShort', { defaultValue: 'CR' })}</span><span className="overlay-value">{credit}</span></div>{layout==='stacks'&&<span className="overlay-countdown">{t('balanceLabel')}</span>}</div>
+      <div className="overlay-credit" role="group" aria-label={t('creditsLabel')}><div className="overlay-reading"><span className="overlay-label">{layout==='stacks'?t('creditsLabel'):t('creditsShort')}</span><span className="overlay-value">{credit}</span></div>{layout==='stacks'&&<span className="overlay-countdown">{t('balanceLabel')}</span>}</div>
     </>}
     {isLoading&&<span role="status" aria-label={t('refreshing')} className="overlay-loading"/>}
   </>;
