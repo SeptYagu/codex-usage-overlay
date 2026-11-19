@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.4] - 2026-11-19
+
+### Added
+- Russian (`ru-RU`) interface language, selectable under Common settings → Language and picked automatically for a Russian Windows locale. Pause and resume messages, tray tooltips and notifications are translated too (#6).
+
+### Changed
+- The compact overlay's short labels (`5H`, `WK`, `AR`, `CR`) are defined in every language's translations instead of as fallbacks in the overlay component, and a test now checks that every language defines exactly the English keys.
+
 ## [1.9.3] - 2026-11-18
 
 Includes every change from `1.9.3-preview.1` through `1.9.3-preview.3`.
