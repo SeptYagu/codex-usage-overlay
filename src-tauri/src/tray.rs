@@ -165,11 +165,20 @@ pub fn tray_presentation(
             ("zh-Hant", crate::config::Provider::Claude) => "Claude 用量讀取失敗",
             ("zh-Hant", crate::config::Provider::Antigravity) => "Antigravity 用量讀取失敗",
             ("zh-Hant", _) => "Codex 用量讀取失敗",
+            ("ru-RU", crate::config::Provider::Claude) => "Не удалось прочитать лимиты Claude",
+            ("ru-RU", crate::config::Provider::Antigravity) => "Не удалось прочитать лимиты Antigravity",
+            ("ru-RU", _) => "Не удалось прочитать лимиты Codex",
             (_, crate::config::Provider::Claude) => "Failed to read Claude usage",
             (_, crate::config::Provider::Antigravity) => "Failed to read Antigravity usage",
             (_, _) => "Failed to read Codex usage",
         }.to_string(),
         TrayReadStatus::Success => {
+            let russian = crate::commands::resolve_locale(&settings.language) == "ru-RU";
+            let (five_label, week_label, argon_label, credits_label) = if russian {
+                ("5 ч", "Нед.", "Арг.", "Кр.")
+            } else {
+                ("5H", "WK", "AR", "CR")
+            };
             let percent = |p: Option<u32>| p.map(|p| p.to_string()).unwrap_or_else(|| "--".into());
             let mut parts = Vec::new();
             if claude {
@@ -178,7 +187,7 @@ pub fn tray_presentation(
                 parts.push("Antigravity".to_string());
             }
             if settings.show_five_hour_quota {
-                parts.push(format!("5H {}%", percent(visible_usage.and_then(|u| u.five_hour_remaining_percent))));
+                parts.push(format!("{five_label} {}%", percent(visible_usage.and_then(|u| u.five_hour_remaining_percent))));
             }
             // Antigravity always reads 5H | Gemini WK | Argon. When Argon is the
             // projected pool, the usage's own weekly window is Argon's.
@@ -189,14 +198,16 @@ pub fn tray_presentation(
             } else {
                 visible_usage.and_then(|u| u.week_remaining_percent)
             };
-            parts.push(format!("WK {}%", percent(week)));
+            parts.push(format!("{week_label} {}%", percent(week)));
             if argon_pool {
-                parts.push(format!("AR {}%", percent(visible_usage.and_then(|u| u.week_remaining_percent))));
+                parts.push(format!("{argon_label} {}%", percent(visible_usage.and_then(|u| u.week_remaining_percent))));
             } else if let Some(argon) = extra.and_then(|a| a.argon_week_remaining_percent) {
-                parts.push(format!("AR {argon}%"));
+                parts.push(format!("{argon_label} {argon}%"));
             }
             if settings.show_credits && ((!claude && !antigravity) || visible_usage.is_some_and(|u| u.has_credits)) {
-                parts.push(format!("CR {}", visible_usage.map(|u| u.credits_display.as_str()).unwrap_or("—")));
+                let credits = visible_usage.map(|u| u.credits_display.as_str()).unwrap_or("—");
+                let credits = if russian { credits.replace('.', ",") } else { credits.to_owned() };
+                parts.push(format!("{credits_label} {credits}"));
             }
             parts.join(" | ")
         }
@@ -1176,6 +1187,7 @@ mod tests {
         let window = |used: f64| QuotaSnapshot { used_percent: Some(used), resets_at: None, window_duration_mins: Some(10080) };
         let mut settings = OverlaySettings::default();
         settings.provider = crate::config::Provider::Antigravity;
+        settings.language = "en-US".into();
         settings.show_five_hour_quota = true;
         let tooltip = |settings: &OverlaySettings, raw: &RawCodexUsage| {
             tray_presentation(settings, Some(&raw.to_ui(None, None)), TrayReadStatus::Success).tooltip
@@ -1204,6 +1216,11 @@ mod tests {
         // Other providers never show it.
         settings.provider = crate::config::Provider::Claude;
         assert_eq!(tooltip(&settings, &gemini_pool), "Claude | 5H 90% | WK 79%");
+        settings.provider = crate::config::Provider::Codex;
+        settings.language = "ru-RU".into();
+        settings.show_credits = true;
+        let codex = RawCodexUsage { credits_display: "12.50".into(), ..plain };
+        assert_eq!(tooltip(&settings, &codex), "5 ч 90% | Нед. 79% | Кр. 12,50");
     }
 
 

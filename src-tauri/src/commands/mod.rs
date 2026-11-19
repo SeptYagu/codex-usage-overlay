@@ -248,6 +248,7 @@ struct UpdateProgress {
 pub fn match_supported_locale(system_locale: &str) -> &'static str {
     let normalized = system_locale.trim().to_ascii_lowercase().replace('_', "-");
     match normalized.as_str() {
+        tag if tag == "ru" || tag.starts_with("ru-") => "ru-RU",
         "zh-tw" | "zh-hk" | "zh-mo" | "zh-hant" | "zh-hant-tw" | "zh-hant-hk" | "zh-hant-mo" => "zh-Hant",
         "zh" | "zh-cn" | "zh-sg" | "zh-hans" | "zh-hans-cn" | "zh-hans-sg" => "zh-CN",
         _ => "en-US",
@@ -259,6 +260,7 @@ pub fn resolve_locale(language_setting: &str) -> &'static str {
         "zh-CN" => "zh-CN",
         "zh-Hant" => "zh-Hant",
         "en-US" => "en-US",
+        "ru-RU" => "ru-RU",
         _ => {
             let sys = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string());
             match_supported_locale(&sys)
@@ -454,6 +456,7 @@ pub async fn show_overlay_menu(
     let (refresh_str, settings_str, hide_str, exit_str) = match locale {
         "zh-CN" => ("立即刷新用量", "设置…", "隐藏悬浮窗", "退出悬浮窗"),
         "zh-Hant" => ("立即重新整理用量", "設定…", "隱藏懸浮窗", "結束懸浮窗"),
+        "ru-RU" => ("Обновить лимиты", "Настройки…", "Скрыть оверлей", "Закрыть оверлей"),
         _ => ("Refresh Now", "Settings…", "Hide", "Exit"),
     };
 

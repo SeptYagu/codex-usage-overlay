@@ -54,6 +54,18 @@ async function mount(overrides: Partial<OverlaySettings> = {}) {
 }
 
 describe('settings tabs', () => {
+  it('offers Russian in settings and presents the localized settings after selection', async () => {
+    const view = await mount();
+    fireEvent.change(view.getByRole('combobox', { name: 'Language' }), { target: { value: 'ru-RU' } });
+    expect(view.onPatchSettings).toHaveBeenCalledWith({ language: 'ru-RU' }, false);
+    await act(async () => {
+      await i18n.changeLanguage('ru-RU');
+      view.rerender(<SettingsView settings={{ ...DEFAULT_SETTINGS, language: 'ru-RU' }} onPatchSettings={view.onPatchSettings} />);
+    });
+    expect((view.getByRole('combobox', { name: 'Язык' }) as HTMLSelectElement).value).toBe('ru-RU');
+    expect(view.getByRole('option', { name: 'Русский' })).toBeTruthy();
+    expect(view.getByRole('tab', { name: 'Общие' })).toBeTruthy();
+  });
   it('shows one settings page at a time with unique control ids', async () => {
     const view = await mount();
     expect(view.getAllByRole('tab')).toHaveLength(5);

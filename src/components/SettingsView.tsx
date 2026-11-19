@@ -6,6 +6,7 @@ import { providerPreference } from '../providerSettings';
 import { useProviderMonitors } from '../hooks/useProviderMonitors';
 import { APP_VERSION } from '../version';
 import { useTranslation } from 'react-i18next';
+import { languageOptions } from '../i18n';
 import { CodexOptions } from './CodexOptions';
 import { BurnRateOptions } from './BurnRateOptions';
 import { SoundPicker } from './SoundPicker';
@@ -116,7 +117,20 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
   const weeklyThreshold = preference.weeklyThresholdPercent;
 
   if (common) return <div data-common-settings className="grid gap-4 md:grid-cols-2 pt-4">
-    <div className="space-y-2">          <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
+    <div className="space-y-2">
+          <label className={toggleRow}>
+            <span className="text-sm font-medium">{t('language')}</span>
+            <select
+              value={settings.language}
+              onChange={(event) => updateField('language', event.target.value)}
+              className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1"
+            >
+              {languageOptions.map(([locale, label]) => (
+                <option key={locale} value={locale}>{t(label)}</option>
+              ))}
+            </select>
+          </label>
+          <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
             <label htmlFor="overlay-layout" className="text-sm font-medium">{t('overlayLayout')}</label>
             <select
               id="overlay-layout"

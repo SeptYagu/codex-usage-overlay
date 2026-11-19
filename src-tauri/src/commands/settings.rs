@@ -401,7 +401,7 @@ pub(crate) fn validate_settings_patch(patch: &Value, allow_auto_start: bool) -> 
     if parsed
         .language
         .as_deref()
-        .is_some_and(|s| !matches!(s, "auto" | "en-US" | "zh-CN" | "zh-Hant"))
+        .is_some_and(|s| !matches!(s, "auto" | "en-US" | "ru-RU" | "zh-CN" | "zh-Hant"))
     {
         return Err("Invalid settings field: language".into());
     }
@@ -815,6 +815,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
             let title = match resolve_locale(&new_settings.language) {
                 "zh-CN" => "设置",
                 "zh-Hant" => "設定",
+                "ru-RU" => "Настройки",
                 _ => "Settings",
             };
             let _ = settings_win.set_title(title);

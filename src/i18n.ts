@@ -1,7 +1,9 @@
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
+import russian from './locales/ru-RU.json';
 
 const resources = {
+  'ru-RU': { translation: russian },
   'en-US': {
     translation: {
       quotaCarouselEnabled: "Automatically rotate quotas",
@@ -101,6 +103,7 @@ const resources = {
       languageEnglish: "English",
       languageSimplifiedChinese: "简体中文",
       languageTraditionalChinese: "繁體中文",
+      languageRussian: "Русский",
       autoCheckUpdates: "Check for updates automatically",
       autoInstallUpdates: "Allow automatic update installation",
       autoInstallUpdatesHint: "Download and verify updates in the background; install when you normally exit. System installer prompts may still appear.",
@@ -388,6 +391,7 @@ const resources = {
       languageEnglish: "English",
       languageSimplifiedChinese: "简体中文",
       languageTraditionalChinese: "繁體中文",
+      languageRussian: "Русский",
       autoCheckUpdates: "自动检查更新",
       autoInstallUpdates: "允许自动安装更新",
       autoInstallUpdatesHint: "后台下载并验签，正常退出时安装；系统安装或提权提示仍可能出现。",
@@ -673,6 +677,7 @@ const resources = {
       languageEnglish: "English",
       languageSimplifiedChinese: "简体中文",
       languageTraditionalChinese: "繁體中文",
+      languageRussian: "Русский",
       autoCheckUpdates: "自動檢查更新",
       autoInstallUpdates: "允許自動安裝更新",
       autoInstallUpdatesHint: "背景下載並驗簽，正常結束時安裝；系統安裝或提權提示仍可能出現。",
@@ -862,6 +867,9 @@ const resources = {
 };
 
 i18n
+  .on('languageChanged', (language) => {
+    if (typeof document !== 'undefined') document.documentElement.lang = language;
+  })
   .use(initReactI18next)
   .init({
     resources,
@@ -891,8 +899,21 @@ export const ZH_CN_LOCALES = new Set([
   'zh-hans-sg',
 ]);
 
-export const matchSupportedLocale = (systemLocale: string): 'en-US' | 'zh-CN' | 'zh-Hant' => {
+export const languageOptions = [
+  ['auto', 'autoSystem'],
+  ['en-US', 'languageEnglish'],
+  ['ru-RU', 'languageRussian'],
+  ['zh-CN', 'languageSimplifiedChinese'],
+  ['zh-Hant', 'languageTraditionalChinese'],
+] as const;
+
+type SupportedLocale = keyof typeof resources;
+
+export const matchSupportedLocale = (systemLocale: string): SupportedLocale => {
   const normalized = (systemLocale || '').trim().toLowerCase().replace(/_/g, '-');
+  if (normalized === 'ru' || normalized.startsWith('ru-')) {
+    return 'ru-RU';
+  }
   if (ZH_HANT_LOCALES.has(normalized)) {
     return 'zh-Hant';
   }
@@ -902,8 +923,8 @@ export const matchSupportedLocale = (systemLocale: string): 'en-US' | 'zh-CN' | 
   return 'en-US';
 };
 
-export const resolveClientLocale = (lang: string): 'en-US' | 'zh-CN' | 'zh-Hant' => {
-  if (lang === 'zh-CN' || lang === 'zh-Hant' || lang === 'en-US') {
+export const resolveClientLocale = (lang: string): SupportedLocale => {
+  if (lang === 'zh-CN' || lang === 'zh-Hant' || lang === 'en-US' || lang === 'ru-RU') {
     return lang;
   }
   const nav = typeof navigator !== 'undefined' ? navigator.language : '';

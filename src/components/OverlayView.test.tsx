@@ -60,6 +60,14 @@ afterEach(() => {
   else Reflect.deleteProperty(document, 'fonts');
 });
 
+it('uses Russian quota abbreviations and a decimal comma in the compact overlay', async () => {
+  await i18n.changeLanguage('ru-RU');
+  const view = render(<OverlayView settings={{ ...DEFAULT_SETTINGS, overlayLayout: 'grouped', showCredits: true, showFiveHourQuota: true }} usage={usage} isLoading={false} />);
+  for (const label of ['5 ч', 'Нед.', 'Кр.', '12,50']) {
+    expect(view.getByText(label)).toBeTruthy();
+  }
+});
+
 describe.each(['grouped', 'stacks'] as const)('%s layout', (overlayLayout) => {
   const settings = { ...DEFAULT_SETTINGS, overlayLayout, showProviderLogo: false };
 
