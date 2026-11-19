@@ -36,12 +36,13 @@ pub use transport::{
 pub const PAUSE_MESSAGE_ZH_CN: &str = "\u{6682}\u{505C}";
 pub const PAUSE_MESSAGE_ZH_HANT: &str = "\u{66AB}\u{505C}";
 pub const PAUSE_MESSAGE_EN: &str = "Pause";
+pub const PAUSE_MESSAGE_RU: &str = "Пауза";
 
 pub fn pause_message_for_locale(locale: &str) -> &'static str {
     match locale {
         "zh-Hant" => PAUSE_MESSAGE_ZH_HANT,
         "zh-CN" => PAUSE_MESSAGE_ZH_CN,
-        "ru-RU" => "Пауза",
+        "ru-RU" => PAUSE_MESSAGE_RU,
         _ => PAUSE_MESSAGE_EN,
     }
 }
@@ -55,12 +56,13 @@ pub fn pause_message_for_language(language: &str) -> &'static str {
 pub const RESUME_MESSAGE_ZH_CN: &str = "\u{7EE7}\u{7EED}";
 pub const RESUME_MESSAGE_ZH_HANT: &str = "\u{7E7C}\u{7E8C}";
 pub const RESUME_MESSAGE_EN: &str = "Continue";
+pub const RESUME_MESSAGE_RU: &str = "Продолжить";
 
 pub fn resume_message_for_locale(locale: &str) -> &'static str {
     match locale {
         "zh-Hant" => RESUME_MESSAGE_ZH_HANT,
         "zh-CN" => RESUME_MESSAGE_ZH_CN,
-        "ru-RU" => "Продолжить",
+        "ru-RU" => RESUME_MESSAGE_RU,
         _ => RESUME_MESSAGE_EN,
     }
 }
@@ -1293,10 +1295,12 @@ mod tests {
         assert_eq!(pause_message_for_locale("zh-CN"), PAUSE_MESSAGE_ZH_CN);
         assert_eq!(pause_message_for_locale("zh-Hant"), PAUSE_MESSAGE_ZH_HANT);
         assert_eq!(pause_message_for_locale("en-US"), PAUSE_MESSAGE_EN);
+        assert_eq!(pause_message_for_language("ru-RU"), PAUSE_MESSAGE_RU);
         assert_eq!(pause_message_for_locale("other"), PAUSE_MESSAGE_EN);
         assert_eq!(resume_message_for_locale("zh-CN"), RESUME_MESSAGE_ZH_CN);
         assert_eq!(resume_message_for_locale("zh-Hant"), RESUME_MESSAGE_ZH_HANT);
         assert_eq!(resume_message_for_locale("en-US"), RESUME_MESSAGE_EN);
+        assert_eq!(resume_message_for_language("ru-RU"), RESUME_MESSAGE_RU);
         assert_eq!(resume_message_for_language("zh-CN"), "继续");
         assert_eq!(resume_message_for_language("zh-Hant"), "繼續");
         assert_eq!(resume_message_for_language("en-US"), "Continue");

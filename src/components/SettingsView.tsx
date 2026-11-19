@@ -126,7 +126,7 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
               className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1"
             >
               {languageOptions.map(([locale, label]) => (
-                <option key={locale} value={locale}>{t(label, { defaultValue: 'Русский' })}</option>
+                <option key={locale} value={locale}>{t(label)}</option>
               ))}
             </select>
           </label>

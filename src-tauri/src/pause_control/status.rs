@@ -146,11 +146,12 @@ impl AutoPauseStatus {
             return match self.summary.as_str() {
                 "off" => "Защита выключена",
                 "armed" => "Защита включена",
-                "quotaLow" if matches!(self.provider, Provider::Claude | Provider::Antigravity) => {
-                    "Запросы блокируются"
-                }
-                "quotaLow" => "Нет работающих чатов",
-                "pauseRequested" => "Запрошена пауза",
+                "quotaLow" => match self.provider {
+                    Provider::Claude => "Мало лимита: запросы Claude Code блокируются",
+                    Provider::Antigravity => "Мало лимита: запросы Antigravity блокируются",
+                    _ => "Мало лимита: нет активных чатов",
+                },
+                "pauseRequested" => "Пауза: остановка не подтверждена",
                 "needsAttention" => "Проверьте защиту",
                 _ => "Проверка защиты…",
             };

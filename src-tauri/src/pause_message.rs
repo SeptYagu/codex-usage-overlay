@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn unicode_limits_and_all_localized_presets_share_the_time_and_cleanup_contract() {
         assert!(valid_message(&"😀".repeat(1000)));assert!(!valid_message(&"😀".repeat(1001)));assert!(!valid_message(" \n"));
-        for locale in ["en-US","zh-CN","zh-Hant"] {
+        for locale in ["en-US","zh-CN","zh-Hant","ru-RU"] {
             let t=templates(locale);assert!(valid_message(&t.continuation));assert!(t.continuation.contains("{resume_at}"));assert!(t.continuation.contains("automation_id"));
         }
     }

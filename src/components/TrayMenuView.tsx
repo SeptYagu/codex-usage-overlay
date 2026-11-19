@@ -346,7 +346,7 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
                 className="tray-menu-item justify-between"
                 onClick={() => chooseLanguage(language)}
               >
-                <span>{t(label, { defaultValue: 'Русский' })}</span><span>{settings.language === language ? '✓' : ''}</span>
+                <span>{t(label)}</span><span>{settings.language === language ? '✓' : ''}</span>
               </button>
             ))}
           </div>
