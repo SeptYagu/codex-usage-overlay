@@ -7,8 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.3] - 2026-11-18
+
+Includes every change from `1.9.3-preview.1` through `1.9.3-preview.3`.
+
 ### Fixed
 - The Antigravity `auto` pool sends "Orchestrator (Neon)" to the Gemini pool, where agy now counts it, instead of Argon. Only models whose name includes Argon use the Argon pool.
+
+## [1.9.3-preview.3] - 2026-11-16
+
+### Fixed
+- Antigravity quota polls run `agy` with `AGY_CLI_DISABLE_AUTO_UPDATE=true`, so its self-updater no longer opens a console window, and a timed-out or cancelled poll terminates its whole process tree (#4).
+- The portable updater helper is a GUI-subsystem program started with `CREATE_NO_WINDOW` and null stdio, so portable updates no longer open a console window (#4).
+- A wrong-typed value inside `providerPreferences` falls back for that field instead of loading the whole `settings.json` as defaults.
+- Schema v0/v1 migration keeps an explicit nested `protectionEnabled` instead of overwriting it with the legacy `autoPauseOnLowQuota`.
+- The status loop wakes when the next reading is due to go stale instead of up to 15 seconds later.
 
 ## [1.9.3-preview.2] - 2026-11-15
 
