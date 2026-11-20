@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Alt+F4 no longer closes the overlay for good. The overlay has no close button, but it takes focus whenever the tray shows it, and a close request (Alt+F4, or `taskkill` without `/F`) used to destroy it: tray clicks then did nothing until the app was restarted. Close requests are now ignored; hiding and exiting stay in the tray and overlay menus.
 - A WebView2 process that dies no longer leaves the overlay blank. A crashed or hung page renderer is reloaded in place. If the WebView2 browser process exits, which takes the overlay, the settings window and the tray menu with it, the app restarts itself, unless that happens within a minute of launch, so a broken WebView2 runtime cannot cause a restart loop.
+- A free-floating overlay comes back on screen after a display change. Adding or removing a monitor, changing its resolution or scaling, or moving the taskbar now puts the overlay back at its saved spot (where it was last dragged), fitted inside that screen's work area. If that screen is gone it lands on the nearest one, and it returns once the screen is back. The next usage refresh does the same as a fallback. A docked pill is re-placed on these changes too.
+- A free-floating overlay near the right or bottom edge no longer gets cut off when it grows. The window keeps fitting its content, and growing used to push it past the screen edge, for example when the provider carousel switched to a provider with wider readings. It now shifts left or up just enough to stay on screen, and goes back to its saved spot when it shrinks again.
 
 ## [1.9.4] - 2026-11-19
 

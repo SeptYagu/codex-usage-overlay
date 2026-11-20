@@ -25,6 +25,9 @@ const CURSOR_COVER_MARGIN: i64 = 1;
 /// IPC round trip, and the lease ensures a lost `dock_window_resized` can
 /// never latch the guard on (spec §3.4).
 const HOVER_RESIZE_LEASE: Duration = Duration::from_millis(1500);
+/// How long a display or work-area change is given to settle (the new monitor
+/// list, and any windows Windows moves itself) before the overlay is re-placed.
+const DISPLAY_SETTLE_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -888,7 +891,10 @@ pub async fn toggle_overlay_window(app: &AppHandle, state: &Arc<AppState>) {
     emit_state(app, &state.dock);
 }
 
-pub async fn keep_docked_in_work_area(app: &AppHandle, state: &Arc<AppState>) {
+/// Keeps the overlay inside the work area of its screen, docked or free. It runs
+/// after display, DPI and work-area changes, after geometry settings change, and
+/// after every usage refresh as the fallback (spec §3.1 T10).
+pub async fn keep_in_work_area(app: &AppHandle, state: &Arc<AppState>) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
@@ -898,6 +904,10 @@ pub async fn keep_docked_in_work_area(app: &AppHandle, state: &Arc<AppState>) {
     // nor while the hover expand's authoritative size write-back is still
     // outstanding (spec §3.4).
     if info.hidden || state.dock.is_awaiting_resize() || state.dock.is_interacting() {
+        return;
+    }
+    if !info.docked {
+        keep_free_in_work_area(&window, &state.dock);
         return;
     }
     let settings = state.settings.lock().await.clone();
@@ -932,11 +942,35 @@ pub async fn keep_docked_in_work_area(app: &AppHandle, state: &Arc<AppState>) {
     }
 }
 
+/// Windows has added, removed or re-laid out a display, or moved the taskbar.
+/// Re-places the overlay once the new layout has settled (spec §3.1 T10).
+pub fn display_layout_changed(app: &AppHandle, state: &Arc<AppState>) {
+    let app = app.clone();
+    let state = state.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(DISPLAY_SETTLE_DELAY).await;
+        keep_in_work_area(&app, &state).await;
+    });
+}
+
 pub fn window_resized(app: &AppHandle, state: &Arc<AppState>) {
     let app = app.clone();
     let state = state.clone();
     tauri::async_runtime::spawn(async move {
-        if !state.dock.info().docked || !state.dock.info().expanded {
+        let info = state.dock.info();
+        if !info.docked {
+            state.dock.drop_hover();
+            // `fitCapsuleSize` only writes the size, so the capsule grows right
+            // and down from its top-left corner; near the right or bottom edge
+            // it now overhangs the work area.
+            if !info.hidden && !state.dock.is_interacting() {
+                if let Some(window) = app.get_webview_window("main") {
+                    keep_free_in_work_area(&window, &state.dock);
+                }
+            }
+            return;
+        }
+        if !info.expanded {
             state.dock.drop_hover();
             return;
         }
@@ -1053,6 +1087,18 @@ fn emit_size_invalidated(window: &WebviewWindow) {
 }
 
 fn place_full_at_anchor(window: &WebviewWindow, manager: &DockManager) -> Result<(), String> {
+    let target = full_anchor_target(window, manager)?;
+    window
+        .set_position(Position::Physical(target))
+        .map_err(|error| error.to_string())
+}
+
+/// Where the full overlay belongs at its current size (see `anchored_position`),
+/// recording that rectangle's centre as the session anchor.
+fn full_anchor_target(
+    window: &WebviewWindow,
+    manager: &DockManager,
+) -> Result<PhysicalPosition<i32>, String> {
     let size = window.outer_size().map_err(|error| error.to_string())?;
     let saved = manager.config.load_position().map(|position| {
         PhysicalPosition::new(position.left.round() as i32, position.top.round() as i32)
@@ -1065,6 +1111,28 @@ fn place_full_at_anchor(window: &WebviewWindow, manager: &DockManager) -> Result
         None => work_area(window),
     }
     .ok_or_else(|| "Monitor work area unavailable".to_string())?;
+    let target = anchored_position(saved, size, work, scale);
+    manager.set_anchor_center((
+        target
+            .x
+            .saturating_add((size.width / 2).min(i32::MAX as u32) as i32),
+        target
+            .y
+            .saturating_add((size.height / 2).min(i32::MAX as u32) as i32),
+    ));
+    Ok(target)
+}
+
+/// The full overlay's top-left corner: the saved anchor (the last drag release),
+/// or a default spot near the top-right corner of `work` when there is none,
+/// clamped so a window of `size` fits inside `work` whole. It depends only on
+/// its inputs, so re-placing a window that already sits there changes nothing.
+fn anchored_position(
+    saved: Option<PhysicalPosition<i32>>,
+    size: PhysicalSize<u32>,
+    work: PhysicalRect,
+    scale: f64,
+) -> PhysicalPosition<i32> {
     let anchor = saved.unwrap_or_else(|| {
         let margin = (20.0 * scale).round() as i32;
         let top = (40.0 * scale).round() as i32;
@@ -1076,18 +1144,35 @@ fn place_full_at_anchor(window: &WebviewWindow, manager: &DockManager) -> Result
             work.y.saturating_add(top),
         )
     });
-    let clamped = clamp_position(anchor, size, work);
-    manager.set_anchor_center((
-        clamped
-            .x
-            .saturating_add((size.width / 2).min(i32::MAX as u32) as i32),
-        clamped
-            .y
-            .saturating_add((size.height / 2).min(i32::MAX as u32) as i32),
-    ));
-    window
-        .set_position(Position::Physical(clamped))
-        .map_err(|error| error.to_string())
+    clamp_position(anchor, size, work)
+}
+
+/// Re-places a free (undocked) overlay at its anchor, clamped into that screen's
+/// work area at the window's current size.
+///
+/// A free overlay is only moved by a drag, which saves the anchor, so its place
+/// is always `anchored_position`. Re-applying that after a resize keeps a
+/// capsule that grew past the right or bottom edge on screen (`fitCapsuleSize`
+/// grows the window right and down from its top-left corner) and returns it to
+/// the anchor when it shrinks again. After a display or work-area change it
+/// brings the overlay back on screen, and back to its own screen once that
+/// screen returns. Only the window moves; the saved anchor is never rewritten
+/// (spec §3.6).
+fn keep_free_in_work_area(window: &WebviewWindow, manager: &DockManager) {
+    if window.is_minimized().unwrap_or(false) {
+        return;
+    }
+    let result = full_anchor_target(window, manager).and_then(|target| {
+        if window.outer_position().ok() == Some(target) {
+            return Ok(());
+        }
+        window
+            .set_position(Position::Physical(target))
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = result {
+        eprintln!("Could not keep the overlay inside the work area: {error}");
+    }
 }
 
 /// Places the expanded window for the hover-expand transition while the window
@@ -1391,6 +1476,16 @@ pub fn install_native_window_hook(window: &WebviewWindow, app: &AppHandle) -> Re
                 }
                 0x0212 => {
                     let _ = app.emit("overlay_menu_closed", ());
+                }
+                // WM_DISPLAYCHANGE: a display was added, removed or changed
+                // resolution.
+                0x007E => {
+                    let _ = app.emit("display_layout_changed", ());
+                }
+                // WM_SETTINGCHANGE with SPI_SETWORKAREA: the taskbar moved,
+                // resized or started auto-hiding.
+                0x001A if wparam.0 == 0x002F => {
+                    let _ = app.emit("display_layout_changed", ());
                 }
                 _ => {}
             }
@@ -2198,5 +2293,89 @@ mod tests {
         // monitor under the window so the window stays on screen.
         let selected = select_work_area(&monitors, 0, Some((-9999.0, 300.0))).unwrap();
         assert_eq!(selected.0, primary.0);
+    }
+
+    /// A 2560x1440 screen at 125% with a 50 px taskbar along the bottom.
+    fn primary_work() -> PhysicalRect {
+        PhysicalRect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1390,
+        }
+    }
+
+    fn right_edge(position: PhysicalPosition<i32>, size: PhysicalSize<u32>) -> i64 {
+        position.x as i64 + size.width as i64
+    }
+
+    #[test]
+    fn a_free_capsule_that_outgrows_the_right_edge_comes_back_inside_and_returns_when_it_shrinks() {
+        let work = primary_work();
+        let narrow = PhysicalSize::new(381, 92);
+        let wide = PhysicalSize::new(546, 92);
+        // Dragged flush against the right edge while the narrow provider showed.
+        let saved = PhysicalPosition::new(2179, 0);
+        assert_eq!(anchored_position(Some(saved), narrow, work, 1.25), saved);
+
+        // The carousel switches to a wider provider: instead of overhanging the
+        // edge by 165 px, the capsule keeps its right edge on the screen edge.
+        let grown = anchored_position(Some(saved), wide, work, 1.25);
+        assert_eq!(grown, PhysicalPosition::new(2014, 0));
+        assert_eq!(right_edge(grown, wide), work.right());
+
+        // Back to the narrow provider: exactly where the user left it.
+        assert_eq!(anchored_position(Some(saved), narrow, work, 1.25), saved);
+    }
+
+    #[test]
+    fn a_free_capsule_that_grows_taller_stays_above_the_taskbar() {
+        let work = primary_work();
+        let saved = PhysicalPosition::new(771, 1300);
+        let grouped = PhysicalSize::new(381, 74);
+        let stacks = PhysicalSize::new(381, 151);
+        assert_eq!(anchored_position(Some(saved), grouped, work, 1.25), saved);
+        let lifted = anchored_position(Some(saved), stacks, work, 1.25);
+        assert_eq!(lifted, PhysicalPosition::new(771, 1239));
+        assert_eq!(lifted.y as i64 + stacks.height as i64, work.bottom());
+    }
+
+    #[test]
+    fn without_a_saved_anchor_the_capsule_keeps_its_top_right_margin_at_any_width() {
+        let work = primary_work();
+        // 20 and 40 logical px at 125%.
+        for width in [381u32, 546] {
+            let position = anchored_position(None, PhysicalSize::new(width, 92), work, 1.25);
+            assert_eq!(position.y, 50);
+            assert_eq!(work.right() - right_edge(position, PhysicalSize::new(width, 92)), 25);
+        }
+    }
+
+    #[test]
+    fn an_anchor_left_behind_by_a_removed_screen_lands_inside_the_remaining_one() {
+        let primary = (primary_work(), 1.25);
+        // The anchor was saved on a screen to the right that is now unplugged.
+        let saved = PhysicalPosition::new(6000, 300);
+        let (work, scale) = select_work_area(&[primary], 0, Some((6000.0, 300.0))).unwrap();
+        let size = PhysicalSize::new(381, 92);
+        let placed = anchored_position(Some(saved), size, work, scale);
+        assert_eq!(placed, PhysicalPosition::new(2560 - 381, 300));
+    }
+
+    #[test]
+    fn a_capsule_larger_than_the_work_area_is_pinned_to_its_top_left() {
+        let work = PhysicalRect {
+            x: -1920,
+            y: 0,
+            width: 300,
+            height: 80,
+        };
+        let placed = anchored_position(
+            Some(PhysicalPosition::new(-1800, 40)),
+            PhysicalSize::new(381, 92),
+            work,
+            1.0,
+        );
+        assert_eq!(placed, PhysicalPosition::new(-1920, 0));
     }
 }

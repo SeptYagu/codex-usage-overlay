@@ -116,7 +116,7 @@ pub fn run() {
                     let state = window_state.clone();
                     tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(80)).await;
-                        dock::keep_docked_in_work_area(&app, &state).await;
+                        dock::keep_in_work_area(&app, &state).await;
                     });
                 }
                 _ => {}
@@ -273,6 +273,13 @@ pub fn run() {
             let menu_app = app.handle().clone();
             app.listen("overlay_menu_closed", move |_| {
                 dock::menu_changed(&menu_app, &menu_state, false);
+            });
+            // Display and taskbar changes re-place the overlay right away instead
+            // of waiting for the next usage refresh.
+            let layout_state = app_state_clone.clone();
+            let layout_app = app.handle().clone();
+            app.listen("display_layout_changed", move |_| {
+                dock::display_layout_changed(&layout_app, &layout_state);
             });
 
             display::start(app.handle(), &app_state_clone);

@@ -2,7 +2,7 @@
 
 > 代码依据：v1.9.4（提交 `ce1467a`，文中行号均指该提交）。现场采样：本机安装的 v1.9.2（PID 28384，2026-11-14 22:30:44 启动）。v1.9.2 → v1.9.4 之间 `dock.rs` 只是把几何函数挪到 `geometry.rs`，与可见性相关的路径两版相同。
 > 排查日期：2026-11-19（文中时间均为本机时间，UTC−5）
-> 结论：**没有定时器、失焦或全屏检测会自动隐藏悬浮窗**，`hide()` 只来自托盘/菜单切换和启动时沿用的隐藏状态。但"看不见"不只有隐藏、遮挡、越界三类：主窗口收到 `WM_CLOSE` 会被直接销毁，WebView2 进程退出后透明窗口不再绘制任何内容。这两种情况托盘切换都救不回来，只能重启。两条路径已在 `CHANGELOG.md` 的 `[Unreleased]` 中修复（5.1、5.2），v1.9.4 及以前的版本仍受影响。
+> 结论：**没有定时器、失焦或全屏检测会自动隐藏悬浮窗**，`hide()` 只来自托盘/菜单切换和启动时沿用的隐藏状态。但"看不见"不只有隐藏、遮挡、越界三类：主窗口收到 `WM_CLOSE` 会被直接销毁，WebView2 进程退出后透明窗口不再绘制任何内容。这两种情况托盘切换都救不回来，只能重启。这两条路径已在 v1.9.5-preview.1 修复（5.1、5.2），v1.9.4 及以前仍受影响。自由态越界和尺寸自适应裁边（5.3、5.4）已在 `CHANGELOG.md` 的 `[Unreleased]` 中修复，尚未发布。
 
 ## 摘要
 
@@ -106,8 +106,8 @@ SHOWN: 正常显示
 | 托盘切换没报错、探针也说窗口在，屏幕上却什么都没有 | `WEBVIEW-GONE` | 1.2 B，WebView2 进程已退出。v1.9.4 及以前只能退出重开；修复后会自动重载或重启，持续出现说明恢复没有生效（例如启动不到一分钟又退出） |
 | 切到某个应用后看不见，退出该应用又出现 | `COVERED` | `WS_EX_TOPMOST` 只保证在非置顶窗口之上；置顶窗口之间按最近激活排序，别的置顶窗口和全屏独占应用都能压上来。探针会列出压在上面的窗口及其进程 |
 | 同上，且探针显示 `topmost=False` | `NOT-TOPMOST` / `COVERED` | 置顶标志丢失，普通窗口也能盖住它 |
-| 插拔显示器、改分辨率或缩放、远程桌面/串流之后不见了 | `OFFSCREEN` | 自由漂浮状态运行期不回界（5.3）；托盘隐藏再显示一次可拉回 |
-| 放在屏幕右侧或底部附近，轮播切换后被裁掉一截 | `OFFSCREEN`（部分，探针给出落在工作区内的百分比） | 尺寸自适应只向右下扩张（5.4） |
+| 插拔显示器、改分辨率或缩放、远程桌面/串流之后不见了 | `OFFSCREEN` | 自由漂浮状态运行期不回界（5.3）；托盘隐藏再显示一次可拉回。修复后显示器或任务栏一变就自动拉回 |
+| 放在屏幕右侧或底部附近，轮播切换后被裁掉一截 | `OFFSCREEN`（部分，探针给出落在工作区内的百分比） | 尺寸自适应只向右下扩张（5.4）。修复后变大时自动左移或上移，变小后回到锚点 |
 | 切换虚拟桌面后不见了 | `CLOAKED` | DWM cloak 了窗口，`IsWindowVisible` 仍为 true |
 | 按 Win+D 后不见，再按一次又出现 | `MINIMIZED` 或 `CLOAKED` | 以探针结果为准；不是程序隐藏 |
 | 宽或高为 0 | `ZERO-SIZE` | 前端 `fitCapsuleSize` 拒绝 ≤0 的尺寸（`OverlayView.tsx:145`），目前没有已知路径；出现请保留日志 |
@@ -155,13 +155,13 @@ python scripts/diagnose-overlay-visibility.py --seconds 600 --log overlay-visibi
 
 ## 5. 已确认的代码薄弱点
 
-### 5.1 `main` 没有拦截关闭请求（已修复，未发布）
+### 5.1 `main` 没有拦截关闭请求（已修复，v1.9.5-preview.1）
 
 见 1.2 A。`ce1467a` 中 `lib.rs:60`–`115` 的 `on_window_event` 没有 `CloseRequested if window.label() == "main"` 分支，Alt+F4 或 `WM_CLOSE` 会永久销毁悬浮窗，直到重启。
 
 修复：`on_window_event` 为 `main` 增加 `CloseRequested` 分支，只调用 `prevent_close()`。Alt+F4 和 `WM_CLOSE` 不再有任何效果，隐藏和退出仍走托盘与悬浮窗菜单。退出、自动更新和 portable updater 都不经过关闭请求，不受影响：`app.exit()` 走 `RunEvent::ExitRequested`，Tauri 更新插件用 `process::exit`，portable updater 只等待进程退出。
 
-### 5.2 没有处理 WebView2 进程退出（已修复，未发布）
+### 5.2 没有处理 WebView2 进程退出（已修复，v1.9.5-preview.1）
 
 见 1.2 B。`ce1467a` 没有注册 `ProcessFailed`，WebView2 浏览器进程一旦退出，悬浮窗就一直空白，直到重启。
 
@@ -175,9 +175,9 @@ python scripts/diagnose-overlay-visibility.py --seconds 600 --log overlay-visibi
 
 重启过程中跳过 `install_prepared_update_on_exit`，避免更新安装与重新启动的进程争抢 exe；开启自动检查时，重启后的应用会在启动时重新准备更新。重启会丢失只存在内存里的状态（例如待恢复的已暂停对话列表），与手动重启相同。
 
-### 5.3 自由漂浮状态运行期不回界（未修复）
+### 5.3 自由漂浮状态运行期不回界（已修复，未发布）
 
-`dock::keep_docked_in_work_area`（`dock.rs:891`）：
+`ce1467a` 中的 `dock::keep_docked_in_work_area`（`dock.rs:891`）：
 
 ```rust
 if info.hidden || state.dock.is_awaiting_resize() || state.dock.is_interacting() {
@@ -191,9 +191,14 @@ if let Some(edge) = info.edge.filter(|_| info.docked) {
 
 调用方有 `lib.rs:105`（`ScaleFactorChanged`）、`notify.rs:169`（每次读到用量之后）和 `commands/settings.rs:797`（几何相关设置变更之后），但**未停靠时函数体没有任何定位动作**。显示器拓扑、分辨率或 DPI 变化后（远程桌面与串流工具是高频场景），应用不会把窗口拉回当前工作区，窗口能否回来取决于 Windows 自己是否重排。
 
-运行期只有两处会 clamp 自由态窗口：拖拽结束（`dock.rs:671` `drag_ended`）和托盘重新显示（`dock.rs:879`–`880`）。`mousePassthrough=true` 时无法拖拽，只剩后者。
+运行期只有两处会 clamp 自由态窗口：拖拽结束（`dock.rs:671` `drag_ended`）和托盘重新显示（`dock.rs:879`–`880`）。`mousePassthrough=true` 时无法拖拽，只剩后者。另外，规格 §3.1 T10 要求的"显示器/工作区变化"触发也没有实现：只有 DPI 变化（`ScaleFactorChanged`）和用量刷新会调用它，而用量刷新只在读取成功后才调用，断网时一直不会触发。
 
-### 5.4 尺寸自适应只向右下扩张（未修复）
+修复：
+
+- 函数改名为 `keep_in_work_area`，自由态也处理：把窗口放回保存的锚点（`window-position.json`，即最后一次拖拽松手的位置；没有锚点时用默认的右上角位置），按当前尺寸 clamp 进锚点所在显示器的工作区。锚点所在显示器不在了就落到当前显示器，显示器接回后再回到原处。只移动窗口，不改写锚点（规格 §3.6）。位置没变时不调用 `set_position`。
+- 主窗口的原生子类过程新增两条消息：`WM_DISPLAYCHANGE`（显示器增减或改分辨率）和带 `SPI_SETWORKAREA` 的 `WM_SETTINGCHANGE`（任务栏移动、改变大小或自动隐藏）。收到后等 500 ms 让布局稳定，再调用 `keep_in_work_area`。停靠态的小浮窗也因此能在这些变化后立即重新落位，补上规格 T10。
+
+### 5.4 尺寸自适应只向右下扩张（已修复，未发布）
 
 前端 `fitCapsuleSize`（`src/components/OverlayView.tsx:138`）只写尺寸、不写位置：
 
@@ -203,15 +208,19 @@ await getCurrentWindow().setSize(new LogicalSize(width * dprComp, height * dprCo
 
 窗口以左上角为锚点向右下扩展。左上角始终留在原处，所以这条路径不会让整个窗口消失；但窗口靠近屏幕右侧或底部时，内容变宽/变高会把右下部分推出工作区裁掉。开启轮播后，切换到内容更宽的 provider 就会触发。停靠态由 `dock_window_resized` → `dock::window_resized`（`dock.rs:935`）兜底重新定位，自由态在 `dock.rs:939` 直接返回。
 
+修复：`fitCapsuleSize` 每次写完尺寸都调用 `dock_window_resized`（收起的小浮窗不会走到这里）。后端在自由态用 5.3 的同一套落位：放回锚点，按新尺寸 clamp 进工作区。所以贴着右边缘的胶囊变宽时右边缘保持贴边、整体左移，变窄后回到拖拽时的位置；变高时同理上移，不压到任务栏下面。拖拽中或右键菜单打开时不移动窗口，与停靠态的规则一致。
+
 ## 6. 后续修复
 
-已完成：拦截 `main` 的关闭请求（5.1），WebView2 进程退出后自动恢复（5.2）。两项都只有单元测试和编译验证，WebView2 的 `ProcessFailed` 回调与 Alt+F4 还没有在真实窗口上跑过（原因同 1.2），发布前需要在安装版上验收。
+已随 v1.9.5-preview.1 发布：拦截 `main` 的关闭请求（5.1），WebView2 进程退出后自动恢复（5.2）。
+
+已修复、尚未发布：自由态运行期回界（5.3），尺寸变化后保持在工作区内（5.4）。
+
+以上四项都有单元测试和编译验证，但都还没有在真实窗口上验收：Alt+F4、结束 WebView2 进程、插拔显示器或移动任务栏、贴着右边缘时轮播变宽。
 
 仍待处理：
 
-1. **自由态回界**：在 `keep_docked_in_work_area` 中为 `!docked && !hidden` 增加分支，用 `work_area` + `clamp_position` 把窗口拉回当前显示器工作区；函数开头的 `is_interacting` 判断已保证不会和拖拽、菜单冲突。`place_full_at_anchor` 只有一个显示器都枚举不到时才返回 `Err`，锚点所在显示器缺失时会退回当前显示器，不需要额外处理。
-2. **尺寸变化后保持可见**：`fitCapsuleSize` 写完尺寸后调用 `dock_window_resized`，并让它在自由态也做一次 clamp。
-3. **降低误触代价**：考虑把托盘左键语义从"切换"改为"唤出"，或在设置页显示当前隐藏状态。此项涉及交互变更，需产品确认。
+1. **降低误触代价**：考虑把托盘左键语义从"切换"改为"唤出"，或在设置页显示当前隐藏状态。此项涉及交互变更，需产品确认。
 
 ## 附：复现与取证步骤
 
@@ -224,7 +233,7 @@ await getCurrentWindow().setSize(new LogicalSize(width * dprComp, height * dprCo
    - `NO-WINDOW` → v1.9.4 及以前：回想消失前是否按过 Alt+F4，或有脚本关闭过进程；退出重开。修复后的版本不应再出现，出现请保留日志。
    - `WEBVIEW-GONE` → 查当时是否有脚本结束过 `msedgewebview2.exe`。修复后的版本会在几秒内自动重载或重启；一直停在 `WEBVIEW-GONE` 说明恢复没有生效，退出重开并保留日志。
    - `COVERED` → 日志会列出压在上面的窗口标题和所属进程。
-   - `OFFSCREEN` → 对比日志里的 `rect`、显示器布局与 `window-position.json`（三者都是物理像素）；托盘隐藏再显示可拉回。
+   - `OFFSCREEN` → 对比日志里的 `rect`、显示器布局与 `window-position.json`（三者都是物理像素）。v1.9.5-preview.1 及以前用托盘隐藏再显示拉回；修复后的版本在显示器、任务栏变化或下一次用量刷新时自动拉回，持续 `OFFSCREEN` 请保留日志。
    - `CLOAKED` / `MINIMIZED` → 检查是否刚切换过虚拟桌面或按过 Win+D。
    - `NO-PROCESS` → 进程没了：看是否正在自动更新（`autoInstallUpdates=true`），或被结束、崩溃。
-3. `window-position.json` 只在拖拽结束时更新（`dock.rs:696`、`dock.rs:734`）。窗口左上角与它不一致，说明窗口在运行期被挪动过（显示器变化、尺寸自适应或系统重排），优先看 5.3、5.4。
+3. `window-position.json` 只在拖拽结束时更新（`dock.rs:696`、`dock.rs:734`）。v1.9.5-preview.1 及以前，窗口左上角与它不一致，说明窗口在运行期被挪动过（显示器变化、尺寸自适应或系统重排），优先看 5.3、5.4。修复后，自由态窗口的左上角应等于锚点按当前尺寸 clamp 进工作区后的位置（贴边时会偏离锚点），偏离这个位置才说明有别的东西挪动了它。

@@ -166,7 +166,7 @@ pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Ar
     if let Some(app) = sink.app_handle() {
         if state.is_displayed() {
             if let Some(owner) = app.try_state::<Arc<AppState>>() {
-                crate::dock::keep_docked_in_work_area(app, owner.inner()).await;
+                crate::dock::keep_in_work_area(app, owner.inner()).await;
             }
         }
 

@@ -175,7 +175,9 @@ describe.each(['grouped', 'stacks'] as const)('%s layout', (overlayLayout) => {
     await waitFor(() => expect(tauri.setSize).toHaveBeenCalledTimes(1));
     fireEvent.contextMenu(container.querySelector('.overlay-capsule')!);
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('show_overlay_menu'));
-    expect(tauri.invoke).toHaveBeenCalledTimes(1);
+    // The menu opens once; the only other call is the size report after the fit.
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('dock_window_resized'));
+    expect(tauri.invoke).toHaveBeenCalledTimes(2);
     expect(tauri.setSize).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('button')).toBeNull();
   });
@@ -217,6 +219,21 @@ it('resizes after changing layout, scale, credits and translated labels', async 
   expect(screen.getByText('每周')).toBeTruthy();
   expect(screen.getByText('余额')).toBeTruthy();
   expect(tauri.setSize).toHaveBeenLastCalledWith(expect.objectContaining({ width: 300 }));
+});
+
+it('reports every free capsule resize so the backend can keep it inside the work area', async () => {
+  let measuredWidth = 270;
+  vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockImplementation(() => ({
+    width: measuredWidth, height: 90,
+  } as DOMRect));
+  const { rerender } = render(<OverlayView settings={DEFAULT_SETTINGS} usage={usage} isLoading={false} />);
+  await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('dock_window_resized'));
+  expect(tauri.invoke).toHaveBeenCalledTimes(1);
+  measuredWidth = 443;
+  rerender(<OverlayView settings={{ ...DEFAULT_SETTINGS, overlayLayout: 'stacks' }} usage={usage} isLoading={false} />);
+  expect(tauri.setSize).toHaveBeenLastCalledWith(expect.objectContaining({ width: 443 }));
+  await waitFor(() => expect(tauri.invoke).toHaveBeenCalledTimes(2));
+  expect(tauri.invoke).toHaveBeenLastCalledWith('dock_window_resized');
 });
 
 it('shows separate quota bars and expands a collapsed pill on hover', async () => {

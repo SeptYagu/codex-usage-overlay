@@ -147,14 +147,15 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, us
     lastSizeRef.current = { width, height };
     try {
       await getCurrentWindow().setSize(new LogicalSize(width * dprComp, height * dprComp));
-      if (dockState?.docked && dockState.expanded) {
-        void invoke('dock_window_resized').catch((err) => console.error('Failed to reposition docked overlay:', err));
-      }
+      // setSize grows the window right and down from its top-left corner, so the
+      // backend re-places it after every size change: a docked capsule against
+      // its edge, a free one at its anchor inside the work area.
+      void invoke('dock_window_resized').catch((err) => console.error('Failed to reposition overlay:', err));
     } catch (err) {
       lastSizeRef.current = { width: 0, height: 0 };
       console.error('Failed to fit overlay size:', err);
     }
-  }, [collapsed, dockState?.docked, dockState?.expanded, dprComp]);
+  }, [collapsed, dprComp]);
 
   useLayoutEffect(() => {
     // Collapse/expand, show/hide and backend invalidations all change the window

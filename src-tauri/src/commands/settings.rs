@@ -794,7 +794,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
             }
         }
         if geometry_changed {
-            crate::dock::keep_docked_in_work_area(app, state).await;
+            crate::dock::keep_in_work_area(app, state).await;
         }
     }
     let new_settings = &envelope.settings;
