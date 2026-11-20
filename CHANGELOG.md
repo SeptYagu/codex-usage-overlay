@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Alt+F4 no longer closes the overlay for good. The overlay has no close button, but it takes focus whenever the tray shows it, and a close request (Alt+F4, or `taskkill` without `/F`) used to destroy it: tray clicks then did nothing until the app was restarted. Close requests are now ignored; hiding and exiting stay in the tray and overlay menus.
+- A WebView2 process that dies no longer leaves the overlay blank. A crashed or hung page renderer is reloaded in place. If the WebView2 browser process exits, which takes the overlay, the settings window and the tray menu with it, the app restarts itself, unless that happens within a minute of launch, so a broken WebView2 runtime cannot cause a restart loop.
+
 ## [1.9.4] - 2026-11-19
 
 ### Added

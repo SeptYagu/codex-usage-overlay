@@ -560,7 +560,10 @@ pub fn open_tray_menu_window(app: &AppHandle) {
         .shadow(true)
         .build()
         {
-            Ok(window) => window,
+            Ok(window) => {
+                crate::webview_recovery::watch(&window);
+                window
+            }
             Err(_) => return,
         }
     };
@@ -857,7 +860,10 @@ pub fn open_settings_window(app: &AppHandle) {
         .skip_taskbar(false)
         .build()
         {
-            Ok(window) => (window, true),
+            Ok(window) => {
+                crate::webview_recovery::watch(&window);
+                (window, true)
+            }
             Err(_) => return,
         }
     };

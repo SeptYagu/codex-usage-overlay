@@ -67,6 +67,9 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 
 [target.'cfg(windows)'.dependencies]
+# ProcessFailed handler for each window's WebView2 (webview_recovery.rs). The
+# same version wry builds on, so its COM types match tauri's PlatformWebview.
+webview2-com = "0.39"
 tauri-winrt-notification = "=0.8.1"
 rodio = { version = "=0.22.2", default-features = false, features = [
     "playback",

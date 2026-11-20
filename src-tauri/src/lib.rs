@@ -19,6 +19,7 @@ mod polling;
 mod monitor;
 mod tray;
 mod update_channel;
+mod webview_recovery;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -77,6 +78,14 @@ pub fn run() {
                 {
                     api.prevent_close();
                     let _ = window.hide();
+                }
+                // Nothing recreates the overlay once it is destroyed, so a close
+                // request must never reach it. It has no close button, but it takes
+                // focus whenever the tray shows it, so Alt+F4 lands here, as does a
+                // WM_CLOSE from `taskkill` without /F. Hiding and exiting go through
+                // the tray and the overlay menu instead.
+                tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
+                    api.prevent_close();
                 }
                 // The only point where the "pre-minimize" geometry can still be
                 // observed. A minimized window reports a 0x0 client rect (and
@@ -210,6 +219,7 @@ pub fn run() {
                     _ => "Settings",
                 };
                 let _ = settings_win.set_title(title);
+                webview_recovery::watch(&settings_win);
             }
 
             // Setup main overlay window position and initial size
@@ -222,6 +232,7 @@ pub fn run() {
                 if let Err(error) = dock::install_native_window_hook(&main_win, app.handle()) {
                     eprintln!("Could not install the main window event hook: {error}");
                 }
+                webview_recovery::watch(&main_win);
             }
             if initial_settings.mouse_passthrough {
                 let restored =
@@ -334,6 +345,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
+                // WebView2 processes going away from here on are part of the
+                // shutdown, not a failure to recover from.
+                webview_recovery::note_exiting();
+            }
             if matches!(event, tauri::RunEvent::Exit) {
                 // The settings window is hidden (not destroyed) when the user closes
                 // it, so a user who resizes it and then quits straight from the tray
@@ -365,10 +381,17 @@ pub fn run() {
                 }
                 app.state::<Arc<AppState>>().monitors.shutdown();
                 commands::shutdown_audio(app);
-                commands::install_prepared_update_on_exit(
-                    app,
-                    app.state::<Arc<AppState>>().inner(),
-                );
+                // A WebView2 recovery restart relaunches this binary right after
+                // this event, and an update installed now would race that launch
+                // (the portable updater replaces the exe once this process is
+                // gone). With automatic checks on, the relaunched app prepares the
+                // update again at startup.
+                if !webview_recovery::restarting() {
+                    commands::install_prepared_update_on_exit(
+                        app,
+                        app.state::<Arc<AppState>>().inner(),
+                    );
+                }
             }
         });
 }
