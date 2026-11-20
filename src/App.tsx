@@ -206,7 +206,7 @@ export const App: React.FC = () => {
 
   if (windowLabel === 'tray-menu' || window.location.hash === '#tray-menu') {
     if (settingsLoadState !== 'ready') return null;
-    return <TrayMenuView display={display??undefined} settings={settings} onPatchSettings={handlePatchSettings} />;
+    return <TrayMenuView display={display ?? undefined} settings={settings} monitors={monitors} onPatchSettings={handlePatchSettings} />;
   }
 
   if (windowLabel === 'main' && (settingsLoadState === 'loading' || dockState === null)) return null;
@@ -228,6 +228,7 @@ export const App: React.FC = () => {
       provider={effectiveProvider}
       usage={displayedUsage}
       isLoading={monitor?.health === 'checking'}
+      health={matchesSource ? monitor?.health : undefined}
       dockState={dockState ?? undefined}
       monitors={monitors}
       onCycleProvider={async () => {

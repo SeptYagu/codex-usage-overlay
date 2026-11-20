@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { OverlaySettings, Provider, ProviderPreference, SettingsPatch, DisplayState } from '../types';
@@ -6,7 +6,7 @@ import { providerPreference } from '../providerSettings';
 import { useProviderMonitors } from '../hooks/useProviderMonitors';
 import { APP_VERSION } from '../version';
 import { useTranslation } from 'react-i18next';
-import { languageOptions } from '../i18n';
+import { CommonSettings } from './CommonSettings';
 import { CodexOptions } from './CodexOptions';
 import { BurnRateOptions } from './BurnRateOptions';
 import { SoundPicker } from './SoundPicker';
@@ -37,12 +37,21 @@ export const SettingsView = ({ settings, onPatchSettings, saveErrors = [], displ
   const [isInstalled, setIsInstalled] = useState(false);
   const [notificationStatus, setNotificationStatus] = useState<string>('loading');
   const [activeTab, setActiveTab] = useState<SettingsTab>('common');
+  const panelRef = useRef<HTMLElement>(null);
+  const scrollPositions = useRef<Partial<Record<SettingsTab, number>>>({});
+  const selectTab = (tab: SettingsTab) => {
+    if (tab === activeTab) return;
+    scrollPositions.current[activeTab] = panelRef.current?.scrollTop ?? 0;
+    setActiveTab(tab);
+  };
+  useLayoutEffect(() => {
+    if (panelRef.current) panelRef.current.scrollTop = scrollPositions.current[activeTab] ?? 0;
+  }, [activeTab]);
   useEffect(() => {
     invoke<boolean>('is_installed_version').then(setIsInstalled).catch(() => {});
     invoke<string>('get_notification_status').then(setNotificationStatus).catch(() => setNotificationStatus('unavailable'));
   }, []);
   useEffect(() => { getCurrentWindow().setTitle(t('windowSettings')).catch(console.error); }, [t, settings.language]);
-  const shared = { savedSettings: settings, savePatch: onPatchSettings, monitors, isInstalled, notificationStatus };
   const activePage = settingsTabs.find(page => page.id === activeTab)!;
   const provider = 'provider' in activePage ? activePage.provider : null;
   return <div className="settings-shell bg-[#F5F6F8] dark:bg-slate-900 text-slate-800 dark:text-slate-100 font-sans select-none">
@@ -50,44 +59,34 @@ export const SettingsView = ({ settings, onPatchSettings, saveErrors = [], displ
       <h2 className="text-base font-bold">{t('windowSettings')}</h2><span className="text-xs font-mono">v{APP_VERSION}</span>
     </header>
     <nav role="tablist" aria-label={t('windowSettings')} className="settings-tab-list shrink-0 flex gap-2 border-b border-slate-200 dark:border-slate-700">
-      {settingsTabs.map((tab, index) => <button key={tab.id} type="button" role="tab" id={`settings-tab-${tab.id}`} aria-controls="settings-tab-panel" aria-selected={activeTab === tab.id} tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => setActiveTab(tab.id)} onKeyDown={event => {
+      {settingsTabs.map((tab, index) => <button key={tab.id} type="button" role="tab" id={`settings-tab-${tab.id}`} aria-controls="settings-tab-panel" aria-selected={activeTab === tab.id} tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => selectTab(tab.id)} onKeyDown={event => {
         const next = event.key === 'Home' ? 0 : event.key === 'End' ? settingsTabs.length - 1 : event.key === 'ArrowRight' ? (index + 1) % settingsTabs.length : event.key === 'ArrowLeft' ? (index - 1 + settingsTabs.length) % settingsTabs.length : -1;
-        if (next >= 0) { event.preventDefault(); setActiveTab(settingsTabs[next].id); document.getElementById(`settings-tab-${settingsTabs[next].id}`)?.focus(); }
+        if (next >= 0) { event.preventDefault(); selectTab(settingsTabs[next].id); document.getElementById(`settings-tab-${settingsTabs[next].id}`)?.focus(); }
       }} className={`shrink-0 rounded-t-lg px-4 py-2 text-sm font-semibold ${activeTab === tab.id ? 'bg-white dark:bg-slate-800 text-cyan-700 dark:text-cyan-300 border border-b-0 border-slate-200 dark:border-slate-700' : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-100'}`}>{t(tab.label)}</button>)}
     </nav>
-    <main id="settings-tab-panel" role="tabpanel" aria-labelledby={`settings-tab-${activeTab}`} tabIndex={0} className="settings-content rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/30">
-    {activeTab === 'common' ? <section className="p-4">
-      <div className="space-y-2" data-carousel-settings>
-        <label className="flex items-center justify-between text-sm font-semibold">{t('quotaCarouselEnabled')}<input type="checkbox" className="accent-cyan-500" checked={settings.quotaCarouselEnabled??false} onChange={e=>onPatchSettings({quotaCarouselEnabled:e.target.checked})}/></label>
-        <div className="flex justify-between text-sm"><label htmlFor="carousel-interval">{t('quotaCarouselInterval')}</label><span className="font-mono text-cyan-600">{settings.quotaCarouselIntervalSeconds??8} {t('seconds')}</span></div>
-        <input id="carousel-interval" type="range" min="3" max="30" step="1" value={settings.quotaCarouselIntervalSeconds??8} onChange={e=>onPatchSettings({quotaCarouselIntervalSeconds:Number(e.target.value)},true)} className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500" />
-        <div className="flex justify-between text-[11px] text-slate-400"><span>3 {t('seconds')}</span><span>{t('carouselDefault')}</span><span>30 {t('seconds')}</span></div>
-        <p className="text-xs text-slate-500">{t('carouselHint')}</p>
-        {display?.carouselEnabled && <p role="status" className="text-xs text-cyan-600">{t(`carouselStatus_${display.status}`)} · {display.candidates.length} {t('carouselSources')}</p>}
-      </div>
-      <SettingsPanel {...shared} common configurationProvider={settings.provider} />
-    </section> : provider && <section key={provider} data-provider-settings={provider} aria-label={t(activePage.label)} className="settings-provider-column">
+    <main ref={panelRef} id="settings-tab-panel" role="tabpanel" aria-labelledby={`settings-tab-${activeTab}`} tabIndex={0} className="settings-content rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/30">
+    {activeTab === 'common' ? (
+      <CommonSettings settings={settings} onPatchSettings={onPatchSettings} display={display}
+        isInstalled={isInstalled} notificationStatus={notificationStatus} />
+    ) : provider && <section key={provider} data-provider-settings={provider} aria-label={t(activePage.label)} className="settings-provider-column">
         <header className="flex items-center justify-between gap-2 p-3 border-b border-slate-200 dark:border-slate-700">
           <h3 className="font-semibold text-sm">{t(activePage.label)}</h3>
           <button type="button" aria-pressed={(display?.effectiveProvider ?? settings.provider) === provider} disabled={!monitors[provider]?.available} onClick={() => onPatchSettings({provider})} className="text-xs rounded border px-2 py-1 disabled:opacity-50">{t((display?.effectiveProvider ?? settings.provider) === provider ? 'currentlyDisplayed' : 'displayThisProvider')}</button>
         </header>
         <label className="flex items-center justify-between gap-2 p-3 text-xs">{t('carouselIncluded')}<input type="checkbox" className="accent-cyan-500" checked={providerPreference(settings,provider).carouselIncluded??true} onChange={e=>onPatchSettings({providerPreferences:{[provider]:{carouselIncluded:e.target.checked}}})}/></label>
-        <SettingsPanel {...shared} configurationProvider={provider} />
+        <ProviderSettings savedSettings={settings} savePatch={onPatchSettings} monitors={monitors} configurationProvider={provider} />
       </section>}
     </main>
     {saveErrors.length>0 && <div role="alert" className="text-xs text-rose-600 shrink-0">{saveErrors.join(' · ')}</div>}
-    <footer className="shrink-0 text-center text-xs text-slate-400">{t('feedback')} <span className="select-text">septwind@agent.qq.com</span></footer>
+    <footer className="shrink-0 text-center text-xs text-slate-600 dark:text-slate-400">{t('feedback')} <span className="select-text">septwind@agent.qq.com</span></footer>
   </div>;
 };
 
-function SettingsPanel({ savedSettings, savePatch, configurationProvider, monitors, isInstalled, notificationStatus, common = false }: {
+function ProviderSettings({ savedSettings, savePatch, configurationProvider, monitors }: {
   savedSettings: OverlaySettings;
   savePatch: SettingsViewProps['onPatchSettings'];
   configurationProvider: Provider;
   monitors: ReturnType<typeof useProviderMonitors>;
-  isInstalled: boolean;
-  notificationStatus: string;
-  common?: boolean;
 }) {
   const { t } = useTranslation();
   const settings = savedSettings;
@@ -97,9 +96,6 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
   };
   const onPatchSettings = (patch: SettingsPatch, debounce = false) => {
     savePatch(patch, debounce);
-  };
-  const updateField = <K extends keyof OverlaySettings>(key: K, value: OverlaySettings[K]) => {
-    savePatch({ [key]: value }, key === 'scalePercent' || key === 'backgroundTransparencyPercent');
   };
 
   const toggleRow = 'flex items-center justify-between p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800/60 hover:bg-slate-200/60 dark:hover:bg-slate-800 cursor-pointer transition-colors';
@@ -116,239 +112,6 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
   const fiveHourThreshold = preference.fiveHourThresholdPercent;
   const weeklyThreshold = preference.weeklyThresholdPercent;
 
-  if (common) return <div data-common-settings className="grid gap-4 md:grid-cols-2 pt-4">
-    <div className="space-y-2">
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('language')}</span>
-            <select
-              value={settings.language}
-              onChange={(event) => updateField('language', event.target.value)}
-              className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1"
-            >
-              {languageOptions.map(([locale, label]) => (
-                <option key={locale} value={locale}>{t(label)}</option>
-              ))}
-            </select>
-          </label>
-          <div className="flex items-center justify-between p-2 rounded-lg bg-slate-100 dark:bg-slate-800/60">
-            <label htmlFor="overlay-layout" className="text-sm font-medium">{t('overlayLayout')}</label>
-            <select
-              id="overlay-layout"
-              aria-describedby="overlay-layout-hint"
-              value={settings.overlayLayout}
-              onChange={(e) => updateField('overlayLayout', e.target.value as OverlaySettings['overlayLayout'])}
-              className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-xs rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500"
-            >
-              <option value="grouped">{t('groupedLayout')}</option>
-              <option value="stacks">{t('stacksLayout')}</option>
-            </select>
-          </div>
-
-          <p id="overlay-layout-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('overlayLayoutHint')}</p>
-
-          {/* Scale slider */}
-          <div className="space-y-1.5">
-            <div className="flex justify-between items-center text-sm font-semibold">
-              <span>{t('scale')}</span>
-              <span className="font-mono text-cyan-600 dark:text-cyan-400 text-sm">
-                {settings.scalePercent}%
-              </span>
-            </div>
-            <input
-              aria-label={t('scale')}
-              type="range"
-              min="100"
-              max="250"
-              step="5"
-              value={settings.scalePercent}
-              onChange={(e) => updateField('scalePercent', parseInt(e.target.value, 10))}
-              className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
-            />
-            <div className="flex justify-between text-[11px] text-slate-400">
-              <span>100%</span>
-              <span>{t('defaultScale')}</span>
-              <span>250%</span>
-            </div>
-          </div>
-
-          {/* Transparency slider */}
-          <div className="space-y-1.5">
-            <div className="flex justify-between items-center text-sm font-semibold">
-              <span>{t('transparency')}</span>
-              <span className="font-mono text-cyan-600 dark:text-cyan-400 text-sm">
-                {settings.backgroundTransparencyPercent}%
-              </span>
-            </div>
-            <input
-              aria-label={t('transparency')}
-              aria-describedby="transparency-hint"
-              type="range"
-              min="0"
-              max="80"
-              step="5"
-              value={settings.backgroundTransparencyPercent}
-              onChange={(e) => updateField('backgroundTransparencyPercent', parseInt(e.target.value, 10))}
-              className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
-            />
-            <div className="flex justify-between text-[11px] text-slate-400">
-              <span>{t('opaque')}</span>
-              <span>{t('defaultAlpha')}</span>
-              <span>{t('transparent')}</span>
-            </div>
-          </div>
-
-          <p id="transparency-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('transparencyHint')}</p>
-
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('showFiveHourQuota')}</span>
-            <input
-              type="checkbox"
-              checked={settings.showFiveHourQuota}
-              aria-describedby="five-hour-quota-hint"
-              onChange={(e) => updateField('showFiveHourQuota', e.target.checked)}
-              className={checkbox}
-            />
-          </label>
-
-          <p id="five-hour-quota-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('showFiveHourQuotaHint')}</p>
-
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('showProviderLogo')}</span>
-            <input
-              type="checkbox"
-              checked={settings.showProviderLogo}
-              onChange={(e) => updateField('showProviderLogo', e.target.checked)}
-              className={checkbox}
-            />
-          </label>
-
-          {savedSettings.provider !== 'claude' && (
-            <label className={toggleRow}>
-              <span className="text-sm font-medium">{t('showCredits')}</span>
-              <input
-                type="checkbox"
-                checked={settings.showCredits}
-                onChange={(e) => updateField('showCredits', e.target.checked)}
-                className={checkbox}
-              />
-            </label>
-          )}
-
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('showBurnRate')}</span>
-            <input
-              type="checkbox"
-              checked={settings.showBurnRate}
-              aria-describedby="burn-rate-hint"
-              onChange={(e) => updateField('showBurnRate', e.target.checked)}
-              className={checkbox}
-            />
-          </label>
-
-          <p id="burn-rate-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('showBurnRateHint')}</p>
-
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('autoEdgeHide')}</span>
-            <input
-              type="checkbox"
-              checked={settings.autoEdgeHide}
-              aria-describedby="edge-hide-hint"
-              onChange={(e) => updateField('autoEdgeHide', e.target.checked)}
-              className={checkbox}
-            />
-          </label>
-
-          <p id="edge-hide-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('autoEdgeHideHint')}</p>
-
-          {/* Grid preferences apply only to the collapsed edge bars. */}
-          {settings.autoEdgeHide && (
-            <>
-              <label className={toggleRow}>
-                <span className="text-sm font-medium">{t('showPercentageGrid')}</span>
-                <input
-                  type="checkbox"
-                  checked={settings.showPercentageGrid}
-                  aria-describedby="percentage-grid-hint"
-                  onChange={(e) => updateField('showPercentageGrid', e.target.checked)}
-                  className={checkbox}
-                />
-              </label>
-              <p id="percentage-grid-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('showPercentageGridHint')}</p>
-            </>
-          )}
-
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('mousePassthrough')}</span>
-            <input
-              type="checkbox"
-              checked={settings.mousePassthrough}
-              aria-describedby="mouse-passthrough-hint"
-              onChange={(e) => updateField('mousePassthrough', e.target.checked)}
-              className={checkbox}
-            />
-          </label>
-          <p id="mouse-passthrough-hint" className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('mousePassthroughHint')}</p>
-
-          <p className="px-1 text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-            {t('hint')}
-          </p>
-</div><div className="space-y-2">          {/* Autostart (only meaningful for installed builds) */}
-          {isInstalled && (
-            <label className={toggleRow}>
-              <span className="text-sm font-medium">{t('autoStart')}</span>
-              <input
-                type="checkbox"
-                checked={settings.autoStart}
-                onChange={(e) => {
-                  const checked = e.target.checked;
-                  invoke('set_autostart', { enable: checked }).catch(console.error);
-                }}
-                className={checkbox}
-              />
-            </label>
-          )}
-
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('autoCheckUpdates')}</span>
-            <input
-              type="checkbox"
-              checked={settings.autoCheckUpdates}
-              onChange={(e) => onPatchSettings(e.target.checked
-                ? { autoCheckUpdates: true }
-                : { autoCheckUpdates: false, autoInstallUpdates: false })}
-              className={checkbox}
-            />
-          </label>
-
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('autoInstallUpdates')}</span>
-            <input
-              type="checkbox"
-              checked={settings.autoInstallUpdates}
-              onChange={(e) => onPatchSettings(e.target.checked
-                ? { autoInstallUpdates: true, autoCheckUpdates: true }
-                : { autoInstallUpdates: false })}
-              className={checkbox}
-            />
-          </label>
-          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('autoInstallUpdatesHint')}</p>
-
-          <label className={toggleRow}>
-            <span className="text-sm font-medium">{t('includePrereleaseUpdates')}</span>
-            <input
-              type="checkbox"
-              aria-label={t('includePrereleaseUpdates')}
-              checked={settings.includePrereleaseUpdates}
-              onChange={(e) => updateField('includePrereleaseUpdates', e.target.checked)}
-              className={checkbox}
-            />
-          </label>
-          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">{t('includePrereleaseUpdatesHint')}</p>
-
-
-      {notificationStatus === 'disabled' && <p role="status">{t('notifyPermissionDenied')}</p>}
-      {notificationStatus === 'unavailable' && <p role="status">{t('notificationStatusUnavailable')}</p>}
-    </div></div>;
   return <div className="settings-provider-body space-y-3 p-3">          <label className={toggleRow}>
             <span className="text-sm font-medium">{t('monitorProvider')}</span>
             <input type="checkbox" className={checkbox} checked={preference.monitorEnabled}

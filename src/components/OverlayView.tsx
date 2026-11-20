@@ -1,18 +1,21 @@
 import { burnRatePresentation } from '../burnRatePresentation';
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { ArrowLeftRight, CircleAlert } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { CodexUsage, DockStateInfo, OverlaySettings, MonitorSnapshot, Provider } from '../types';
 import { useTranslation } from 'react-i18next';
 import i18n from '../i18n';
 import { ProviderLogo } from './ProviderLogo';
+import { nextDisplayProvider, providerLabelKey } from '../providerSettings';
 
 interface OverlayViewProps {
   settings: OverlaySettings;
   provider?: Provider;
   usage: CodexUsage | null;
   isLoading: boolean;
+  health?: MonitorSnapshot['health'];
   dockState?: DockStateInfo;
   monitors?: Partial<Record<Provider, MonitorSnapshot>>;
   onCycleProvider?: () => Promise<void>;
@@ -53,7 +56,7 @@ export function formatBurnRate(rate: number | null | undefined): string {
  */
 const PERCENTAGE_GRID_TICKS = [10, 20, 30, 40, 50, 60, 70, 80, 90];
 
-export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, usage, isLoading, dockState, monitors = {}, onCycleProvider }) => {
+export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, usage, isLoading, health, dockState, monitors = {}, onCycleProvider }) => {
   const activeProvider = provider ?? settings.provider;
   const { t } = useTranslation();
   const [, setTick] = useState(0);
@@ -73,17 +76,12 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, us
   const showCredits = settings.showCredits && ((activeProvider !== 'claude' && activeProvider !== 'antigravity') || Boolean(usage?.hasCredits));
   const showLogo = settings.showProviderLogo;
   const [switching, setSwitching] = useState(false);
-  const order: Provider[] = ['codex', 'claude', 'dsh', 'antigravity'];
-  const nextProvider = [1, 2, 3].map(offset => order[(order.indexOf(activeProvider) + offset) % 4])
-    .find(candidate => monitors[candidate]?.available && monitors[candidate]?.monitorEnabled);
-  const providerLabel = (target: Provider) => t(
-    target === 'claude' ? 'providerClaude'
-      : target === 'dsh' ? 'providerDsh'
-        : target === 'antigravity' ? 'providerAntigravity'
-          : 'providerCodex'
-  );
+  const nextProvider = nextDisplayProvider(activeProvider, monitors);
+  const providerLabel = (target: Provider) => t(providerLabelKey[target]);
   const logoHint = nextProvider ? t('switchProviderHint', { current: providerLabel(activeProvider), next: providerLabel(nextProvider) })
     : t('singleProviderHint', { current: providerLabel(activeProvider) });
+  const freshness = health === 'stale' || health === 'failed' ? health : null;
+  const freshnessLabel = freshness ? t(freshness === 'stale' ? 'quotaStaleBadge' : 'quotaFailedBadge') : '';
 
   const interaction=(reason:'hover'|'focus',active:boolean)=>{void invoke('set_display_interaction',{reason,active}).catch(()=>{});};
   useEffect(()=>{
@@ -166,7 +164,7 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, us
       lastSizeRef.current = { width: 0, height: 0 };
     }
     void fitCapsuleSize();
-  }, [scale, layout, showCredits, claude, showLogo, settings.showFiveHourQuota, settings.showBurnRate, settings.language, usage, fitCapsuleSize, dprComp, dockState, sizeInvalidation]);
+  }, [scale, layout, showCredits, claude, showLogo, settings.showFiveHourQuota, settings.showBurnRate, settings.language, usage, freshness, nextProvider, fitCapsuleSize, dprComp, dockState, sizeInvalidation]);
 
   useEffect(() => {
     const el = rootRef.current;
@@ -270,6 +268,10 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, us
               );
             })}
           </div>
+          {freshness && <span className="overlay-pill-freshness" role="status">
+            <CircleAlert size={12} aria-hidden="true" />
+            <span className="sr-only">{freshnessLabel}</span>
+          </span>}
         </div>
       </div>
     );
@@ -297,8 +299,9 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, us
       >
         {showLogo && (
           <>
-            <button type="button" className="overlay-provider" aria-label={logoHint} title={logoHint}
-              disabled={!nextProvider || !onCycleProvider || switching}
+            <button type="button" className="overlay-provider" data-switchable={Boolean(nextProvider && onCycleProvider)}
+              aria-label={logoHint} title={logoHint}
+              disabled={!nextProvider || !onCycleProvider} aria-disabled={switching || undefined}
               onMouseDown={event => { event.stopPropagation(); }}
               onDoubleClick={event => { event.preventDefault(); event.stopPropagation(); }}
               onClick={async event => {
@@ -308,15 +311,79 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, us
                 try { await onCycleProvider(); } finally { setSwitching(false); }
               }}>
               <ProviderLogo provider={activeProvider} />
+              {nextProvider && onCycleProvider && <ArrowLeftRight size={12} aria-hidden="true" />}
             </button>
             {layout === 'grouped' && <span aria-hidden="true" className="overlay-divider" />}
           </>
         )}
         <CapsuleReadings settings={settings} provider={activeProvider} usage={usage} isLoading={isLoading} />
+        {freshness && <span className="overlay-freshness" role="status">
+          <CircleAlert size={12} aria-hidden="true" />
+          {freshnessLabel}
+        </span>}
       </div>
     </div>
   );
 };
+
+export function OverlayPreview({ settings, provider }: { settings: OverlaySettings; provider: Provider }) {
+  const { t } = useTranslation();
+  const [backdrop, setBackdrop] = useState<'light' | 'dark'>('dark');
+  const stageRef = useRef<HTMLDivElement>(null);
+  const capsuleRef = useRef<HTMLDivElement>(null);
+  const [fitScale, setFitScale] = useState(1);
+  const [sampledAt] = useState(() => Math.floor(Date.now() / 1000));
+  const sample: CodexUsage = {
+    fiveHourRemainingPercent: 69, weekRemainingPercent: 42, argonWeekRemainingPercent: 28,
+    fiveHourBurnRatePerHour: 16.8, weekBurnRatePerHour: 0.6,
+    fiveHourResetsAt: sampledAt + 15360, weekResetsAt: sampledAt + 432000, argonWeekResetsAt: sampledAt + 345600,
+    hasCredits: provider === 'codex' || provider === 'dsh', creditsDisplay: '12.50', creditsBalance: '12.50',
+    fetchedAt: sampledAt,
+  };
+
+  useLayoutEffect(() => {
+    const stage = stageRef.current;
+    const capsule = capsuleRef.current;
+    if (!stage || !capsule) return;
+    const fit = () => {
+      if (capsule.offsetWidth && stage.clientWidth > 24) setFitScale((stage.clientWidth - 24) / capsule.offsetWidth);
+    };
+    fit();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(fit);
+    observer.observe(stage);
+    observer.observe(capsule);
+    return () => observer.disconnect();
+  }, []);
+
+  // Fit the largest size first, then scale proportionally across the slider range.
+  const zoom = Math.min(fitScale, 1.25) * settings.scalePercent / 250;
+  return (
+    <section className="common-settings-section overlay-preview" aria-labelledby="overlay-preview-title">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 id="overlay-preview-title" className="text-sm font-semibold">{t('settingsOverlayPreview')}</h3>
+        <div role="group" aria-label={t('previewBackdrop')} className="overlay-preview-options">
+          {(['light', 'dark'] as const).map(option => (
+            <button key={option} type="button" aria-pressed={backdrop === option} onClick={() => setBackdrop(option)}>
+              {t(option === 'light' ? 'previewLight' : 'previewDark')}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div ref={stageRef} className="overlay-preview-stage" data-backdrop={backdrop}>
+        <div ref={capsuleRef} className={`overlay-surface overlay-capsule overlay-${settings.overlayLayout}`}
+          style={{ '--overlay-alpha': (100 - settings.backgroundTransparencyPercent) / 100, zoom } as React.CSSProperties}>
+          {settings.showProviderLogo && <>
+            <span className="overlay-provider"><ProviderLogo provider={provider} /></span>
+            {settings.overlayLayout === 'grouped' && <span aria-hidden="true" className="overlay-divider" />}
+          </>}
+          <CapsuleReadings settings={settings} provider={provider} usage={sample} isLoading={false} />
+        </div>
+      </div>
+      <p className="text-xs text-slate-600 dark:text-slate-400">{t('overlayPreviewHint')}</p>
+    </section>
+  );
+}
 
 function CapsuleReadings({settings,provider,usage,isLoading}:{settings:OverlaySettings;provider:Provider;usage:CodexUsage|null;isLoading:boolean}) {
   const {t}=useTranslation();const layout=settings.overlayLayout;

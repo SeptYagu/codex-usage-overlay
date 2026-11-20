@@ -1,4 +1,19 @@
-import { defaultProviderPreference, OverlaySettings, Provider, ProviderPreference, SettingsPatch } from './types';
+import { defaultProviderPreference, MonitorSnapshot, OverlaySettings, Provider, ProviderPreference, SettingsPatch } from './types';
+
+export const providerLabelKey = {
+  codex: 'providerCodex',
+  claude: 'providerClaude',
+  dsh: 'providerDsh',
+  antigravity: 'providerAntigravity',
+} as const satisfies Record<Provider, string>;
+
+const providerOrder: Provider[] = ['codex', 'claude', 'dsh', 'antigravity'];
+
+export function nextDisplayProvider(current: Provider, monitors: Partial<Record<Provider, MonitorSnapshot>>): Provider | undefined {
+  const nextIndex = providerOrder.indexOf(current) + 1;
+  const otherProviders = [...providerOrder.slice(nextIndex), ...providerOrder.slice(0, nextIndex - 1)];
+  return otherProviders.find(provider => monitors[provider]?.available && monitors[provider]?.monitorEnabled);
+}
 
 export function providerPreference(settings: OverlaySettings, provider: Provider): ProviderPreference {
   return settings.providerPreferences?.[provider] ?? defaultProviderPreference(provider);

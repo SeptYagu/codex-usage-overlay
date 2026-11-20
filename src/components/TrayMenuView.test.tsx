@@ -185,6 +185,32 @@ it('keeps the click-through recovery switch in the tray menu', () => {
   expect(onPatchSettings).toHaveBeenCalledWith({ mousePassthrough: false });
 });
 
+it('focuses the first action and supports arrow, Home, and End navigation', () => {
+  render(<TrayMenuView settings={DEFAULT_SETTINGS} onPatchSettings={() => {}} />);
+  const first = screen.getByRole('menuitem', { name: 'Show / Hide Overlay' });
+  const refresh = screen.getByRole('menuitem', { name: 'Refresh Usage Now' });
+  const last = screen.getByRole('menuitem', { name: 'Exit Overlay' });
+  expect(document.activeElement).toBe(first);
+  fireEvent.keyDown(first, { key: 'ArrowDown' });
+  expect(document.activeElement).toBe(refresh);
+  fireEvent.keyDown(refresh, { key: 'End' });
+  expect(document.activeElement).toBe(last);
+  fireEvent.keyDown(last, { key: 'ArrowDown' });
+  expect(document.activeElement).toBe(first);
+  fireEvent.keyDown(first, { key: 'ArrowUp' });
+  expect(document.activeElement).toBe(last);
+  fireEvent.keyDown(last, { key: 'Home' });
+  expect(document.activeElement).toBe(first);
+});
+
+it('can switch providers from the tray while the overlay logo is hidden', async () => {
+  render(<TrayMenuView settings={{ ...DEFAULT_SETTINGS, showProviderLogo: false }} onPatchSettings={() => {}}
+    monitors={{ claude: { provider: 'claude', sourceKey: 'claude', sourceGeneration: 0, revision: 1,
+      monitorEnabled: true, available: true, health: 'current', error: null, usage: null } }} />);
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Switch to Claude' }));
+  await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('cycle_display_provider'));
+});
+
 it('uses the status line as the install action and allows retry after a failed install', async () => {
   const update = { version: '1.2.1', currentVersion: '1.2.0', notes: null };
   let installAttempts = 0;

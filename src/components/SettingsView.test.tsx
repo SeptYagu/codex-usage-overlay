@@ -78,6 +78,25 @@ describe('settings tabs', () => {
     expect(view.container.querySelectorAll('[data-common-settings]')).toHaveLength(0);
     expect(view.container.querySelectorAll('[data-provider-settings]')).toHaveLength(1);
   });
+  it('opens a new tab at the top and restores each tab’s own scroll position', async () => {
+    const view = await mount();
+    const scrollPane = view.getByRole('tabpanel');
+    scrollPane.scrollTop = 430;
+    view.panel('codex');
+    expect(scrollPane.scrollTop).toBe(0);
+    scrollPane.scrollTop = 150;
+    fireEvent.click(view.getByRole('tab', { name: 'Common settings' }));
+    expect(scrollPane.scrollTop).toBe(430);
+    view.panel('codex');
+    expect(scrollPane.scrollTop).toBe(150);
+  });
+  it('keeps the rotation interval disabled until rotation is enabled', async () => {
+    const view = await mount();
+    const interval = view.getByRole('slider', { name: 'Rotation interval' }) as HTMLInputElement;
+    expect(interval.disabled).toBe(true);
+    view.rerender(<SettingsView settings={{ ...DEFAULT_SETTINGS, quotaCarouselEnabled: true }} onPatchSettings={view.onPatchSettings} />);
+    expect(interval.disabled).toBe(false);
+  });
   it('writes refresh only to the initiating provider even when the overlay shows another', async () => {
     const { panel, onPatchSettings } = await mount({provider: 'dsh'});
     fireEvent.change(panel('claude').getByRole('combobox', {name: 'Refresh Interval'}), {target:{value:'120'}});

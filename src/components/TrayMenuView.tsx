@@ -4,7 +4,8 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTranslation } from 'react-i18next';
 import { languageOptions } from '../i18n';
-import { OverlaySettings, DisplayState } from '../types';
+import { DisplayState, MonitorSnapshot, OverlaySettings, Provider } from '../types';
+import { nextDisplayProvider, providerLabelKey } from '../providerSettings';
 import { APP_VERSION } from '../version';
 import { ProtectionStatusView } from './ProtectionStatus';
 
@@ -22,6 +23,7 @@ interface UpdateProgress {
 interface TrayMenuViewProps {
   settings: OverlaySettings;
   display?: DisplayState;
+  monitors?: Partial<Record<Provider, MonitorSnapshot>>;
   onPatchSettings: (patch: Partial<OverlaySettings>) => void;
 }
 
@@ -94,7 +96,11 @@ type UpdateState =
   | { kind: 'installing'; progress: UpdateProgress }
   | { kind: 'error'; update?: UpdateInfo };
 
-export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSettings, display }) => {
+function menuButtons(menu: HTMLDivElement | null): HTMLButtonElement[] {
+  return menu ? [...menu.querySelectorAll<HTMLButtonElement>('button[role^="menuitem"]:not(:disabled)')] : [];
+}
+
+export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSettings, display, monitors = {} }) => {
   const { t } = useTranslation();
   const [isInstalled, setIsInstalled] = useState(false);
   const [languageOpen, setLanguageOpen] = useState(false);
@@ -106,6 +112,12 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
   const lastLayoutKey = useRef('');
   const layoutRevision = useRef(0);
   const [maxCssHeight, setMaxCssHeight] = useState<number | undefined>();
+  const effectiveProvider = display?.effectiveProvider ?? settings.provider;
+  const nextProvider = nextDisplayProvider(effectiveProvider, monitors);
+
+  useLayoutEffect(() => {
+    menuButtons(menuRef.current)[0]?.focus({ preventScroll: true });
+  }, []);
 
   const measureMenu = useCallback(async () => {
     const content = menuRef.current;
@@ -163,6 +175,7 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
     listen<number>('tray_menu_opened', (event) => {
       generationRef.current = Math.max(generationRef.current, event.payload);
       setMaxCssHeight(undefined);
+      menuButtons(menuRef.current)[0]?.focus();
       void measureMenu();
     }).then((fn) => { unlistenOpen = fn; }).catch(console.error);
     currentWindow.onScaleChanged(() => { void updateScale(); })
@@ -236,11 +249,38 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') getCurrentWindow().hide().catch(console.error);
     };
+    const onFocus = () => {
+      if (!menuRef.current?.contains(document.activeElement)) {
+        menuButtons(menuRef.current)[0]?.focus({ preventScroll: true });
+      }
+    };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('focus', onFocus);
+    };
   }, []);
 
   const closeMenu = () => getCurrentWindow().hide().catch(console.error);
+  const navigateMenu = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      void closeMenu();
+      return;
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+
+    const buttons = menuButtons(menuRef.current);
+    if (!buttons.length) return;
+    event.preventDefault();
+    const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    const last = buttons.length - 1;
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? last
+      : event.key === 'ArrowDown' ? (current < last ? current + 1 : 0)
+      : current > 0 ? current - 1 : last;
+    buttons[next].focus();
+  };
 
   const runMenuAction = async (action: () => Promise<unknown>) => {
     closeMenu();
@@ -291,31 +331,38 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
 
   return (
     <div className="overflow-y-auto bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 p-2.5 font-sans select-none" style={{ maxHeight: maxCssHeight }}>
-      <div ref={menuRef} role="menu" aria-label={t('menuSettings')} className="space-y-0.5">
-        {display?.carouselEnabled&&<div className="tray-menu-item text-xs text-slate-500" role="status">{t((display?.effectiveProvider??settings.provider)==='codex'?'providerCodex':(display?.effectiveProvider??settings.provider)==='claude'?'providerClaude':(display?.effectiveProvider??settings.provider)==='antigravity'?'providerAntigravity':'providerDsh')} · {t(`carouselStatus_${display.status}`)}</div>}
-        <ProtectionStatusView settings={settings} provider={display?.effectiveProvider ?? settings.provider} compact />
-        <button className="tray-menu-item" role="menuitem" onClick={() => runMenuAction(() => invoke('toggle_overlay_window'))}>
+      <div ref={menuRef} role="menu" aria-label={t('menuSettings')} className="space-y-0.5" onKeyDown={navigateMenu}>
+        {display?.carouselEnabled && <div className="tray-menu-item text-xs text-slate-500" role="status">
+          {t(providerLabelKey[effectiveProvider])} · {t(`carouselStatus_${display.status}`)}
+        </div>}
+        <ProtectionStatusView settings={settings} provider={effectiveProvider} compact />
+        <button className="tray-menu-item" role="menuitem" tabIndex={-1} onClick={() => runMenuAction(() => invoke('toggle_overlay_window'))}>
           {t('menuToggleOverlay')}
         </button>
-        <button className="tray-menu-item" role="menuitem" onClick={() => runMenuAction(() => invoke('fetch_usage'))}>
+        <button className="tray-menu-item" role="menuitem" tabIndex={-1} onClick={() => runMenuAction(() => invoke('fetch_usage'))}>
           {t('menuRefreshUsage')}
         </button>
-        <div className="tray-menu-separator" />
-        <button className="tray-menu-item" role="menuitem" onClick={() => runMenuAction(() => invoke('open_settings_window'))}>
+        {nextProvider && (
+          <button type="button" className="tray-menu-item" role="menuitem" tabIndex={-1} onClick={() => runMenuAction(() => invoke('cycle_display_provider'))}>
+            {t('menuSwitchProvider', { provider: t(providerLabelKey[nextProvider]) })}
+          </button>
+        )}
+        <div className="tray-menu-separator" role="separator" />
+        <button className="tray-menu-item" role="menuitem" tabIndex={-1} onClick={() => runMenuAction(() => invoke('open_settings_window'))}>
           {t('menuSettings')}
         </button>
-        <button className="tray-menu-item" role="menuitem" onClick={checkForUpdates} disabled={updateState.kind === 'checking' || updateState.kind === 'installing'}>
+        <button className="tray-menu-item" role="menuitem" tabIndex={-1} onClick={checkForUpdates} disabled={updateState.kind === 'checking' || updateState.kind === 'installing'}>
           {updateState.kind === 'checking' ? t('checkingUpdates') : t('menuCheckUpdates', { version: APP_VERSION })}
         </button>
 
         {updateState.kind === 'current' && <p role="status" className="px-2.5 py-1 text-xs text-slate-500">{t('upToDate')}</p>}
         {updateState.kind === 'available' && (
-          <button className="tray-menu-item text-cyan-700 dark:text-cyan-300" role="menuitem" onClick={installUpdate}>
+          <button className="tray-menu-item text-cyan-700 dark:text-cyan-300" role="menuitem" tabIndex={-1} onClick={installUpdate}>
             {t('clickToInstallUpdate', { version: updateState.update.version })}
           </button>
         )}
         {updateState.kind === 'ready' && (
-          <button className="tray-menu-item text-cyan-700 dark:text-cyan-300" role="menuitem" onClick={installUpdate}>
+          <button className="tray-menu-item text-cyan-700 dark:text-cyan-300" role="menuitem" tabIndex={-1} onClick={installUpdate}>
             {t('updateReadyInstallNow', { version: updateState.update.version })}
           </button>
         )}
@@ -323,14 +370,14 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
         {updateState.kind === 'error' && (
           <div>
             <p role="alert" className="px-2.5 py-1 text-xs text-rose-600">{t('updateFailed')}</p>
-            {updateState.update && <button className="tray-menu-item text-cyan-700 dark:text-cyan-300" role="menuitem" onClick={installUpdate}>{t('retryInstallUpdate')}</button>}
+            {updateState.update && <button className="tray-menu-item text-cyan-700 dark:text-cyan-300" role="menuitem" tabIndex={-1} onClick={installUpdate}>{t('retryInstallUpdate')}</button>}
           </div>
         )}
 
-        <div className="tray-menu-separator" />
+        <div className="tray-menu-separator" role="separator" />
         <button
           className="tray-menu-item justify-between"
-          role="menuitem"
+          role="menuitem" tabIndex={-1}
           aria-expanded={languageOpen}
           onClick={() => setLanguageOpen((open) => !open)}
         >
@@ -341,7 +388,7 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
             {languageOptions.map(([language, label]) => (
               <button
                 key={language}
-                role="menuitemradio"
+                role="menuitemradio" tabIndex={-1}
                 aria-checked={settings.language === language}
                 className="tray-menu-item justify-between"
                 onClick={() => chooseLanguage(language)}
@@ -354,7 +401,7 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
 
         <button
           className="tray-menu-item justify-between"
-          role="menuitemcheckbox"
+          role="menuitemcheckbox" tabIndex={-1}
           aria-checked={settings.autoEdgeHide}
           onClick={() => onPatchSettings({ autoEdgeHide: !settings.autoEdgeHide })}
         >
@@ -364,7 +411,7 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
 
         <button
           className="tray-menu-item justify-between"
-          role="menuitemcheckbox"
+          role="menuitemcheckbox" tabIndex={-1}
           aria-checked={settings.mousePassthrough}
           onClick={() => onPatchSettings({ mousePassthrough: !settings.mousePassthrough })}
         >
@@ -373,21 +420,14 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
         </button>
 
         {isInstalled && (
-          <label className="tray-menu-item cursor-pointer justify-between">
-            <span>{t('menuAutoStart')}</span>
-            <input
-              type="checkbox"
-              checked={settings.autoStart}
-              onChange={(event) => {
-                invoke('set_autostart', { enable: event.target.checked }).catch((error) => console.error('Autostart update failed:', error));
-              }}
-              className="h-4 w-4 accent-cyan-600"
-            />
-          </label>
+          <button type="button" className="tray-menu-item justify-between" role="menuitemcheckbox" tabIndex={-1} aria-checked={settings.autoStart}
+            onClick={() => invoke('set_autostart', { enable: !settings.autoStart }).catch((error) => console.error('Autostart update failed:', error))}>
+            <span>{t('menuAutoStart')}</span><span aria-hidden="true">{settings.autoStart ? '✓' : ''}</span>
+          </button>
         )}
 
-        <div className="tray-menu-separator" />
-        <button className="tray-menu-item" role="menuitem" onClick={() => runMenuAction(() => invoke('exit_app'))}>
+        <div className="tray-menu-separator" role="separator" />
+        <button className="tray-menu-item" role="menuitem" tabIndex={-1} onClick={() => runMenuAction(() => invoke('exit_app'))}>
           {t('menuExit')}
         </button>
       </div>

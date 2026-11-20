@@ -491,6 +491,17 @@ it('cycles through available providers on the logo without beginning a drag', as
   expect(tauri.invoke).toHaveBeenCalledWith('show_overlay_menu');
 });
 
+it('labels cached quotas until a healthy reading arrives', () => {
+  const props = { settings: DEFAULT_SETTINGS, usage, isLoading: false };
+  const { rerender } = render(<OverlayView {...props} health="stale" />);
+  expect(screen.getByRole('status').textContent).toBe('Stale');
+  expect(screen.getByText(`${usage.fiveHourRemainingPercent}%`)).toBeTruthy();
+  rerender(<OverlayView {...props} health="failed" />);
+  expect(screen.getByRole('status').textContent).toBe('Refresh failed');
+  rerender(<OverlayView {...props} health="current" />);
+  expect(screen.queryByRole('status')).toBeNull();
+});
+
 it('keeps the capsule unchanged with rotation on and the logo hidden, and correlates hover and focus pauses',async()=>{
   const view=render(<OverlayView settings={{...DEFAULT_SETTINGS,quotaCarouselEnabled:true,showProviderLogo:false,language:'en-US'}} usage={usage} isLoading={false}/>);
   await act(async()=>{});const capsule=view.container.querySelector('.overlay-shell > .overlay-capsule')!;
