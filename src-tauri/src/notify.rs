@@ -692,7 +692,8 @@ mod tests {
     fn legacy_state_and_account_switch_rebuild_the_baseline_without_an_alert() {
         let mut cycle: QuotaCycleState = serde_json::from_str(r#"{"lastSeenResetsAt":1000}"#).unwrap();
         assert_eq!(advance_five_hour(&mut cycle, &five_hour_sample(1_031, Some(0.0), None, "a"), 1_031, 30, false).notify_boundary, None);
-        assert_eq!(cycle.last_handled_boundary, Some(1_000));
+        assert_eq!(cycle.last_handled_boundary, None);
+        assert_eq!(cycle.last_seen_resets_at, None);
         let next = five_hour_sample(1_050, Some(40.0), Some(2_850), "a");
         assert_eq!(advance_five_hour(&mut cycle, &next, 1_050, 30, false).notify_boundary, None);
         let switch = advance_five_hour(&mut cycle, &five_hour_sample(1_060, Some(0.0), None, "b"), 1_060, 30, false);
