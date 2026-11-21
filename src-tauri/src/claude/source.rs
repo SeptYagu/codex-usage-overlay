@@ -61,6 +61,11 @@ pub fn sample(snapshot: &shared::Snapshot, now: i64) -> ClaudeSample {
             has_credits: false,
             fetched_at: snapshot.captured_at,
             antigravity_weekly: None,
+            notification_five_hour: Some(snapshot.five_hour.map_or_else(QuotaSnapshot::default, |w| QuotaSnapshot {
+                used_percent: Some(w.used_percent),
+                resets_at: w.resets_at,
+                window_duration_mins: Some(FIVE_HOUR_MINS),
+            })),
         },
         stale: snapshot.age(now) > shared::SNAPSHOT_FRESH_SECS,
     }
@@ -119,6 +124,8 @@ mod tests {
         assert!(later.stale);
         assert_eq!(later.usage.five_hour.used_percent, Some(0.0));
         assert_eq!(later.usage.five_hour.resets_at, None);
+        assert_eq!(later.usage.notification_five_hour.as_ref().unwrap().used_percent, Some(40.5));
+        assert_eq!(later.usage.notification_five_hour.as_ref().unwrap().resets_at, Some(now + 100));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

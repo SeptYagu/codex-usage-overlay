@@ -397,7 +397,7 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<Provider
             }
             state.config_manager.write_status("ok", None);
             *state.last_refresh_result.lock().unwrap_or_else(|p| p.into_inner()) = Some(Ok(usage.clone()));
-            crate::notify::process_usage_success(sink, state, &usage).await;
+            crate::notify::process_usage_success(sink, state, &usage, &raw).await;
             // The account identity is read from the raw sample, because the UI
             // model does not carry it. The auto-pause path needs it to build
             // an unambiguous de-duplication key, and a sample without one
@@ -486,7 +486,7 @@ mod refresh_coalescing_tests {
         }
     }
     fn sample() -> RawCodexUsage {
-        RawCodexUsage { account_id: Some("test".into()), five_hour: Default::default(), weekly: Default::default(), credits_display: "—".into(), credits_balance: None, has_credits: false, fetched_at: reader::unix_now(), antigravity_weekly: None }
+        RawCodexUsage { account_id: Some("test".into()), five_hour: Default::default(), weekly: Default::default(), credits_display: "—".into(), credits_balance: None, has_credits: false, fetched_at: reader::unix_now(), antigravity_weekly: None, notification_five_hour: None }
     }
     #[tokio::test]
     async fn concurrent_callers_share_success_or_failure_even_with_cached_usage() {
@@ -590,6 +590,7 @@ mod shadow_refresh_tests {
             has_credits: false,
             fetched_at: at,
             antigravity_weekly: None,
+            notification_five_hour: None,
         }
     }
 

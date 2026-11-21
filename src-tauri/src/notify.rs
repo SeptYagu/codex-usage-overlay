@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tauri::{async_runtime::JoinHandle, AppHandle, Emitter, Manager};
 
-use crate::codex::CodexUsage;
+use crate::codex::{CodexUsage, RawCodexUsage};
 use crate::commands::{AppState, ProviderRuntime};
 use crate::config::{ConfigManager, Provider, SoundMode};
 use crate::tray::{TrayPresentationSink, TrayReadStatus};
@@ -24,6 +24,12 @@ pub enum QuotaKind {
 pub struct QuotaCycleState {
     pub last_seen_resets_at: Option<i64>,
     pub last_handled_boundary: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_observed_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub had_usage: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,6 +80,9 @@ impl PendingResetFetches {
         for pending in [&mut self.five_hour, &mut self.weekly] {
             if let Some(fetch) = pending.take() { fetch.task.abort(); }
         }
+    }
+    fn cancel_kind(&mut self, kind: QuotaKind) {
+        if let Some(fetch) = self.slot_mut(kind).take() { fetch.task.abort(); }
     }
     fn slot_mut(&mut self, kind: QuotaKind) -> &mut Option<PendingFetch> {
         match kind {
@@ -146,7 +155,81 @@ fn advance_cycle(
     }
 }
 
-pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Arc<ProviderRuntime>, usage: &CodexUsage) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FiveHourTransition {
+    changed: bool,
+    notify_boundary: Option<i64>,
+    cancel_timer: bool,
+}
+
+fn advance_five_hour(
+    cycle: &mut QuotaCycleState,
+    raw: &RawCodexUsage,
+    now: i64,
+    max_age: i64,
+    display_only: bool,
+) -> FiveHourTransition {
+    let skipped = FiveHourTransition { changed: false, notify_boundary: None, cancel_timer: false };
+    let window = raw.notification_five_hour.as_ref().unwrap_or(&raw.five_hour);
+    let at = raw.fetched_at;
+    let identity_changed = matches!((&cycle.account_id, &raw.account_id), (Some(old), Some(new)) if old != new)
+        || (cycle.account_id.is_none() && raw.account_id.is_some() && cycle.last_seen_resets_at.is_some());
+    if display_only || at <= 0 || at > now.saturating_add(5) || now.saturating_sub(at) > max_age
+        || (!identity_changed && cycle.last_observed_at.is_some_and(|previous| at <= previous)) {
+        return skipped;
+    }
+    if window.resets_at.is_some_and(|boundary| boundary <= 0) {
+        return skipped;
+    }
+    let Some(used) = window.used_percent.filter(|used| used.is_finite() && (0.0..=100.0).contains(used)) else {
+        if identity_changed {
+            *cycle = QuotaCycleState { account_id: raw.account_id.clone(), last_observed_at: Some(at), ..Default::default() };
+            return FiveHourTransition { changed: true, notify_boundary: None, cancel_timer: true };
+        }
+        return skipped;
+    };
+
+    if identity_changed {
+        *cycle = QuotaCycleState::default();
+    }
+    if let Some(account) = &raw.account_id {
+        cycle.account_id = Some(account.clone());
+    }
+    cycle.last_observed_at = Some(at);
+
+    let new_boundary = window.resets_at.filter(|boundary| *boundary > 0);
+    let old_boundary = cycle.last_seen_resets_at;
+    let mut notify_boundary = None;
+    match (old_boundary, new_boundary) {
+        (None, Some(new)) => {
+            cycle.last_seen_resets_at = Some(new);
+            cycle.had_usage = Some(used > 0.0);
+        }
+        (Some(old), Some(new)) if new > old => {
+            // A later deadline can be the first message in a new window. It
+            // does not establish that the old window recovered while idle.
+            if old <= at { cycle.last_handled_boundary = Some(old); }
+            cycle.last_seen_resets_at = Some(new);
+            cycle.had_usage = Some(used > 0.0);
+        }
+        (Some(old), Some(new)) if new == old => {
+            if used > 0.0 { cycle.had_usage = Some(true); }
+        }
+        (Some(old), None) if used == 0.0 && old <= at => {
+            // Only a fresh, explicit zero-usage reading with no active reset
+            // time confirms recovery. Missing percentages do not reach here.
+            if cycle.had_usage == Some(true) && cycle.last_handled_boundary != Some(old) {
+                notify_boundary = Some(old);
+            }
+            cycle.last_handled_boundary = Some(old);
+            cycle.had_usage = Some(false);
+        }
+        _ => {}
+    }
+    FiveHourTransition { changed: true, notify_boundary, cancel_timer: identity_changed }
+}
+
+pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Arc<ProviderRuntime>, usage: &CodexUsage, raw: &RawCodexUsage) {
     let settings = {
         let settings = state.settings.lock().await;
         let mut status = state.tray_read_status.lock().await;
@@ -176,6 +259,7 @@ pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Ar
             state,
             QuotaKind::FiveHour,
             usage.five_hour_resets_at,
+            raw,
             pref.five_hour_reset_notification,
             pref.five_hour_sound_mode,
             pref.five_hour_sound_path.clone(),
@@ -190,6 +274,7 @@ pub async fn process_usage_success<S: TrayPresentationSink>(sink: &S, state: &Ar
             state,
             QuotaKind::Week,
             usage.week_resets_at,
+            raw,
             pref.weekly_reset_notification,
             pref.weekly_sound_mode,
             pref.weekly_sound_path.clone(),
@@ -207,19 +292,30 @@ async fn maybe_notify_cycle(
     state: &Arc<ProviderRuntime>,
     kind: QuotaKind,
     new_resets_at: Option<i64>,
+    raw: &RawCodexUsage,
     enabled: bool,
     sound_mode: SoundMode,
     sound_path: Option<String>,
     language: &str,
 ) -> Result<(), String> {
-    let Some(new_resets_at) = new_resets_at.filter(|timestamp| *timestamp > 0) else {
+    if (kind == QuotaKind::Week || state.provider == Provider::Antigravity)
+        && new_resets_at.is_none_or(|boundary| boundary <= 0) {
         return Ok(());
-    };
+    }
     let now = unix_now();
     let mut current = state.reset_state.lock().await;
     let mut next = current.clone();
-    let transition = advance_cycle(next.slot_mut(kind), Some(new_resets_at), now);
-    if transition.changed {
+    let (changed, notify_boundary, cancel_timer) = if kind == QuotaKind::FiveHour && state.provider != Provider::Antigravity {
+        let display_only = state.provider == Provider::Codex
+            && state.reader.lock().unwrap_or_else(|p| p.into_inner()).display_only();
+        let max_age = if state.provider == Provider::Claude { agent_bridge::SNAPSHOT_FRESH_SECS } else if state.provider == Provider::Dsh { 300 } else { 30 };
+        let transition = advance_five_hour(next.slot_mut(kind), raw, now, max_age, display_only);
+        (transition.changed, transition.notify_boundary, transition.cancel_timer)
+    } else {
+        let transition = advance_cycle(next.slot_mut(kind), new_resets_at, now);
+        (transition.changed, transition.notify_boundary, false)
+    };
+    if changed {
         save_reset_state(&state.config_manager, &next)?;
         *current = next;
     }
@@ -229,9 +325,15 @@ async fn maybe_notify_cycle(
     let accepted_boundary = current.slot(kind).last_seen_resets_at;
     drop(current);
 
+    if kind == QuotaKind::FiveHour && state.provider != Provider::Antigravity && !changed {
+        return Ok(());
+    }
+    if cancel_timer {
+        state.pending_reset_fetches.lock().await.cancel_kind(kind);
+    }
     schedule_post_reset_fetch(app, state, kind, accepted_boundary).await;
     if enabled {
-        if let Some(boundary) = transition.notify_boundary {
+        if let Some(boundary) = notify_boundary {
             show_quota_reset(app, state, kind, sound_mode, sound_path, language)?;
             let mut reset_state = state.reset_state.lock().await;
             reset_state.last_notify_error = None;
@@ -521,6 +623,84 @@ pub fn get_notification_status(app: AppHandle) -> NotificationStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex::QuotaSnapshot;
+
+    fn five_hour_sample(at: i64, used: Option<f64>, boundary: Option<i64>, account: &str) -> RawCodexUsage {
+        RawCodexUsage {
+            account_id: Some(account.into()),
+            five_hour: QuotaSnapshot { used_percent: used, resets_at: boundary, window_duration_mins: Some(300) },
+            weekly: QuotaSnapshot::default(),
+            credits_display: "—".into(), credits_balance: None, has_credits: false,
+            fetched_at: at, antigravity_weekly: None, notification_five_hour: None,
+        }
+    }
+
+    #[test]
+    fn an_idle_recovery_notifies_once_but_starting_the_next_window_does_not() {
+        for first_new_usage in [0.0, 5.0] {
+            let mut cycle = QuotaCycleState::default();
+            assert_eq!(advance_five_hour(&mut cycle, &five_hour_sample(900, Some(20.0), Some(1_000), "a"), 900, 30, false).notify_boundary, None);
+            assert_eq!(advance_five_hour(&mut cycle, &five_hour_sample(1_031, Some(0.0), None, "a"), 1_031, 30, false).notify_boundary, Some(1_000));
+            cycle = serde_json::from_slice(&serde_json::to_vec(&cycle).unwrap()).unwrap();
+            assert_eq!(advance_five_hour(&mut cycle, &five_hour_sample(1_032, Some(0.0), None, "a"), 1_032, 30, false).notify_boundary, None);
+            assert_eq!(advance_five_hour(&mut cycle, &five_hour_sample(1_040, Some(first_new_usage), Some(2_840), "a"), 1_040, 30, false).notify_boundary, None);
+            assert_eq!(cycle.last_handled_boundary, Some(1_000));
+            assert_eq!(cycle.had_usage, Some(first_new_usage > 0.0));
+        }
+    }
+
+    #[test]
+    fn first_message_after_an_expired_window_is_silent_for_all_three_providers() {
+        for provider in [Provider::Codex, Provider::Claude, Provider::Dsh] {
+            for new_usage in [0.0, 7.0] {
+                let mut cycle = QuotaCycleState::default();
+                let max_age = if provider == Provider::Claude { 900 } else if provider == Provider::Dsh { 300 } else { 30 };
+                advance_five_hour(&mut cycle, &five_hour_sample(900, Some(20.0), Some(1_000), "a"), 900, max_age, false);
+                let next = five_hour_sample(1_200, Some(new_usage), Some(3_000), "a");
+                assert_eq!(advance_five_hour(&mut cycle, &next, 1_200, max_age, false).notify_boundary, None, "{provider:?}");
+                assert_eq!(cycle.last_seen_resets_at, Some(3_000));
+            }
+        }
+    }
+
+    #[test]
+    fn stale_missing_and_projected_claude_readings_cannot_confirm_recovery() {
+        let mut cycle = QuotaCycleState::default();
+        advance_five_hour(&mut cycle, &five_hour_sample(900, Some(20.0), Some(1_000), "a"), 900, 900, false);
+        let baseline = cycle.clone();
+        assert!(!advance_five_hour(&mut cycle, &five_hour_sample(901, Some(0.0), None, "a"), 1_901, 900, false).changed);
+        assert!(!advance_five_hour(&mut cycle, &five_hour_sample(901, None, None, "a"), 901, 900, false).changed);
+        assert_eq!(cycle, baseline);
+        let mut projected = five_hour_sample(902, Some(0.0), None, "a");
+        projected.notification_five_hour = Some(QuotaSnapshot { used_percent: Some(20.0), resets_at: Some(1_000), window_duration_mins: Some(300) });
+        assert_eq!(advance_five_hour(&mut cycle, &projected, 1_001, 900, false).notify_boundary, None);
+        assert_eq!(cycle.last_seen_resets_at, Some(1_000));
+    }
+
+    #[test]
+    fn older_samples_cannot_replace_the_current_window_or_its_fetch_target() {
+        let mut cycle = QuotaCycleState::default();
+        advance_five_hour(&mut cycle, &five_hour_sample(1_000, Some(10.0), Some(1_100), "a"), 1_000, 30, false);
+        advance_five_hour(&mut cycle, &five_hour_sample(1_200, Some(4.0), Some(3_000), "a"), 1_200, 30, false);
+        let before = cycle.clone();
+        assert!(!advance_five_hour(&mut cycle, &five_hour_sample(1_100, Some(0.0), None, "a"), 1_200, 300, false).changed);
+        assert_eq!(cycle, before);
+        assert_eq!(post_reset_fetch_target(None, cycle.last_seen_resets_at, 1_200), Some(3_000));
+    }
+
+    #[test]
+    fn legacy_state_and_account_switch_rebuild_the_baseline_without_an_alert() {
+        let mut cycle: QuotaCycleState = serde_json::from_str(r#"{"lastSeenResetsAt":1000}"#).unwrap();
+        assert_eq!(advance_five_hour(&mut cycle, &five_hour_sample(1_031, Some(0.0), None, "a"), 1_031, 30, false).notify_boundary, None);
+        assert_eq!(cycle.last_handled_boundary, Some(1_000));
+        let next = five_hour_sample(1_050, Some(40.0), Some(2_850), "a");
+        assert_eq!(advance_five_hour(&mut cycle, &next, 1_050, 30, false).notify_boundary, None);
+        let switch = advance_five_hour(&mut cycle, &five_hour_sample(1_060, Some(0.0), None, "b"), 1_060, 30, false);
+        assert!(switch.cancel_timer);
+        assert_eq!(switch.notify_boundary, None);
+        assert_eq!(cycle.account_id.as_deref(), Some("b"));
+        assert_eq!(cycle.last_seen_resets_at, None);
+    }
 
     #[test]
     fn initial_observation_only_establishes_baseline() {
@@ -542,6 +722,7 @@ mod tests {
         let mut cycle = QuotaCycleState {
             last_seen_resets_at: Some(1_000),
             last_handled_boundary: None,
+            ..Default::default()
         };
         let first = advance_cycle(&mut cycle, Some(2_000), 1_000);
         let repeated = advance_cycle(&mut cycle, Some(2_000), 2_100);
@@ -555,6 +736,7 @@ mod tests {
         let mut cycle = QuotaCycleState {
             last_seen_resets_at: Some(2_000),
             last_handled_boundary: None,
+            ..Default::default()
         };
         assert_eq!(advance_cycle(&mut cycle, None, 3_000).notify_boundary, None);
         assert_eq!(
@@ -571,6 +753,7 @@ mod tests {
         let mut cycle = QuotaCycleState {
             last_seen_resets_at: Some(3_000),
             last_handled_boundary: None,
+            ..Default::default()
         };
         let transition = advance_cycle(&mut cycle, Some(4_000), 2_000);
         assert_eq!(transition.notify_boundary, None);

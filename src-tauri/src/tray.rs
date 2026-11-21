@@ -1205,6 +1205,7 @@ mod tests {
             weekly: window(21.0),
             credits_display: "—".into(), credits_balance: None, has_credits: false, fetched_at: 1,
             antigravity_weekly: Some(AntigravityWeeklies { argon: Some(window(58.0)), weekly_is_argon: false, gemini: None }),
+            notification_five_hour: None,
         };
         assert_eq!(tooltip(&settings, &gemini_pool), "Antigravity | 5H 90% | WK 79% | AR 42%");
 
@@ -1212,6 +1213,7 @@ mod tests {
         let argon_pool = RawCodexUsage {
             weekly: window(58.0),
             antigravity_weekly: Some(AntigravityWeeklies { argon: Some(window(58.0)), weekly_is_argon: true, gemini: Some(window(21.0)) }),
+            notification_five_hour: None,
             ..gemini_pool.clone()
         };
         assert_eq!(tooltip(&settings, &argon_pool), "Antigravity | 5H 90% | WK 79% | AR 42%");
@@ -1280,6 +1282,7 @@ mod tests {
                     five_hour: crate::codex::QuotaSnapshot { used_percent: Some(20.0), resets_at: Some(50000), window_duration_mins: Some(300) },
                     weekly: crate::codex::QuotaSnapshot { used_percent: Some(70.0), resets_at: Some(90000), window_duration_mins: Some(10080) },
                     credits_display: "12.50".into(), credits_balance: Some("12.50".into()), has_credits: true, fetched_at: 10000, antigravity_weekly: None,
+                    notification_five_hour: None,
                 };
                 // Warm real crossing history while 5H presentation is hidden
                 // in one branch. Acceptance/persistence must remain independent.
@@ -1330,7 +1333,7 @@ mod tests {
                     assert_eq!(*state.last_usage.lock().await, Some(usage.clone()));
                 }
                 let missing = CodexUsage { week_remaining_percent: None, ..usage };
-                crate::notify::process_usage_success(&sink, &state, &missing).await;
+                crate::notify::process_usage_success(&sink, &state, &missing, &raw).await;
                 sink.assert_frame(false, Some(80.0), None, "WK --%");
                 state.burn_rate.lock().await.save(&config).unwrap();
                 assert_eq!(std::fs::read(config.burn_rate_state_path()).unwrap(), history_before);

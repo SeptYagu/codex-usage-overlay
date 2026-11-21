@@ -1,5 +1,11 @@
 # Status
 
+## Five-hour reset notification repair — 2026-11-21
+
+- [Implementation plan](docs/five-hour-reset-notification-plan.md): Codex, Claude and DSH now track original five-hour usage, capture time, account identity and a consumed-window baseline. A fresh explicit idle recovery can alert once; a later deadline alone establishes a new baseline silently. Claude's display-only expiry projection is excluded from decisions. The previous timestamp-only state migrates without a retroactive alert.
+- Antigravity's five-hour notification behavior remains on its existing path pending real quota-pool samples. DSH's current upstream parser requires a future reset timestamp, so it can suppress the false first-message alert but cannot prove an idle recovery until a distinct upstream signal is verified.
+- Source validation and Windows CI are required before release tagging. Installed Windows notification and sound behavior still requires a live smoke test.
+
 ## v1.7.0 stable release — 2026-11-07
 
 - [v1.7.0 is published](https://github.com/SeptYagu/codex-usage-overlay/releases/tag/v1.7.0) as a stable, non-draft release and GitHub's latest release. Release commit/tag: `cd4046e` / `v1.7.0`. Version metadata, Windows MSI version and UI version are aligned to 1.7.0; [release notes](docs/releases/v1.7.0.md) cover independent settings, Codex pause/continuation/estimators, quota rotation and the latest delivery/default-language fixes.

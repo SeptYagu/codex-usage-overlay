@@ -41,6 +41,10 @@ pub struct RawCodexUsage {
     /// Antigravity's extra weekly windows. Other providers leave it empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub antigravity_weekly: Option<AntigravityWeeklies>,
+    /// Claude's captured window before display-time expiry projection. Other
+    /// providers use `five_hour` itself for notification decisions.
+    #[serde(skip)]
+    pub notification_five_hour: Option<QuotaSnapshot>,
 }
 
 /// Antigravity shows 5H, the Gemini weekly limit and the Argon weekly (WTU)
@@ -706,6 +710,7 @@ fn parse_usage_result(result: &Value) -> Result<RawCodexUsage> {
         has_credits,
         fetched_at,
         antigravity_weekly: None,
+        notification_five_hour: None,
     })
 }
 

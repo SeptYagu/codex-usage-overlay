@@ -25,6 +25,7 @@ fn usage(at: i64, five: f64, week: f64) -> RawCodexUsage {
         has_credits: false,
         fetched_at: at,
         antigravity_weekly: None,
+        notification_five_hour: None,
     }
 }
 

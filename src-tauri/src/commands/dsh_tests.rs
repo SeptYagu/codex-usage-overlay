@@ -57,6 +57,7 @@ fn sample() -> RawCodexUsage {
         has_credits: false,
         fetched_at: now,
         antigravity_weekly: None,
+        notification_five_hour: None,
     }
 }
 

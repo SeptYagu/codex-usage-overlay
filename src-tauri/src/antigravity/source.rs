@@ -73,6 +73,7 @@ pub fn sample(snapshot: &shared::Snapshot, pool: PoolKind, now: i64) -> Antigrav
             has_credits: snapshot.has_credits,
             fetched_at: snapshot.captured_at,
             antigravity_weekly: antigravity_weeklies(snapshot, effective_pool, &map_window),
+            notification_five_hour: None,
         },
         stale: snapshot.age(now) > shared::SNAPSHOT_FRESH_SECS,
         effective_pool,
