@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.6] - 2026-11-21
+
+Includes the fixes from `1.9.5-preview.1`, `1.9.5-preview.2`, and `1.9.6-preview.1`.
+
 ### Fixed
 - Five-hour reset alerts now require a fresh, explicit recovery reading after a window with observed usage. The first message that opens a new window no longer produces a false reset alert. Claude's expired display projection is excluded from notification decisions; legacy state and account changes establish a silent baseline.
 - Alt+F4 no longer closes the overlay for good. The overlay has no close button, but it takes focus whenever the tray shows it, and a close request (Alt+F4, or `taskkill` without `/F`) used to destroy it: tray clicks then did nothing until the app was restarted. Close requests are now ignored; hiding and exiting stay in the tray and overlay menus.
