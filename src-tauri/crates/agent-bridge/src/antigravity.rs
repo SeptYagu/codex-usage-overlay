@@ -913,6 +913,10 @@ mod tests {
             ("Gemini 4 Argon (Medium)", PoolKind::Argon),
             ("Orchestrator (Neon)", PoolKind::Gemini),
             ("Gemini 4 Neon (High)", PoolKind::Gemini),
+            // agy lists Carbon in the Gemini group; "carbon" must not read as Argon.
+            ("Orchestrator (Carbon)", PoolKind::Gemini),
+            ("Gemini 4 Carbon (High)", PoolKind::Gemini),
+            ("gemini-4-carbon-medium", PoolKind::Gemini),
         ] {
             snap.active_model_name = Some(label.into());
             assert_eq!(snap.resolve_pool(PoolKind::Auto), pool, "{label}");
