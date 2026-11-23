@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Usage history. Every successful read is recorded locally for 90 days (only when a reading changes, plus a heartbeat every 30 minutes) in `%LOCALAPPDATA%\CodexUsageOverlay\history\`, one JSONL file per provider and month. A new **Usage history** window, opened from the tray menu, the overlay's right-click menu or Common settings, shows each provider over 24 hours to 90 days: a timeline of used percent with resets, protection thresholds and gaps without readings; daily consumption; and a table of past 5-hour and weekly windows with peak, whether the limit was hit, time to limit and unused share at reset. Common settings add **Record usage history** (on by default) and **Clear history**. Stale snapshots and Claude's display-only expiry projection are never recorded, account switches start a new line segment, and Antigravity lines record their effective pool. Nothing is uploaded.
+
 ## [1.9.7] - 2026-11-23
 
 Includes the fixes from `1.9.7-preview.1`.

@@ -190,3 +190,57 @@ html, body, #root {
 .settings-content { flex:1; min-width:0; min-height:0; overflow-y:auto; overflow-x:hidden; overflow-wrap:anywhere; }
 .settings-provider-column { min-width:0; display:flex; flex-direction:column; }
 .settings-provider-body { overflow-wrap:anywhere; }
+
+/* Usage history charts: reference data-viz palette, slots 1-3 (5H, WK, AR). */
+.viz-root {
+  --viz-surface: #fcfcfb;
+  --viz-ink: #0b0b0b;
+  --viz-ink-2: #52514e;
+  --viz-muted: #898781;
+  --viz-grid: #e1e0d9;
+  --viz-axis: #c3c2b7;
+  --viz-gap: rgba(137, 135, 129, 0.08);
+  --viz-border: rgba(11, 11, 11, 0.10);
+  --viz-series-1: #2a78d6;
+  --viz-series-2: #eb6834;
+  --viz-series-3: #1baf7a;
+  color: var(--viz-ink);
+}
+
+@media (prefers-color-scheme: dark) {
+  .viz-root {
+    --viz-surface: #1a1a19;
+    --viz-ink: #f0efec;
+    --viz-ink-2: #c3c2b7;
+    --viz-grid: #2c2c2a;
+    --viz-axis: #383835;
+    --viz-gap: rgba(137, 135, 129, 0.07);
+    --viz-border: rgba(255, 255, 255, 0.10);
+    --viz-series-1: #3987e5;
+    --viz-series-2: #d95926;
+    --viz-series-3: #199e70;
+  }
+}
+
+.viz-card {
+  background: var(--viz-surface);
+  border: 1px solid var(--viz-border);
+  border-radius: 12px;
+}
+
+.viz-tooltip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 10;
+  min-width: 150px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--viz-border);
+  background: var(--viz-surface);
+  color: var(--viz-ink);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+}
+
+.viz-chart:focus-visible { outline: 2px solid var(--viz-series-1); outline-offset: 2px; }

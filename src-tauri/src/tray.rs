@@ -528,6 +528,9 @@ pub fn handle_menu_action(app: &AppHandle, id: &str) {
         "open_settings" => {
             open_settings_window(app);
         }
+        "open_history" => {
+            open_history_window(app);
+        }
         "exit_app" => {
             crate::commands::shutdown_audio(app);
             app.exit(0);
@@ -914,6 +917,41 @@ fn apply_settings_geometry(app: &AppHandle, window: &tauri::WebviewWindow) {
     )));
 }
 
+pub const HISTORY_WINDOW_LABEL: &str = "history";
+
+/// Shows the usage History window, creating it centred on first use. Closing
+/// it destroys it; nothing in it needs to survive between openings.
+pub fn open_history_window(app: &AppHandle) {
+    let window = if let Some(window) = app.get_webview_window(HISTORY_WINDOW_LABEL) {
+        window
+    } else {
+        match WebviewWindowBuilder::new(app, HISTORY_WINDOW_LABEL, WebviewUrl::App("index.html#history".into()))
+            .title("Usage history")
+            .inner_size(1040.0, 760.0)
+            .min_inner_size(760.0, 520.0)
+            .resizable(true)
+            .maximizable(true)
+            .decorations(true)
+            .always_on_top(false)
+            .skip_taskbar(false)
+            .center()
+            .build()
+        {
+            Ok(window) => {
+                crate::webview_recovery::watch(&window);
+                window
+            }
+            Err(error) => {
+                eprintln!("Could not open the usage history window: {error}");
+                return;
+            }
+        }
+    };
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
 fn center_settings_window(window: &tauri::WebviewWindow) {
     let _ = window.set_size(Size::Logical(LogicalSize::new(
         SETTINGS_DEFAULT_WIDTH,
@@ -1205,7 +1243,7 @@ mod tests {
             weekly: window(21.0),
             credits_display: "—".into(), credits_balance: None, has_credits: false, fetched_at: 1,
             antigravity_weekly: Some(AntigravityWeeklies { argon: Some(window(58.0)), weekly_is_argon: false, gemini: None }),
-            notification_five_hour: None,
+            quota_pool: None, notification_five_hour: None,
         };
         assert_eq!(tooltip(&settings, &gemini_pool), "Antigravity | 5H 90% | WK 79% | AR 42%");
 
@@ -1213,7 +1251,7 @@ mod tests {
         let argon_pool = RawCodexUsage {
             weekly: window(58.0),
             antigravity_weekly: Some(AntigravityWeeklies { argon: Some(window(58.0)), weekly_is_argon: true, gemini: Some(window(21.0)) }),
-            notification_five_hour: None,
+            quota_pool: None, notification_five_hour: None,
             ..gemini_pool.clone()
         };
         assert_eq!(tooltip(&settings, &argon_pool), "Antigravity | 5H 90% | WK 79% | AR 42%");
@@ -1282,7 +1320,7 @@ mod tests {
                     five_hour: crate::codex::QuotaSnapshot { used_percent: Some(20.0), resets_at: Some(50000), window_duration_mins: Some(300) },
                     weekly: crate::codex::QuotaSnapshot { used_percent: Some(70.0), resets_at: Some(90000), window_duration_mins: Some(10080) },
                     credits_display: "12.50".into(), credits_balance: Some("12.50".into()), has_credits: true, fetched_at: 10000, antigravity_weekly: None,
-                    notification_five_hour: None,
+                    quota_pool: None, notification_five_hour: None,
                 };
                 // Warm real crossing history while 5H presentation is hidden
                 // in one branch. Acceptance/persistence must remain independent.

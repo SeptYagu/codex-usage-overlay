@@ -310,6 +310,10 @@ pub struct OverlaySettings {
     /// default, so an upgraded profile keeps the plain bars.
     #[serde(default)]
     pub show_percentage_grid: bool,
+    /// Whether successful reads are kept as local usage history for the
+    /// History window. On by default; turning it off keeps existing files.
+    #[serde(default = "default_true")]
+    pub record_usage_history: bool,
 }
 
 fn default_scale() -> u32 {
@@ -369,6 +373,7 @@ impl Default for OverlaySettings {
             auto_edge_hide: false,
             mouse_passthrough: false,
             show_percentage_grid: false,
+            record_usage_history: true,
         }
     }
 }

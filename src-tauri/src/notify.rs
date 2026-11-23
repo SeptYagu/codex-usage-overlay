@@ -631,7 +631,7 @@ mod tests {
             five_hour: QuotaSnapshot { used_percent: used, resets_at: boundary, window_duration_mins: Some(300) },
             weekly: QuotaSnapshot::default(),
             credits_display: "—".into(), credits_balance: None, has_credits: false,
-            fetched_at: at, antigravity_weekly: None, notification_five_hour: None,
+            fetched_at: at, antigravity_weekly: None, quota_pool: None, notification_five_hour: None,
         }
     }
 

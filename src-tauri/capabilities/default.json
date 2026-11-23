@@ -5,7 +5,8 @@
   "windows": [
     "main",
     "settings",
-    "tray-menu"
+    "tray-menu",
+    "history"
   ],
   "permissions": [
     "core:default",

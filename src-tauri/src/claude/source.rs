@@ -61,7 +61,7 @@ pub fn sample(snapshot: &shared::Snapshot, now: i64) -> ClaudeSample {
             has_credits: false,
             fetched_at: snapshot.captured_at,
             antigravity_weekly: None,
-            notification_five_hour: Some(snapshot.five_hour.map_or_else(QuotaSnapshot::default, |w| QuotaSnapshot {
+            quota_pool: None, notification_five_hour: Some(snapshot.five_hour.map_or_else(QuotaSnapshot::default, |w| QuotaSnapshot {
                 used_percent: Some(w.used_percent),
                 resets_at: w.resets_at,
                 window_duration_mins: Some(FIVE_HOUR_MINS),

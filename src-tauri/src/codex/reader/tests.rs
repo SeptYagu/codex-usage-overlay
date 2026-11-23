@@ -33,7 +33,7 @@ impl AttemptSource for Scripted {
             has_credits: false,
             fetched_at: unix_now(),
             antigravity_weekly: None,
-            notification_five_hour: None,
+            quota_pool: None, notification_five_hour: None,
         };
         Ok(ObservedUsage {
             usage,

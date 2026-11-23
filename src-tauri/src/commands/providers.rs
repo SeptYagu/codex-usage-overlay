@@ -614,7 +614,7 @@ mod auto_pause_tests {
             has_credits: false,
             fetched_at,
             antigravity_weekly: None,
-            notification_five_hour: None,
+            quota_pool: None, notification_five_hour: None,
         }
     }
 

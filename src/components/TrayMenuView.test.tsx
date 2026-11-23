@@ -216,3 +216,9 @@ it('shows a prepared update in the status line with an immediate install action'
   fireEvent.click(await screen.findByRole('menuitem', { name: 'Version 1.2.1 ready — install now' }));
   await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('install_update'));
 });
+
+it('opens the usage history window from the tray menu', async () => {
+  render(<TrayMenuView settings={DEFAULT_SETTINGS} onPatchSettings={() => {}} />);
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Usage History…' }));
+  await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('open_history_window'));
+});
