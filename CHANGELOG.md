@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The overlay no longer stays cropped after a remote-desktop virtual display (Vibepollo, Sunshine and similar) comes and goes. When the display layout changes back, Windows restores the window to the size it remembered for that layout. If the readings had grown in the meantime (for example a third quota block), part of the capsule was cut off until something else made it resize. The overlay now notices when the window size no longer matches its content and writes the correct size back. It also re-checks its size after every display change.
+- The overlay now follows the display's real pixel ratio after a DPI change. WebView2 can apply the new monitor scale after the scale-change event arrives, which left the size correction for Windows text scaling one step behind.
+
 ## [1.9.6] - 2026-11-21
 
 Includes the fixes from `1.9.5-preview.1`, `1.9.5-preview.2`, and `1.9.6-preview.1`.
