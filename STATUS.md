@@ -1,5 +1,10 @@
 # Status
 
+## v1.10.0-preview.1 source — 2026-11-23
+
+- Adds local quota usage history ([plan](docs/usage-history-plan.md), [release notes](docs/releases/v1.10.0-preview.1.md)): a 90-day recorder hooked into every successful read, a query layer for timeline, daily consumption and window summaries, and a History window opened from the tray, the overlay menu and Common settings. App version `1.10.0-preview.1`, MSI version `1.10.0.1`.
+- Verified locally (all CI steps) and in a browser preview with sample data. Installed-app checks of the window entry points and a full day of live recording are still open.
+
 ## v1.9.7 stable source — 2026-11-23
 
 - Combines `v1.9.7-preview.1` (overlay refit after display changes) with the agy 1.5.9 Argon fix: agy now lists the Argon models in the Gemini group and reports no Argon bucket, so the Argon pool falls back to the Gemini limits. App and MSI versions are aligned to `1.9.7`; [release notes](docs/releases/v1.9.7.md) list the remaining installed-package checks.
