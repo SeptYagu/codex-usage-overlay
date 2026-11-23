@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.7] - 2026-11-23
+
+Includes the fixes from `1.9.7-preview.1`.
+
 ### Fixed
 - Antigravity's Argon pool falls back to the Gemini limits when agy reports no Argon bucket. Since agy 1.5.9, `/usage` lists Gemini 4 Argon and Orchestrator (Argon) inside the Gemini group, which shares `gemini-weekly` and `gemini-5h`. Before this fix, an Argon model under `auto`, or the `argon` pool selected in settings, left WK blank and low-quota protection had no weekly limit to act on. Older agy versions that still report an Argon WTU bucket behave as before.
 - The overlay no longer stays cropped after a remote-desktop virtual display (Vibepollo, Sunshine and similar) comes and goes. When the display layout changes back, Windows restores the window to the size it remembered for that layout. If the readings had grown in the meantime (for example a third quota block), part of the capsule was cut off until something else made it resize. The overlay now notices when the window size no longer matches its content and writes the correct size back. It also re-checks its size after every display change.

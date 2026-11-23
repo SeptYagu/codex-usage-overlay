@@ -1,5 +1,10 @@
 # Status
 
+## v1.9.7 stable source — 2026-11-23
+
+- Combines `v1.9.7-preview.1` (overlay refit after display changes) with the agy 1.5.9 Argon fix: agy now lists the Argon models in the Gemini group and reports no Argon bucket, so the Argon pool falls back to the Gemini limits. App and MSI versions are aligned to `1.9.7`; [release notes](docs/releases/v1.9.7.md) list the remaining installed-package checks.
+- Verified locally rather than by waiting on Windows CI: frontend build and 198 tests, Rust workspace tests, DSH companion tests and packaging, packaging regression and Claude process-tree checks.
+
 ## v1.9.6 stable source — 2026-11-21
 
 - The stable source combines the three linear preview tags `v1.9.5-preview.1`, `v1.9.5-preview.2`, and `v1.9.6-preview.1`. The app and MSI versions are aligned to `1.9.6`; [release notes](docs/releases/v1.9.6.md) list all fixes and the remaining installed-machine acceptance gaps.
