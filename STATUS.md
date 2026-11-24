@@ -1,5 +1,9 @@
 # Status
 
+## v1.10.0-preview.2 source — 2026-11-23
+
+- Fixes the app freezing when the Usage history window opens ([release notes](docs/releases/v1.10.0-preview.2.md)): Tauri's window builder deadlocks on Windows when called from a synchronous command or a menu event handler, so the window is now built on a worker thread. Confirmed by hand on an isolated debug build (tray menu and overlay menu); signed-installer check still open. App version `1.10.0-preview.2`, MSI version `1.10.0.2`.
+
 ## v1.10.0-preview.1 source — 2026-11-23
 
 - Adds local quota usage history ([plan](docs/usage-history-plan.md), [release notes](docs/releases/v1.10.0-preview.1.md)): a 90-day recorder hooked into every successful read, a query layer for timeline, daily consumption and window summaries, and a History window opened from the tray, the overlay menu and Common settings. App version `1.10.0-preview.1`, MSI version `1.10.0.1`.

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0-preview.2] - 2026-11-23
+
+### Fixed
+- Opening the Usage history window no longer freezes the app. On Windows, building a window from a synchronous command or a menu event handler deadlocks, and the tray menu, the overlay's right-click menu and the Settings button all did that; the window is now built on a worker thread. The history commands also run off the main thread.
+
 ## [1.10.0-preview.1] - 2026-11-23
 
 ### Added
