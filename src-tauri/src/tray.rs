@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -919,9 +919,38 @@ fn apply_settings_geometry(app: &AppHandle, window: &tauri::WebviewWindow) {
 
 pub const HISTORY_WINDOW_LABEL: &str = "history";
 
+/// Set while a History window is being built, so a double click builds one.
+static HISTORY_WINDOW_CREATING: AtomicBool = AtomicBool::new(false);
+
+fn show_history_window(window: &tauri::WebviewWindow) {
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
 /// Shows the usage History window, creating it centred on first use. Closing
 /// it destroys it; nothing in it needs to survive between openings.
+///
+/// Every caller is a synchronous command or a menu event handler, and on
+/// Windows `WebviewWindowBuilder::build` deadlocks the app when called from
+/// either (WebView2 waits on the thread that is blocked building it). The
+/// window is therefore built on a runtime worker thread instead.
 pub fn open_history_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(HISTORY_WINDOW_LABEL) {
+        show_history_window(&window);
+        return;
+    }
+    if HISTORY_WINDOW_CREATING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        create_history_window(&app);
+        HISTORY_WINDOW_CREATING.store(false, Ordering::Release);
+    });
+}
+
+fn create_history_window(app: &AppHandle) {
     let window = if let Some(window) = app.get_webview_window(HISTORY_WINDOW_LABEL) {
         window
     } else {
@@ -947,9 +976,7 @@ pub fn open_history_window(app: &AppHandle) {
             }
         }
     };
-    let _ = window.unminimize();
-    let _ = window.show();
-    let _ = window.set_focus();
+    show_history_window(&window);
 }
 
 fn center_settings_window(window: &tauri::WebviewWindow) {
