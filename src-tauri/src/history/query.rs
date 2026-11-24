@@ -134,9 +134,20 @@ fn continuity(kind: WindowKind, prev: &Record, prev_w: WindowReading, cur: &Reco
     }
     match (prev_w.r, cur_w.r) {
         (Some(a), Some(b)) if (a - b).abs() <= kind.reset_tolerance_secs() => Continuity::Same,
-        (None, None) => Continuity::Same,
-        _ => Continuity::New,
+        (Some(_), Some(_)) => Continuity::New,
+        // The window ended and no new one has started yet. A reading that
+        // only lost its reset time, still in use before it, is the same one.
+        (Some(a), None) if cur_w.u <= 0.0 || cur.t >= a => Continuity::New,
+        // A window starting from unused is not a reset, unless usage dropped.
+        (None, Some(_)) if cur_w.u < prev_w.u => Continuity::New,
+        _ => Continuity::Same,
     }
+}
+
+/// When the window before `cur` ended: its reported reset time, kept between
+/// the two readings since providers reset a little early or late.
+fn reset_time(prev: &Record, prev_w: WindowReading, cur: &Record) -> i64 {
+    prev_w.r.map_or(cur.t, |r| r.clamp(prev.t, cur.t))
 }
 
 /// Readings of one window kind, oldest first, with their record.
@@ -247,9 +258,7 @@ fn windows(records: &[Record], from: i64, to: i64, now: i64) -> (Vec<WindowSumma
                     summaries.extend(summarize(kind, &group, now));
                     group.clear();
                     if link == Continuity::New {
-                        // The old window ended at its reset time, if that fell
-                        // between the two readings; otherwise when it was seen.
-                        let t = prev_reading.r.filter(|r| *r > prev_record.t && *r <= record.t).unwrap_or(record.t);
+                        let t = reset_time(prev_record, prev_reading, record);
                         if t >= from && t <= to {
                             resets.push(ResetMarker { t, kind });
                         }
@@ -336,6 +345,8 @@ fn starts_new_window(prev: &Record, cur: &Record) -> bool {
 /// so changes just before `from` still count.
 pub fn view<Tz: TimeZone>(series: &str, records: &[Record], from: i64, to: i64, now: i64, tz: &Tz) -> Option<HistoryView> {
     let provider = provider_of(series)?;
+    let records: Vec<Record> = records.iter().map(|record| record.normalized(provider)).collect();
+    let records = records.as_slice();
     let mut points = Vec::new();
     let mut gaps = Vec::new();
     let mut seg = 0u32;
@@ -433,6 +444,67 @@ mod tests {
         assert_eq!(current.unused_at_reset, None);
         // One reset, at the old window's reset time.
         assert_eq!(view.resets, vec![ResetMarker { t: reset1 - 4, kind: WindowKind::FiveHour }]);
+    }
+
+    fn five(t: i64, u: f64, r: Option<i64>) -> Record {
+        Record { t, acct: Some("a".into()), pool: None, fh: Some(WindowReading { u, r }), wk: None, ar: None }
+    }
+
+    #[test]
+    fn a_claude_reset_through_an_unused_window_is_one_reset_at_the_reset_time() {
+        // The installed client's readings around a Claude reset: resets read
+        // back a second early on alternate polls, then one 0% reading with no
+        // reset before the next window's first use.
+        let old = DAY0 + 5 * H;
+        let new = old + 5 * H;
+        let records = vec![
+            five(old - 1_930, 75.0, Some(old)),
+            five(old - 590, 75.0, Some(old - 1)),
+            five(old - 470, 75.0, Some(old)),
+            five(old - 364, 75.0, Some(old - 1)),
+            five(old + 90, 0.0, None),
+            five(old + 330, 1.0, Some(new)),
+            five(old + 1_395, 1.0, Some(new - 1)),
+            five(old + 2_475, 6.0, Some(new)),
+        ];
+        let now = old + 2_500;
+        let view = view("claude", &records, DAY0, now, now, &utc()).unwrap();
+        assert_eq!(view.resets, vec![ResetMarker { t: old, kind: WindowKind::FiveHour }]);
+        let windows: Vec<_> = view.windows.iter().map(|w| (w.start, w.resets_at, w.peak, w.complete)).collect();
+        assert_eq!(windows, vec![(new - 5 * H, new, 6.0, false), (old - 5 * H, old, 75.0, true)]);
+        assert_eq!(view.days[0].five_hour, 6.0);
+    }
+
+    #[test]
+    fn an_unused_codex_window_does_not_slide_its_window_or_reset() {
+        // Codex reports an unused window's reset a full window from each read.
+        let start = DAY0 + 2 * H;
+        let mut records: Vec<Record> = (0..120).map(|i| five(DAY0 + i * 60, 0.0, Some(DAY0 + i * 60 + 5 * H - 30))).collect();
+        records.push(five(start, 3.0, Some(start + 5 * H)));
+        records.push(five(start + 600, 9.0, Some(start + 5 * H)));
+        let view = view("codex", &records, DAY0, start + H, start + H, &utc()).unwrap();
+        assert!(view.resets.is_empty(), "{:?}", view.resets);
+        assert_eq!(view.windows.len(), 1);
+        assert_eq!((view.windows[0].start, view.windows[0].resets_at, view.windows[0].peak), (start, start + 5 * H, 9.0));
+    }
+
+    #[test]
+    fn a_reading_that_only_loses_its_reset_time_is_not_a_reset() {
+        let reset = DAY0 + 5 * H;
+        let records = vec![five(DAY0, 30.0, Some(reset)), five(DAY0 + 600, 35.0, None), five(DAY0 + 1_200, 40.0, Some(reset))];
+        let view = view("antigravity", &records, DAY0, DAY0 + H, DAY0 + H, &utc()).unwrap();
+        assert!(view.resets.is_empty());
+        assert_eq!(view.windows.len(), 1);
+        assert_eq!(view.days[0].five_hour, 10.0);
+    }
+
+    #[test]
+    fn an_early_reset_is_marked_when_it_was_seen() {
+        // Antigravity reset 16 s before the time it had reported.
+        let reset = DAY0 + 5 * H;
+        let records = vec![five(reset - 600, 48.0, Some(reset)), five(reset - 16, 0.0, None), five(reset + 90, 1.0, Some(reset + 5 * H))];
+        let view = view("antigravity", &records, DAY0, reset + H, reset + H, &utc()).unwrap();
+        assert_eq!(view.resets, vec![ResetMarker { t: reset - 16, kind: WindowKind::FiveHour }]);
     }
 
     #[test]

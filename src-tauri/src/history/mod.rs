@@ -57,14 +57,56 @@ pub struct Record {
     pub ar: Option<WindowReading>,
 }
 
+/// Reset times this close are one reset time read twice.
+const RESET_JITTER_SECS: i64 = 60;
+/// A 0% window whose reset is at least this close to a full window away has
+/// not started: the provider projects its reset from "now".
+const UNSTARTED_SLACK_SECS: i64 = 5 * 60;
+
+impl WindowReading {
+    fn same_as(self, other: WindowReading) -> bool {
+        self.u == other.u
+            && match (self.r, other.r) {
+                (Some(a), Some(b)) => (a - b).abs() <= RESET_JITTER_SECS,
+                (a, b) => a == b,
+            }
+    }
+
+    /// The reading as the history compares it. A window nobody has used yet
+    /// has no reset: Codex reports one a full window from every read, so it
+    /// slides forward each poll. Claude publishes whole-minute resets but
+    /// reads them back a second early now and then.
+    fn normalized(self, provider: Provider, kind: WindowKind, t: i64) -> WindowReading {
+        let r = self.r.map(|r| if provider == Provider::Claude { (r + 30).div_euclid(60) * 60 } else { r });
+        let unstarted = self.u <= 0.0 && r.is_some_and(|r| r >= t + kind.duration_secs() - UNSTARTED_SLACK_SECS);
+        WindowReading { u: self.u, r: if unstarted { None } else { r } }
+    }
+}
+
 impl Record {
     /// True when nothing a chart would draw differs from `other`.
     pub fn same_reading(&self, other: &Record) -> bool {
+        let same = |a: Option<WindowReading>, b: Option<WindowReading>| match (a, b) {
+            (Some(a), Some(b)) => a.same_as(b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
         self.acct == other.acct
             && self.pool == other.pool
-            && self.fh == other.fh
-            && self.wk == other.wk
-            && self.ar == other.ar
+            && same(self.fh, other.fh)
+            && same(self.wk, other.wk)
+            && same(self.ar, other.ar)
+    }
+
+    /// The record with each window [`WindowReading::normalized`]; lines
+    /// written before normalization existed read the same as new ones.
+    pub fn normalized(&self, provider: Provider) -> Record {
+        let t = self.t;
+        Record {
+            fh: self.fh.map(|w| w.normalized(provider, WindowKind::FiveHour, t)),
+            wk: self.wk.map(|w| w.normalized(provider, WindowKind::Weekly, t)),
+            ar: self.ar.map(|w| w.normalized(provider, WindowKind::Argon, t)),
+            ..self.clone()
+        }
     }
 
     pub fn window(&self, kind: WindowKind) -> Option<WindowReading> {
@@ -184,6 +226,7 @@ pub fn record_for(provider: Provider, raw: &RawCodexUsage, now: i64) -> Option<R
         wk: window_reading(weekly),
         ar: window_reading(argon),
     };
+    let record = record.normalized(provider);
     (record.fh.is_some() || record.wk.is_some() || record.ar.is_some()).then_some(record)
 }
 
@@ -262,9 +305,11 @@ mod tests {
     fn claude_records_its_captured_window_not_the_projection() {
         let mut claude = raw(NOW, 0.0, 10.0);
         claude.five_hour = QuotaSnapshot { used_percent: Some(0.0), resets_at: None, window_duration_mins: None };
-        claude.notification_five_hour = Some(snapshot(73.0, NOW - 10));
+        // NOW is 40 s past a minute; Claude's whole-minute reset is read as
+        // a second early, and recorded as the minute.
+        claude.notification_five_hour = Some(snapshot(73.0, NOW + 19));
         let record = record_for(Provider::Claude, &claude, NOW).unwrap();
-        assert_eq!(record.fh, Some(WindowReading { u: 73.0, r: Some(NOW - 10) }));
+        assert_eq!(record.fh, Some(WindowReading { u: 73.0, r: Some(NOW + 20) }));
         // Other providers never read the Claude-only field.
         assert_eq!(record_for(Provider::Codex, &claude, NOW).unwrap().fh, Some(WindowReading { u: 0.0, r: None }));
     }
@@ -310,6 +355,22 @@ mod tests {
         // A repeated snapshot or a clock step backwards is never written.
         assert!(!should_record(Some(&changed), &Record { t: NOW + 60, ..changed.clone() }));
         assert!(!should_record(Some(&changed), &Record { t: NOW, fh: None, ..changed.clone() }));
+    }
+
+    #[test]
+    fn an_unused_window_records_no_reset_and_jitter_is_no_change() {
+        // Codex projects an unused window's reset from every read.
+        let mut idle = raw(NOW, 0.0, 40.0);
+        idle.five_hour = snapshot(0.0, NOW + 5 * 3_600 - 30);
+        let first = record_for(Provider::Codex, &idle, NOW).unwrap();
+        assert_eq!(first.fh, Some(WindowReading { u: 0.0, r: None }));
+        idle.fetched_at = NOW + 60;
+        idle.five_hour = snapshot(0.0, NOW + 60 + 5 * 3_600 - 30);
+        assert!(!should_record(Some(&first), &record_for(Provider::Codex, &idle, NOW + 60).unwrap()));
+        // A used window keeps its reset, and a second's jitter is not a change.
+        let used = record_for(Provider::Codex, &raw(NOW, 10.0, 40.0), NOW).unwrap();
+        let jitter = Record { t: NOW + 60, fh: Some(WindowReading { u: 10.0, r: Some(NOW + 3_599) }), ..used.clone() };
+        assert!(!should_record(Some(&used), &jitter));
     }
 
     #[test]
