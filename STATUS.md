@@ -1,5 +1,9 @@
 # Status
 
+## v1.10.0-preview.3 source — 2026-11-23
+
+- Places usage history resets at the provider's reset time ([release notes](docs/releases/v1.10.0-preview.3.md)): a reset through an unused window is one reset instead of two, Claude reset times are whole minutes, an unused Codex window records no sliding reset, and existing files are read with the same rules. Checked against real history from an installed preview.2; signed-installer check still open. App version `1.10.0-preview.3`, MSI version `1.10.0.3`.
+
 ## v1.10.0-preview.2 source — 2026-11-23
 
 - Fixes the app freezing when the Usage history window opens ([release notes](docs/releases/v1.10.0-preview.2.md)): Tauri's window builder deadlocks on Windows when called from a synchronous command or a menu event handler, so the window is now built on a worker thread. Confirmed by hand on an isolated debug build (tray menu and overlay menu); signed-installer check still open. App version `1.10.0-preview.2`, MSI version `1.10.0.2`.

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0-preview.3] - 2026-11-23
+
 ### Fixed
 - Usage history resets are placed accurately. A reset through an unused window (Claude and Antigravity report one reading with no reset time before the next window starts) was drawn twice, the second time at the next window's first use; it is now one reset, at the old window's reset time. Claude's whole-minute reset times, which read back a second early on some polls, are recorded as the minute, so the table no longer shows 21:09 for a 21:10 reset. Codex's unused window, whose reset moves a full window ahead on every read, is no longer recorded with a reset time, which also stops it writing a line every minute. A reading that only loses its reset time while the window is still in use is not a reset. Existing history files are read with the same rules.
 
