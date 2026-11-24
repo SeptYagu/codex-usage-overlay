@@ -1,5 +1,10 @@
 # Status
 
+## v1.10.0 stable source — 2026-11-23
+
+- Combines the linear previews `v1.10.0-preview.1` to `v1.10.0-preview.3` (usage history, the History window freeze fix and accurate reset times) with no further code changes. App and MSI versions are aligned to `1.10.0`; [release notes](docs/releases/v1.10.0.md).
+- Approved for stable after the user looked at the History window in an installed `v1.10.0-preview.3`; all CI steps also pass locally.
+
 ## v1.10.0-preview.3 source — 2026-11-23
 
 - Places usage history resets at the provider's reset time ([release notes](docs/releases/v1.10.0-preview.3.md)): a reset through an unused window is one reset instead of two, Claude reset times are whole minutes, an unused Codex window records no sliding reset, and existing files are read with the same rules. Checked against real history from an installed preview.2; signed-installer check still open. App version `1.10.0-preview.3`, MSI version `1.10.0.3`.

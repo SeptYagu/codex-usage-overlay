@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-11-23
+
+Stable release of usage history. Includes everything from `1.10.0-preview.1` through `1.10.0-preview.3`, with no further changes.
+
+### Added
+- Usage history: 90 days of readings recorded locally, and a Usage history window with a timeline, daily consumption and a table of past quota windows (see `1.10.0-preview.1`).
+
+### Fixed
+- Opening the Usage history window no longer freezes the app (`1.10.0-preview.2`).
+- Usage history resets are placed at the provider's reset time (`1.10.0-preview.3`).
+
 ## [1.10.0-preview.3] - 2026-11-23
 
 ### Fixed
