@@ -135,3 +135,27 @@ it('keeps carousel participation separate and saves every slider second through 
   fireEvent.click(panel('claude').getByRole('checkbox',{name:'Include in quota rotation'}));
   expect(onPatchSettings).toHaveBeenLastCalledWith({providerPreferences:{claude:{carouselIncluded:false}}});
 });
+
+describe('usage history settings', () => {
+  it('toggles recording, opens the history window and clears only after confirmation', async () => {
+    const view = await mount();
+    const block = within(view.container.querySelector('[data-usage-history-settings]') as HTMLElement);
+    const toggle = block.getByRole('checkbox', { name: 'Record usage history' }) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    fireEvent.click(toggle);
+    expect(view.onPatchSettings).toHaveBeenCalledWith({ recordUsageHistory: false });
+
+    fireEvent.click(block.getByRole('button', { name: 'Open usage history' }));
+    expect(tauri.invoke).toHaveBeenCalledWith('open_history_window');
+
+    fireEvent.click(block.getByRole('button', { name: 'Clear history' }));
+    expect(tauri.invoke).not.toHaveBeenCalledWith('clear_usage_history');
+    fireEvent.click(block.getByRole('button', { name: 'Cancel' }));
+    expect(tauri.invoke).not.toHaveBeenCalledWith('clear_usage_history');
+
+    fireEvent.click(block.getByRole('button', { name: 'Clear history' }));
+    await act(async () => { fireEvent.click(block.getByRole('button', { name: 'Delete' })); });
+    expect(tauri.invoke).toHaveBeenCalledWith('clear_usage_history');
+    expect(block.getByRole('status').textContent).toBe('Usage history cleared.');
+  });
+});

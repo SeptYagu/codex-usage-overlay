@@ -8,6 +8,7 @@ import { DockStateInfo, OverlaySettings, SettingsEnvelope, DEFAULT_SETTINGS, Set
 import { OverlayView } from './components/OverlayView';
 import { SettingsView } from './components/SettingsView';
 import { TrayMenuView } from './components/TrayMenuView';
+import { HistoryView } from './components/HistoryView';
 import { useDisplayState } from './hooks/useDisplayState';
 import { useProviderMonitors } from './hooks/useProviderMonitors';
 import { mergeSettingsPatch, mergePendingPatches } from './providerSettings';
@@ -202,6 +203,11 @@ export const App: React.FC = () => {
         display={display ?? undefined}
       />
     );
+  }
+
+  if (windowLabel === 'history' || window.location.hash === '#history') {
+    if (settingsLoadState === 'loading') return null;
+    return <HistoryView settings={settings} />;
   }
 
   if (windowLabel === 'tray-menu' || window.location.hash === '#tray-menu') {

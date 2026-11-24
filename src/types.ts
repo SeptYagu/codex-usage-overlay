@@ -115,6 +115,7 @@ export interface OverlaySettings {
   autoEdgeHide: boolean;
   mousePassthrough: boolean;
   showPercentageGrid: boolean;
+  recordUsageHistory: boolean;
 }
 
 export interface SettingsEnvelope {
@@ -166,6 +167,7 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   autoEdgeHide: false,
   mousePassthrough: false,
   showPercentageGrid: false,
+  recordUsageHistory: true,
 };
 
 export interface UsageStatus {

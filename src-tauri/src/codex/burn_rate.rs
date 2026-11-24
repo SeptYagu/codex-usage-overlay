@@ -746,7 +746,7 @@ mod tests {
             has_credits: false,
             fetched_at: at,
             antigravity_weekly: None,
-            notification_five_hour: None,
+            quota_pool: None, notification_five_hour: None,
         }
     }
 

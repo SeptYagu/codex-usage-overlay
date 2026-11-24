@@ -65,6 +65,7 @@ export const SettingsView = ({ settings, onPatchSettings, saveErrors = [], displ
         <p className="text-xs text-slate-500">{t('carouselHint')}</p>
         {display?.carouselEnabled && <p role="status" className="text-xs text-cyan-600">{t(`carouselStatus_${display.status}`)} · {display.candidates.length} {t('carouselSources')}</p>}
       </div>
+      <UsageHistorySettings enabled={settings.recordUsageHistory ?? true} onToggle={recordUsageHistory => onPatchSettings({ recordUsageHistory })} />
       <SettingsPanel {...shared} common configurationProvider={settings.provider} />
     </section> : provider && <section key={provider} data-provider-settings={provider} aria-label={t(activePage.label)} className="settings-provider-column">
         <header className="flex items-center justify-between gap-2 p-3 border-b border-slate-200 dark:border-slate-700">
@@ -494,4 +495,48 @@ function SettingsPanel({ savedSettings, savePatch, configurationProvider, monito
             ))}
           </section>
 </div>;
+}
+
+/** Common-tab controls for local usage history: record on/off, open, clear (with a confirm step). */
+function UsageHistorySettings({ enabled, onToggle }: { enabled: boolean; onToggle: (enabled: boolean) => void }) {
+  const { t } = useTranslation();
+  const [confirming, setConfirming] = useState(false);
+  const [status, setStatus] = useState<'idle' | 'cleared' | 'failed'>('idle');
+  const clear = async () => {
+    setConfirming(false);
+    try {
+      await invoke('clear_usage_history');
+      setStatus('cleared');
+    } catch (error) {
+      console.error('Could not clear usage history:', error);
+      setStatus('failed');
+    }
+  };
+  return (
+    <div className="mt-4 space-y-2 border-t border-slate-200 dark:border-slate-700 pt-4" data-usage-history-settings>
+      <label className="flex items-center justify-between text-sm font-semibold">
+        {t('recordUsageHistory')}
+        <input type="checkbox" className="accent-cyan-500" checked={enabled} onChange={e => onToggle(e.target.checked)} />
+      </label>
+      <p className="text-xs text-slate-500">{t('recordUsageHistoryHint')}</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" className="text-xs rounded border border-slate-300 dark:border-slate-600 px-2.5 py-1" onClick={() => void invoke('open_history_window').catch(error => console.error('Could not open usage history:', error))}>
+          {t('openUsageHistory')}
+        </button>
+        {confirming ? (
+          <span role="group" aria-label={t('clearUsageHistory')} className="flex flex-wrap items-center gap-2 text-xs">
+            <span>{t('clearUsageHistoryConfirm')}</span>
+            <button type="button" className="rounded bg-red-600 px-2.5 py-1 text-white" onClick={() => void clear()}>{t('clearUsageHistoryYes')}</button>
+            <button type="button" className="rounded border border-slate-300 dark:border-slate-600 px-2.5 py-1" onClick={() => setConfirming(false)}>{t('clearUsageHistoryCancel')}</button>
+          </span>
+        ) : (
+          <button type="button" className="text-xs rounded border border-slate-300 dark:border-slate-600 px-2.5 py-1" onClick={() => { setStatus('idle'); setConfirming(true); }}>
+            {t('clearUsageHistory')}
+          </button>
+        )}
+      </div>
+      {status === 'cleared' && <p role="status" className="text-xs text-cyan-600">{t('clearUsageHistoryDone')}</p>}
+      {status === 'failed' && <p role="alert" className="text-xs text-red-600">{t('clearUsageHistoryFailed')}</p>}
+    </div>
+  );
 }

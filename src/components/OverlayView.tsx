@@ -109,11 +109,28 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, us
         setDprComp(1);
       }
     };
+    // WebView2 picks up a new monitor scale asynchronously, so devicePixelRatio
+    // can still hold the old value when Tauri's scale-change event arrives (a
+    // remote-desktop virtual display switches DPI exactly like this). Re-read
+    // the ratio whenever it actually changes, or the compensation stays stale.
+    let resolution: MediaQueryList | null = null;
+    const onResolutionChange = () => { watchResolution(); void update(); };
+    function watchResolution() {
+      resolution?.removeEventListener('change', onResolutionChange);
+      resolution = typeof window.matchMedia === 'function'
+        ? window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+        : null;
+      resolution?.addEventListener('change', onResolutionChange);
+    }
+    watchResolution();
     void update();
     currentWindow.onScaleChanged(() => { void update(); })
       .then((fn) => { unlisten = fn; })
       .catch(() => {});
-    return () => { if (unlisten) unlisten(); };
+    return () => {
+      resolution?.removeEventListener('change', onResolutionChange);
+      if (unlisten) unlisten();
+    };
   }, []);
 
   useEffect(() => {
@@ -176,6 +193,28 @@ export const OverlayView: React.FC<OverlayViewProps> = ({ settings, provider, us
     observer.observe(el);
     return () => observer.disconnect();
   }, [fitCapsuleSize]);
+
+  // The cached measurement only describes the content. Windows can resize the
+  // window behind our back: after a display topology change (a remote-desktop
+  // virtual display coming and going) it restores the window rectangle it
+  // remembered for that topology. The content does not change, so neither the
+  // ResizeObserver nor the cache would notice and the capsule would stay
+  // cropped. The viewport always equals the last written size (within
+  // rounding) unless someone else resized the window, so a mismatch re-fits.
+  useEffect(() => {
+    const onResize = () => {
+      const { width, height } = lastSizeRef.current;
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      // Nothing written yet (a fit is pending anyway), or minimized (0x0).
+      if (collapsed || width === 0 || viewportWidth <= 0 || viewportHeight <= 0) return;
+      if (Math.abs(viewportWidth - width) <= 1 && Math.abs(viewportHeight - height) <= 1) return;
+      lastSizeRef.current = { width: 0, height: 0 };
+      void fitCapsuleSize();
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [collapsed, fitCapsuleSize]);
 
   useEffect(() => {
     let active = true;

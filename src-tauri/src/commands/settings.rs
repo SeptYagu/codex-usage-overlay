@@ -269,6 +269,8 @@ pub struct SettingsPatch {
     pub mouse_passthrough: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_present_some")]
     pub show_percentage_grid: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_present_some")]
+    pub record_usage_history: Option<bool>,
 }
 
 impl SettingsPatch {
@@ -352,6 +354,9 @@ impl SettingsPatch {
         }
         if let Some(v) = self.show_percentage_grid {
             settings.show_percentage_grid = v;
+        }
+        if let Some(v) = self.record_usage_history {
+            settings.record_usage_history = v;
         }
     }
 }
@@ -570,6 +575,20 @@ mod settings_patch_tests {
         assert!(validate_settings_patch(&serde_json::json!({"showPercentageGrid": 1}), false).is_err());
         assert!(validate_settings_patch(&serde_json::json!({"showPercentageGrid": null}), false).is_err());
         assert!(validate_settings_patch(&serde_json::json!({"futureField": true}), false).is_err());
+    }
+
+    #[test]
+    fn record_usage_history_defaults_on_and_patches_strictly() {
+        let absent: crate::config::OverlaySettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(absent.record_usage_history, "an upgraded profile records history");
+        assert!(crate::config::OverlaySettings::default().record_usage_history);
+        let changes = validate_settings_patch(&serde_json::json!({"recordUsageHistory": false}), false).unwrap();
+        assert_eq!(changes.record_usage_history, Some(false));
+        let mut settings = crate::config::OverlaySettings::default();
+        changes.apply_to(&mut settings);
+        assert!(!settings.record_usage_history);
+        assert!(validate_settings_patch(&serde_json::json!({"recordUsageHistory": "no"}), false).is_err());
+        assert!(validate_settings_patch(&serde_json::json!({"recordUsageHistory": null}), false).is_err());
     }
 
     /// The offline half of P3-4: the same `validate -> merge -> save` chain the

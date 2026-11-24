@@ -101,6 +101,17 @@ impl Snapshot {
     }
 
     pub fn resolve_pool(&self, selection: PoolKind) -> PoolKind {
+        let pool = self.select_pool(selection);
+        // agy 1.5.9+ lists the Argon models inside the Gemini group and reports
+        // no Argon bucket, so Argon draws on the shared Gemini limits.
+        if pool == PoolKind::Argon && self.argon.is_empty() {
+            PoolKind::Gemini
+        } else {
+            pool
+        }
+    }
+
+    fn select_pool(&self, selection: PoolKind) -> PoolKind {
         if selection != PoolKind::Auto {
             return selection;
         }
@@ -847,6 +858,40 @@ mod tests {
     }
 
     #[test]
+    fn argon_uses_gemini_limits_when_agy_reports_no_argon_bucket() {
+        // agy 1.5.9 `/usage`: Argon models sit in the Gemini group, no Argon bucket.
+        let usage = json!({
+            "num_turns": 0,
+            "command": { "name": "usage", "data": { "groups": [
+                {
+                    "name": "Gemini Models",
+                    "description": "Models within this group: Gemini 4 Neon, Gemini 4 Argon, Orchestrator (Argon)",
+                    "buckets": [
+                        { "id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.75, "reset_time": "2026-11-30T20:12:11Z" },
+                        { "id": "gemini-5h", "window": "5h", "remaining_fraction": 0.9, "reset_time": "2026-11-24T01:12:11Z" }
+                    ]
+                },
+                {
+                    "name": "Claude and GPT models",
+                    "buckets": [
+                        { "id": "3p-weekly", "window": "weekly", "remaining_fraction": 0, "reset_time": "2026-11-28T19:02:03Z" },
+                        { "id": "3p-5h", "window": "5h", "disabled": true, "remaining_fraction": 1 }
+                    ]
+                }
+            ] } }
+        });
+        let mut snap = parse_usage_command(&usage, NOW).unwrap();
+        assert!(snap.argon.is_empty());
+        snap.active_model_name = Some("Orchestrator (Argon)".into());
+        for selection in [PoolKind::Auto, PoolKind::Argon] {
+            assert_eq!(snap.resolve_pool(selection), PoolKind::Gemini);
+            let windows = snap.windows_for(selection);
+            assert!((windows.weekly.unwrap().used_percent - 25.0).abs() < 1e-6);
+            assert!((windows.five_hour.unwrap().used_percent - 10.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn auto_pool_routes_third_party_models_and_defaults_to_gemini() {
         let mut snap = parse_statusline(&sample_input(), NOW).unwrap();
         assert_eq!(snap.resolve_pool(PoolKind::Auto), PoolKind::Gemini);
@@ -868,6 +913,10 @@ mod tests {
             ("Gemini 4 Argon (Medium)", PoolKind::Argon),
             ("Orchestrator (Neon)", PoolKind::Gemini),
             ("Gemini 4 Neon (High)", PoolKind::Gemini),
+            // agy lists Carbon in the Gemini group; "carbon" must not read as Argon.
+            ("Orchestrator (Carbon)", PoolKind::Gemini),
+            ("Gemini 4 Carbon (High)", PoolKind::Gemini),
+            ("gemini-4-carbon-medium", PoolKind::Gemini),
         ] {
             snap.active_model_name = Some(label.into());
             assert_eq!(snap.resolve_pool(PoolKind::Auto), pool, "{label}");

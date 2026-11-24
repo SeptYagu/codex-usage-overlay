@@ -379,6 +379,60 @@ it('re-measures the capsule when the backend invalidates the window size', async
   expect(tauri.setSize).toHaveBeenLastCalledWith(expect.objectContaining({ width: 320, height: 96 }));
 });
 
+function setViewport(width: number, height: number) {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: height });
+}
+
+it('re-fits when Windows resizes the window behind its back', async () => {
+  const original = { width: window.innerWidth, height: window.innerHeight };
+  vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockImplementation(() => ({
+    width: 480, height: 67,
+  } as DOMRect));
+  try {
+    render(<OverlayView settings={DEFAULT_SETTINGS} usage={usage} isLoading={false} />);
+    await waitFor(() => expect(tauri.setSize).toHaveBeenCalledTimes(1));
+
+    // The resize caused by our own write matches the measurement: nothing to do.
+    setViewport(480, 67);
+    await act(async () => { window.dispatchEvent(new Event('resize')); });
+    expect(tauri.setSize).toHaveBeenCalledTimes(1);
+
+    // A display topology change restored an older, narrower rectangle while the
+    // content kept its size. The overlay must write its real size back.
+    setViewport(351, 67);
+    await act(async () => { window.dispatchEvent(new Event('resize')); });
+    await waitFor(() => expect(tauri.setSize).toHaveBeenCalledTimes(2));
+    expect(tauri.setSize).toHaveBeenLastCalledWith(expect.objectContaining({ width: 480, height: 67 }));
+
+    // A minimized window reports a 0x0 viewport and is left alone.
+    setViewport(0, 0);
+    await act(async () => { window.dispatchEvent(new Event('resize')); });
+    expect(tauri.setSize).toHaveBeenCalledTimes(2);
+  } finally {
+    setViewport(original.width, original.height);
+  }
+});
+
+it('re-reads the DPI compensation when devicePixelRatio changes after the scale event', async () => {
+  const listeners = new Set<() => void>();
+  vi.stubGlobal('matchMedia', () => ({
+    addEventListener: (_: string, fn: () => void) => { listeners.add(fn); },
+    removeEventListener: (_: string, fn: () => void) => { listeners.delete(fn); },
+  }));
+  vi.stubGlobal('devicePixelRatio', 1);
+  const { container } = render(<OverlayView settings={{ ...DEFAULT_SETTINGS, scalePercent: 100 }}
+    usage={usage} isLoading={false} />);
+  const capsule = container.querySelector<HTMLElement>('.overlay-capsule')!;
+  await waitFor(() => expect(capsule.style.transform).toBe('scale(1)'));
+
+  // WebView2 applies the new ratio only after Tauri reported the scale change
+  // (scaleFactor stays 1 here), so the compensation must follow the ratio.
+  vi.stubGlobal('devicePixelRatio', 1.25);
+  await act(async () => { [...listeners].forEach((fn) => fn()); });
+  await waitFor(() => expect(capsule.style.transform).toBe('scale(0.8)'));
+});
+
 it('starts a native drag from the expanded capsule', async () => {
   const { container } = render(<OverlayView settings={DEFAULT_SETTINGS} usage={usage} isLoading={false} />);
   fireEvent.mouseDown(container.querySelector('.overlay-capsule')!, { button: 0 });

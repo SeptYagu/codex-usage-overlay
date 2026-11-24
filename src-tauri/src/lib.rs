@@ -9,6 +9,7 @@ mod dock;
 mod dsh;
 mod dsh_control;
 mod geometry;
+mod history;
 mod live_poll;
 mod notify;
 mod pause_control;
@@ -163,6 +164,10 @@ pub fn run() {
             commands::resume_chat,
             commands::patch_settings,
             commands::open_settings_window,
+            commands::open_history_window,
+            commands::get_usage_history_series,
+            commands::get_usage_history,
+            commands::clear_usage_history,
             commands::is_installed_version,
             commands::get_tray_menu_generation,
             commands::layout_tray_menu,

@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-11-23
+
+Stable release of usage history. Includes everything from `1.10.0-preview.1` through `1.10.0-preview.3`, with no further changes.
+
+### Added
+- Usage history: 90 days of readings recorded locally, and a Usage history window with a timeline, daily consumption and a table of past quota windows (see `1.10.0-preview.1`).
+
+### Fixed
+- Opening the Usage history window no longer freezes the app (`1.10.0-preview.2`).
+- Usage history resets are placed at the provider's reset time (`1.10.0-preview.3`).
+
+## [1.10.0-preview.3] - 2026-11-23
+
+### Fixed
+- Usage history resets are placed accurately. A reset through an unused window (Claude and Antigravity report one reading with no reset time before the next window starts) was drawn twice, the second time at the next window's first use; it is now one reset, at the old window's reset time. Claude's whole-minute reset times, which read back a second early on some polls, are recorded as the minute, so the table no longer shows 21:09 for a 21:10 reset. Codex's unused window, whose reset moves a full window ahead on every read, is no longer recorded with a reset time, which also stops it writing a line every minute. A reading that only loses its reset time while the window is still in use is not a reset. Existing history files are read with the same rules.
+
+## [1.10.0-preview.2] - 2026-11-23
+
+### Fixed
+- Opening the Usage history window no longer freezes the app. On Windows, building a window from a synchronous command or a menu event handler deadlocks, and the tray menu, the overlay's right-click menu and the Settings button all did that; the window is now built on a worker thread. The history commands also run off the main thread.
+
+## [1.10.0-preview.1] - 2026-11-23
+
+### Added
+- Usage history. Every successful read is recorded locally for 90 days (only when a reading changes, plus a heartbeat every 30 minutes) in `%LOCALAPPDATA%\CodexUsageOverlay\history\`, one JSONL file per provider and month. A new **Usage history** window, opened from the tray menu, the overlay's right-click menu or Common settings, shows each provider over 24 hours to 90 days: a timeline of used percent with resets, protection thresholds and gaps without readings; daily consumption; and a table of past 5-hour and weekly windows with peak, whether the limit was hit, time to limit and unused share at reset. Common settings add **Record usage history** (on by default) and **Clear history**. Stale snapshots and Claude's display-only expiry projection are never recorded, account switches start a new line segment, and Antigravity lines record their effective pool. Nothing is uploaded.
+
+## [1.9.7] - 2026-11-23
+
+Includes the fixes from `1.9.7-preview.1`.
+
+### Fixed
+- Antigravity's Argon pool falls back to the Gemini limits when agy reports no Argon bucket. Since agy 1.5.9, `/usage` lists Gemini 4 Argon and Orchestrator (Argon) inside the Gemini group, which shares `gemini-weekly` and `gemini-5h`. Before this fix, an Argon model under `auto`, or the `argon` pool selected in settings, left WK blank and low-quota protection had no weekly limit to act on. Older agy versions that still report an Argon WTU bucket behave as before.
+- The overlay no longer stays cropped after a remote-desktop virtual display (Vibepollo, Sunshine and similar) comes and goes. When the display layout changes back, Windows restores the window to the size it remembered for that layout. If the readings had grown in the meantime (for example a third quota block), part of the capsule was cut off until something else made it resize. The overlay now notices when the window size no longer matches its content and writes the correct size back. It also re-checks its size after every display change.
+- The overlay now follows the display's real pixel ratio after a DPI change. WebView2 can apply the new monitor scale after the scale-change event arrives, which left the size correction for Windows text scaling one step behind.
+
 ## [1.9.6] - 2026-11-21
 
 Includes the fixes from `1.9.5-preview.1`, `1.9.5-preview.2`, and `1.9.6-preview.1`.

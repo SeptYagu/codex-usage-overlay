@@ -950,6 +950,13 @@ pub fn display_layout_changed(app: &AppHandle, state: &Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(DISPLAY_SETTLE_DELAY).await;
         keep_in_work_area(&app, &state).await;
+        // Windows may have resized the window while re-laying out the displays
+        // (it restores the rectangle remembered for the new topology), which
+        // leaves the content measurement stale. Have the frontend re-measure
+        // and write the real capsule size back.
+        if let Some(window) = app.get_webview_window("main") {
+            emit_size_invalidated(&window);
+        }
     });
 }
 

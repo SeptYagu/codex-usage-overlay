@@ -1,5 +1,28 @@
 # Status
 
+## v1.10.0 stable source — 2026-11-23
+
+- Combines the linear previews `v1.10.0-preview.1` to `v1.10.0-preview.3` (usage history, the History window freeze fix and accurate reset times) with no further code changes. App and MSI versions are aligned to `1.10.0`; [release notes](docs/releases/v1.10.0.md).
+- Approved for stable after the user looked at the History window in an installed `v1.10.0-preview.3`; all CI steps also pass locally.
+
+## v1.10.0-preview.3 source — 2026-11-23
+
+- Places usage history resets at the provider's reset time ([release notes](docs/releases/v1.10.0-preview.3.md)): a reset through an unused window is one reset instead of two, Claude reset times are whole minutes, an unused Codex window records no sliding reset, and existing files are read with the same rules. Checked against real history from an installed preview.2; signed-installer check still open. App version `1.10.0-preview.3`, MSI version `1.10.0.3`.
+
+## v1.10.0-preview.2 source — 2026-11-23
+
+- Fixes the app freezing when the Usage history window opens ([release notes](docs/releases/v1.10.0-preview.2.md)): Tauri's window builder deadlocks on Windows when called from a synchronous command or a menu event handler, so the window is now built on a worker thread. Confirmed by hand on an isolated debug build (tray menu and overlay menu); signed-installer check still open. App version `1.10.0-preview.2`, MSI version `1.10.0.2`.
+
+## v1.10.0-preview.1 source — 2026-11-23
+
+- Adds local quota usage history ([plan](docs/usage-history-plan.md), [release notes](docs/releases/v1.10.0-preview.1.md)): a 90-day recorder hooked into every successful read, a query layer for timeline, daily consumption and window summaries, and a History window opened from the tray, the overlay menu and Common settings. App version `1.10.0-preview.1`, MSI version `1.10.0.1`.
+- Verified locally (all CI steps) and in a browser preview with sample data. Installed-app checks of the window entry points and a full day of live recording are still open.
+
+## v1.9.7 stable source — 2026-11-23
+
+- Combines `v1.9.7-preview.1` (overlay refit after display changes) with the agy 1.5.9 Argon fix: agy now lists the Argon models in the Gemini group and reports no Argon bucket, so the Argon pool falls back to the Gemini limits. App and MSI versions are aligned to `1.9.7`; [release notes](docs/releases/v1.9.7.md) list the remaining installed-package checks.
+- Verified locally rather than by waiting on Windows CI: frontend build and 198 tests, Rust workspace tests, DSH companion tests and packaging, packaging regression and Claude process-tree checks.
+
 ## v1.9.6 stable source — 2026-11-21
 
 - The stable source combines the three linear preview tags `v1.9.5-preview.1`, `v1.9.5-preview.2`, and `v1.9.6-preview.1`. The app and MSI versions are aligned to `1.9.6`; [release notes](docs/releases/v1.9.6.md) list all fixes and the remaining installed-machine acceptance gaps.

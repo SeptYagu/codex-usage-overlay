@@ -301,6 +301,9 @@ export const TrayMenuView: React.FC<TrayMenuViewProps> = ({ settings, onPatchSet
           {t('menuRefreshUsage')}
         </button>
         <div className="tray-menu-separator" />
+        <button className="tray-menu-item" role="menuitem" onClick={() => runMenuAction(() => invoke('open_history_window'))}>
+          {t('menuUsageHistory')}
+        </button>
         <button className="tray-menu-item" role="menuitem" onClick={() => runMenuAction(() => invoke('open_settings_window'))}>
           {t('menuSettings')}
         </button>

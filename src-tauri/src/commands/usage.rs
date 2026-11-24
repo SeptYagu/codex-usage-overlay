@@ -379,6 +379,7 @@ pub(crate) async fn refresh_usage<S: UsageSource>(sink: &S, state: &Arc<Provider
                 let candidates=tracker.candidates(&estimate);
                 (estimate,candidates)
             };
+            crate::history::record_reading(&state.history, state.provider, &source_settings, &raw, reader::unix_now());
             let (estimate,candidates)=estimate;
             let mut usage = raw.to_ui(estimate.five_hour_per_hour, estimate.weekly_per_hour);
             // Smart Pause acts on Codex sessions only; the Claude
@@ -486,7 +487,7 @@ mod refresh_coalescing_tests {
         }
     }
     fn sample() -> RawCodexUsage {
-        RawCodexUsage { account_id: Some("test".into()), five_hour: Default::default(), weekly: Default::default(), credits_display: "—".into(), credits_balance: None, has_credits: false, fetched_at: reader::unix_now(), antigravity_weekly: None, notification_five_hour: None }
+        RawCodexUsage { account_id: Some("test".into()), five_hour: Default::default(), weekly: Default::default(), credits_display: "—".into(), credits_balance: None, has_credits: false, fetched_at: reader::unix_now(), antigravity_weekly: None, quota_pool: None, notification_five_hour: None }
     }
     #[tokio::test]
     async fn concurrent_callers_share_success_or_failure_even_with_cached_usage() {
@@ -590,7 +591,7 @@ mod shadow_refresh_tests {
             has_credits: false,
             fetched_at: at,
             antigravity_weekly: None,
-            notification_five_hour: None,
+            quota_pool: None, notification_five_hour: None,
         }
     }
 

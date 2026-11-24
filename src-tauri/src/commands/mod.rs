@@ -14,11 +14,13 @@ use crate::tray::{open_settings_window as show_settings_win, TrayReadStatus};
 
 #[cfg(test)]
 mod dsh_tests;
+mod history;
 mod providers;
 mod settings;
 mod updater;
 mod usage;
 
+pub(crate) use history::*;
 pub(crate) use providers::*;
 pub(crate) use settings::*;
 pub(crate) use updater::*;
@@ -50,6 +52,8 @@ pub struct AppServices {
     pub carousel_enabled: AtomicBool,
     pub snapshot_revision: AtomicU64,
     pub snapshot_gate: Mutex<()>,
+    /// Local quota usage history shared by every provider runtime.
+    pub history: crate::history::Store,
 }
 
 /// One independent quota/protection pipeline owned by `monitor::Registry`.
@@ -185,6 +189,7 @@ impl AppState {
             carousel_enabled: AtomicBool::new(settings.quota_carousel_enabled),
             snapshot_revision: AtomicU64::new(0),
             snapshot_gate: Mutex::new(()),
+            history: crate::history::Store::new(config_manager.runtime_dir().join("history")),
         });
         let monitors = crate::monitor::Registry::new(&services, &config_manager, &settings, 0);
         Self {
@@ -453,14 +458,16 @@ pub async fn show_overlay_menu(
     let current_settings = state.settings.lock().await.clone();
     let locale = resolve_locale(&current_settings.language);
 
-    let (refresh_str, settings_str, hide_str, exit_str) = match locale {
-        "zh-CN" => ("立即刷新用量", "设置…", "隐藏悬浮窗", "退出悬浮窗"),
-        "zh-Hant" => ("立即重新整理用量", "設定…", "隱藏懸浮窗", "結束懸浮窗"),
-        "ru-RU" => ("Обновить лимиты", "Настройки…", "Скрыть оверлей", "Закрыть оверлей"),
-        _ => ("Refresh Now", "Settings…", "Hide", "Exit"),
+    let (refresh_str, history_str, settings_str, hide_str, exit_str) = match locale {
+        "zh-CN" => ("立即刷新用量", "用量历史…", "设置…", "隐藏悬浮窗", "退出悬浮窗"),
+        "zh-Hant" => ("立即重新整理用量", "用量歷史…", "設定…", "隱藏懸浮窗", "結束懸浮窗"),
+        "ru-RU" => ("Обновить лимиты", "История расхода…", "Настройки…", "Скрыть оверлей", "Закрыть оверлей"),
+        _ => ("Refresh Now", "Usage History…", "Settings…", "Hide", "Exit"),
     };
 
     let refresh_i = MenuItem::with_id(&app, "refresh_usage", refresh_str, true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    let history_i = MenuItem::with_id(&app, "open_history", history_str, true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let settings_i = MenuItem::with_id(&app, "open_settings", settings_str, true, None::<&str>)
         .map_err(|e| e.to_string())?;
@@ -473,7 +480,7 @@ pub async fn show_overlay_menu(
 
     let menu = Menu::with_items(
         &app,
-        &[&refresh_i, &settings_i, &sep1, &hide_i, &sep2, &exit_i],
+        &[&refresh_i, &history_i, &settings_i, &sep1, &hide_i, &sep2, &exit_i],
     )
     .map_err(|e| e.to_string())?;
 

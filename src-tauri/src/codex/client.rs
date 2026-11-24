@@ -45,6 +45,10 @@ pub struct RawCodexUsage {
     /// providers use `five_hour` itself for notification decisions.
     #[serde(skip)]
     pub notification_five_hour: Option<QuotaSnapshot>,
+    /// The quota pool this reading was projected from (Antigravity only), so
+    /// usage history can tell pools apart. Other providers leave it empty.
+    #[serde(skip)]
+    pub quota_pool: Option<&'static str>,
 }
 
 /// Antigravity shows 5H, the Gemini weekly limit and the Argon weekly (WTU)
@@ -710,7 +714,7 @@ fn parse_usage_result(result: &Value) -> Result<RawCodexUsage> {
         has_credits,
         fetched_at,
         antigravity_weekly: None,
-        notification_five_hour: None,
+        quota_pool: None, notification_five_hour: None,
     })
 }
 
