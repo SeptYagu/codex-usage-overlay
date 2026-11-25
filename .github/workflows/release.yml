@@ -18,8 +18,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: windows-latest
+  build:
+    name: Build ${{ matrix.arch }}
+    # Each architecture builds and runs its tests natively on its own runner.
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -31,6 +41,17 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Put LLVM on PATH (arm64)
+        # ring compiles its C and assembly with clang for aarch64-pc-windows-msvc.
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path -LiteralPath (Join-Path $llvm 'clang.exe'))) { throw 'clang is required to build ring for arm64.' }
+            Add-Content -LiteralPath $env:GITHUB_PATH -Value $llvm
+          }
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
@@ -75,8 +96,41 @@ jobs:
         run: |
           $releaseTag = "${{ github.event.inputs.tag }}"
           if (-not $releaseTag) { $releaseTag = $env:GITHUB_REF_NAME }
-          .\scripts\Build-TauriRelease.ps1 -Tag $releaseTag -OutputDirectory "$env:RUNNER_TEMP\codex-usage-release"
-          .\scripts\Package-DshCompanion.ps1 -OutputDirectory "$env:RUNNER_TEMP\codex-usage-release"
+          .\scripts\Build-TauriRelease.ps1 -Tag $releaseTag -Arch ${{ matrix.arch }} -OutputDirectory "$env:RUNNER_TEMP\codex-usage-release"
+          # The DSH companion is architecture-independent; one job packages it.
+          if ('${{ matrix.arch }}' -eq 'x64') {
+            .\scripts\Package-DshCompanion.ps1 -OutputDirectory "$env:RUNNER_TEMP\codex-usage-release"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: ${{ runner.temp }}/codex-usage-release
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/release-parts
+
+      - name: Merge architectures
+        shell: pwsh
+        run: |
+          $releaseTag = "${{ github.event.inputs.tag }}"
+          if (-not $releaseTag) { $releaseTag = $env:GITHUB_REF_NAME }
+          $parts = Join-Path $env:RUNNER_TEMP 'release-parts'
+          .\scripts\Merge-TauriRelease.ps1 -Tag $releaseTag `
+            -InputDirectory @((Join-Path $parts 'release-x64'), (Join-Path $parts 'release-arm64')) `
+            -OutputDirectory "$env:RUNNER_TEMP\codex-usage-release"
 
       - name: Publish GitHub Release
         shell: pwsh

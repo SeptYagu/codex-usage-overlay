@@ -1188,20 +1188,56 @@ pub fn is_installed_environment() -> bool {
     false
 }
 
-pub fn updater_target() -> &'static str {
-    if !is_installed_environment() {
-        return "windows-x86_64-portable";
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageKind {
+    Portable,
+    Nsis,
+    Msi,
+}
 
-    let is_nsis = std::env::current_exe()
+/// The `latest.json` platform entry for a package of this build's own
+/// architecture. An x64 build stays on x64 even under emulation on ARM64
+/// Windows; moving to the native build is a fresh install.
+pub fn updater_target_for(arch: &str, package: PackageKind) -> &'static str {
+    match (arch, package) {
+        ("aarch64", PackageKind::Portable) => "windows-aarch64-portable",
+        ("aarch64", PackageKind::Nsis) => "windows-aarch64-nsis",
+        ("aarch64", PackageKind::Msi) => "windows-aarch64-msi",
+        (_, PackageKind::Portable) => "windows-x86_64-portable",
+        (_, PackageKind::Nsis) => "windows-x86_64-nsis",
+        (_, PackageKind::Msi) => "windows-x86_64-msi",
+    }
+}
+
+pub fn updater_target() -> &'static str {
+    let package = if !is_installed_environment() {
+        PackageKind::Portable
+    } else if std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join("uninstall.exe")))
-        .is_some_and(|uninstaller| uninstaller.exists());
-
-    if is_nsis {
-        "windows-x86_64-nsis"
+        .is_some_and(|uninstaller| uninstaller.exists())
+    {
+        PackageKind::Nsis
     } else {
-        "windows-x86_64-msi"
+        PackageKind::Msi
+    };
+    updater_target_for(std::env::consts::ARCH, package)
+}
+
+#[cfg(test)]
+mod updater_target_tests {
+    use super::*;
+
+    #[test]
+    fn each_architecture_updates_from_its_own_packages() {
+        assert_eq!(updater_target_for("x86_64", PackageKind::Nsis), "windows-x86_64-nsis");
+        assert_eq!(updater_target_for("x86_64", PackageKind::Msi), "windows-x86_64-msi");
+        assert_eq!(updater_target_for("x86_64", PackageKind::Portable), "windows-x86_64-portable");
+        assert_eq!(updater_target_for("aarch64", PackageKind::Nsis), "windows-aarch64-nsis");
+        assert_eq!(updater_target_for("aarch64", PackageKind::Msi), "windows-aarch64-msi");
+        assert_eq!(updater_target_for("aarch64", PackageKind::Portable), "windows-aarch64-portable");
+        // This build's own architecture always has an entry.
+        assert!(updater_target_for(std::env::consts::ARCH, PackageKind::Nsis).starts_with("windows-"));
     }
 }
 

@@ -11,7 +11,7 @@ A Windows desktop overlay that displays Codex quota and credit balances. It read
 
 ## Download and launch
 
-Get the latest release from the [releases page](https://github.com/SeptYagu/codex-usage-overlay/releases). Choose the NSIS setup executable, MSI installer, or Windows x64 portable ZIP. `SHA256SUMS.txt` includes checksums for all three packages.
+Get the latest release from the [releases page](https://github.com/SeptYagu/codex-usage-overlay/releases). Choose the NSIS setup executable, MSI installer, or portable ZIP, each built for x64 and ARM64: `x64` in the file name is for most Intel and AMD PCs, `arm64` for ARM PCs such as Snapdragon laptops. `SHA256SUMS.txt` includes checksums for every package. Each build updates only to the same architecture; on an ARM PC with the x64 build installed, install the ARM64 package once to switch to the native build.
 
 Install a setup package, or extract the portable ZIP and run `CodexUsageOverlay.exe`. Windows 10/11, WebView2, and an installed, signed-in Codex app are required. No extra PowerShell launcher is needed; Microsoft Store executable discovery uses the built-in Windows PowerShell.
 
@@ -112,7 +112,7 @@ cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin codex-
 .\scripts\Build-TauriRelease.ps1 -Tag v1.9.0
 ```
 
-Set the Tauri updater signing key in the build environment before packaging a release. The tag workflow publishes NSIS, MSI, portable ZIP, signatures, and `latest.json`; the portable updater helper is included in the ZIP. The installers include every Cargo binary present at bundle time, so build the Claude and Antigravity bridges before `tauri build`.
+Set the Tauri updater signing key in the build environment before packaging a release. The tag workflow builds and tests natively on x64 and ARM64 GitHub runners, publishes NSIS, MSI, portable ZIP and signatures for both architectures, and merges them into one `latest.json`; the portable updater helper is included in the ZIP. The installers include every Cargo binary present at bundle time, so build the Claude and Antigravity bridges before `tauri build`.
 See the [preview notes](docs/v1.1.0-preview-notes.md) for automated results and Windows checks still to be completed.
 
 ## License

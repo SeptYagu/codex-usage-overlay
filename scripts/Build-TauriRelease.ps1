@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidatePattern('^v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$')][string]$Tag,
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\output\tauri-release')
+    [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\output\tauri-release'),
+    # The architecture the binaries were built for, natively on a runner of
+    # that architecture, so they are always in target\release.
+    [ValidateSet('x64', 'arm64')][string]$Arch = 'x64'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,14 +22,32 @@ $binary = Join-Path $repositoryRoot 'src-tauri\target\release\codex-usage-overla
 $updaterHelper = Join-Path $repositoryRoot 'src-tauri\target\release\codex-usage-updater.exe'
 $claudeBridge = Join-Path $repositoryRoot 'src-tauri\target\release\claude-usage-bridge.exe'
 $antigravityBridge = Join-Path $repositoryRoot 'src-tauri\target\release\antigravity-usage-bridge.exe'
-$installerName = "codex-usage-overlay_${version}_x64-setup.exe"
-$msiName = "codex-usage-overlay_${version}_x64_en-US.msi"
+$installerName = "codex-usage-overlay_${version}_${Arch}-setup.exe"
+$msiName = "codex-usage-overlay_${version}_${Arch}_en-US.msi"
+# Updater platform keys use Rust's architecture names.
+$platformArch = @{ x64 = 'x86_64'; arm64 = 'aarch64' }[$Arch]
+$expectedMachine = @{ x64 = 0x8664; arm64 = 0xAA64 }[$Arch]
 $installer = Join-Path $repositoryRoot "src-tauri\target\release\bundle\nsis\$installerName"
 $msi = Join-Path $repositoryRoot "src-tauri\target\release\bundle\msi\$msiName"
 $installerSignature = "$installer.sig"
 $msiSignature = "$msi.sig"
 foreach ($source in @($binary, $updaterHelper, $claudeBridge, $antigravityBridge, $installer, $msi, $installerSignature, $msiSignature)) {
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing release build: $source" }
+}
+# A package labelled for one architecture must not carry another's binaries.
+function Get-PeMachine([string]$Path) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { return 0 }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length -or
+        [BitConverter]::ToUInt32($bytes, $peOffset) -ne 0x4550) { return 0 }
+    return [int][BitConverter]::ToUInt16($bytes, $peOffset + 4)
+}
+foreach ($executable in @($binary, $updaterHelper, $claudeBridge, $antigravityBridge)) {
+    $machine = Get-PeMachine $executable
+    if ($machine -ne $expectedMachine) {
+        throw ('Executable is not {0}: {1} (machine 0x{2:X4})' -f $Arch, $executable, $machine)
+    }
 }
 New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
 Copy-Item -LiteralPath $installer -Destination (Join-Path $outputPath $installerName) -Force
@@ -35,7 +56,7 @@ $installerSignatureName = "$installerName.sig"
 $msiSignatureName = "$msiName.sig"
 Copy-Item -LiteralPath $installerSignature -Destination (Join-Path $outputPath $installerSignatureName) -Force
 Copy-Item -LiteralPath $msiSignature -Destination (Join-Path $outputPath $msiSignatureName) -Force
-$zipName = "CodexUsageOverlay-$Tag-Windows-x64.zip"
+$zipName = "CodexUsageOverlay-$Tag-Windows-$Arch.zip"
 $zipPath = Join-Path $outputPath $zipName
 $archiveSources = [ordered]@{
     'CodexUsageOverlay.exe' = $binary
@@ -105,15 +126,15 @@ $manifest = [ordered]@{
     notes = "Codex Usage Overlay $version"
     pub_date = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
     platforms = [ordered]@{
-        'windows-x86_64-nsis' = @{
+        "windows-$platformArch-nsis" = @{
             url = "$releaseBaseUrl/$installerName"
             signature = $nsisSignature
         }
-        'windows-x86_64-msi' = @{
+        "windows-$platformArch-msi" = @{
             url = "$releaseBaseUrl/$msiName"
             signature = $windowsInstallerSignature
         }
-        'windows-x86_64-portable' = @{
+        "windows-$platformArch-portable" = @{
             url = "$releaseBaseUrl/$zipName"
             signature = $portableSignature
         }
@@ -128,4 +149,4 @@ $checksumLines = foreach ($assetName in @($installerName, $msiName, $zipName)) {
     "$hash  $assetName"
 }
 [IO.File]::WriteAllText((Join-Path $outputPath 'SHA256SUMS.txt'), (($checksumLines -join "`n") + "`n"), [Text.Encoding]::ASCII)
-Write-Output "Verified Windows release assets in $outputPath"
+Write-Output "Verified Windows $Arch release assets in $outputPath"

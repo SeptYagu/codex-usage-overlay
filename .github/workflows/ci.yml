@@ -12,8 +12,16 @@ concurrency:
 
 jobs:
   check:
-    name: Lint, Test & Build Check
-    runs-on: windows-latest
+    name: Lint, Test & Build Check (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -25,6 +33,17 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Put LLVM on PATH (arm64)
+        # ring compiles its C and assembly with clang for aarch64-pc-windows-msvc.
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path -LiteralPath (Join-Path $llvm 'clang.exe'))) { throw 'clang is required to build ring for arm64.' }
+            Add-Content -LiteralPath $env:GITHUB_PATH -Value $llvm
+          }
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2

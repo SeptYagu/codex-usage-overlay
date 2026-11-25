@@ -7,14 +7,31 @@ try {
     }
     $buildScript = Join-Path $fixtureRoot 'scripts\Build-TauriRelease.ps1'
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Build-TauriRelease.ps1') -Destination $buildScript
+    $mergeScript = Join-Path $fixtureRoot 'scripts\Merge-TauriRelease.ps1'
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Merge-TauriRelease.ps1') -Destination $mergeScript
     [IO.File]::WriteAllText((Join-Path $fixtureRoot 'src-tauri\tauri.conf.json'), '{"version":"1.2.1"}')
-    foreach ($relative in @('README.md', 'README.en.md', 'src-tauri\target\release\codex-usage-overlay.exe',
-        'src-tauri\target\release\codex-usage-updater.exe',
-        'src-tauri\target\release\claude-usage-bridge.exe',
-        'src-tauri\target\release\antigravity-usage-bridge.exe',
-        'src-tauri\target\release\bundle\nsis\codex-usage-overlay_1.2.1_x64-setup.exe',
-        'src-tauri\target\release\bundle\msi\codex-usage-overlay_1.2.1_x64_en-US.msi')) {
+    foreach ($relative in @('README.md', 'README.en.md')) {
         [IO.File]::WriteAllText((Join-Path $fixtureRoot $relative), "test fixture: $relative")
+    }
+    $executables = @('codex-usage-overlay.exe', 'codex-usage-updater.exe', 'claude-usage-bridge.exe', 'antigravity-usage-bridge.exe')
+    # Minimal PE headers: the packaging script checks each binary's machine type.
+    function Write-FixtureBinaries([int]$Machine) {
+        foreach ($name in $executables) {
+            $bytes = [byte[]]::new(0x80)
+            $bytes[0] = 0x4D; $bytes[1] = 0x5A
+            [BitConverter]::GetBytes([int]0x40).CopyTo($bytes, 0x3C)
+            [BitConverter]::GetBytes([uint32]0x4550).CopyTo($bytes, 0x40)
+            [BitConverter]::GetBytes([uint16]$Machine).CopyTo($bytes, 0x44)
+            [Text.Encoding]::ASCII.GetBytes("fixture $name").CopyTo($bytes, 0x48)
+            [IO.File]::WriteAllBytes((Join-Path $fixtureRoot "src-tauri\target\release\$name"), $bytes)
+        }
+    }
+    Write-FixtureBinaries 0x8664
+    foreach ($arch in @('x64', 'arm64')) {
+        foreach ($relative in @("src-tauri\target\release\bundle\nsis\codex-usage-overlay_1.2.1_$arch-setup.exe",
+            "src-tauri\target\release\bundle\msi\codex-usage-overlay_1.2.1_${arch}_en-US.msi")) {
+            [IO.File]::WriteAllText((Join-Path $fixtureRoot $relative), "test fixture: $relative")
+        }
     }
     # Structurally valid Minisign fixture, not a cryptographic signature.
     $packet = [byte[]]::new(74)
@@ -23,9 +40,11 @@ try {
     $encodedSignature = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($signatureText))
     $cliDirectory = Join-Path $fixtureRoot 'node_modules\.bin'
     [IO.File]::WriteAllText((Join-Path $cliDirectory 'signature.fixture.txt'), $encodedSignature)
-    foreach ($relative in @('src-tauri\target\release\bundle\nsis\codex-usage-overlay_1.2.1_x64-setup.exe.sig',
-        'src-tauri\target\release\bundle\msi\codex-usage-overlay_1.2.1_x64_en-US.msi.sig')) {
-        [IO.File]::WriteAllText((Join-Path $fixtureRoot $relative), $encodedSignature)
+    foreach ($arch in @('x64', 'arm64')) {
+        foreach ($relative in @("src-tauri\target\release\bundle\nsis\codex-usage-overlay_1.2.1_$arch-setup.exe.sig",
+            "src-tauri\target\release\bundle\msi\codex-usage-overlay_1.2.1_${arch}_en-US.msi.sig")) {
+            [IO.File]::WriteAllText((Join-Path $fixtureRoot $relative), $encodedSignature)
+        }
     }
     [IO.File]::WriteAllText((Join-Path $cliDirectory 'tauri.cmd'), '@echo off' + "`r`n" + 'pwsh.exe -NoProfile -File "%~dp0signer-stub.ps1" "%~3"' + "`r`n" + 'exit /b %errorlevel%' + "`r`n")
     $stub = @'
@@ -81,6 +100,45 @@ exit 0
     catch { $failure = $_.Exception.Message }
     if (-not $failure -or -not $failure.Contains('Tag and app versions must match')) { throw 'Packaging accepted a preview tag for a stable version' }
     Write-Output 'PASS: packaging tag mismatch'
+
+    # x64 binaries are never packaged as arm64.
+    $failure = $null
+    try { & $buildScript -Tag v1.2.1 -Arch arm64 -OutputDirectory (Join-Path $fixtureRoot 'output-mislabelled') | Out-Null }
+    catch { $failure = $_.Exception.Message }
+    if (-not $failure -or -not $failure.Contains('Executable is not arm64')) { throw "Packaging accepted x64 binaries as arm64: $failure" }
+    Write-Output 'PASS: packaging architecture mismatch'
+
+    # An arm64 build names its own assets and updater platforms.
+    Write-FixtureBinaries 0xAA64
+    $armOutput = Join-Path $fixtureRoot 'output-arm64'
+    & $buildScript -Tag v1.2.1 -Arch arm64 -OutputDirectory $armOutput | Out-Null
+    $armManifest = Get-Content -LiteralPath (Join-Path $armOutput 'latest.json') -Raw | ConvertFrom-Json
+    $armPlatforms = @($armManifest.platforms.PSObject.Properties.Name | Sort-Object)
+    if (($armPlatforms -join ',') -cne 'windows-aarch64-msi,windows-aarch64-nsis,windows-aarch64-portable') {
+        throw "Unexpected arm64 platforms: $($armPlatforms -join ',')"
+    }
+    if ($armManifest.platforms.'windows-aarch64-portable'.url -notlike '*/CodexUsageOverlay-v1.2.1-Windows-arm64.zip') {
+        throw 'Unexpected arm64 portable URL'
+    }
+    if (@(Get-ChildItem -LiteralPath $armOutput -File).Count -ne 8) { throw 'Expected eight arm64 assets' }
+    Write-Output 'PASS: packaging arm64'
+
+    # Both architectures merge into one manifest and checksum list.
+    $mergedOutput = Join-Path $fixtureRoot 'output-merged'
+    & $mergeScript -Tag v1.2.1 -InputDirectory @((Join-Path $fixtureRoot 'output-valid'), $armOutput) -OutputDirectory $mergedOutput | Out-Null
+    $merged = Get-Content -LiteralPath (Join-Path $mergedOutput 'latest.json') -Raw | ConvertFrom-Json
+    if (@($merged.platforms.PSObject.Properties).Count -ne 6 -or $merged.version -cne '1.2.1') { throw 'Merged manifest is incomplete' }
+    if (@(Get-Content -LiteralPath (Join-Path $mergedOutput 'SHA256SUMS.txt')).Count -ne 6) { throw 'Merged checksums are incomplete' }
+    if (@(Get-ChildItem -LiteralPath $mergedOutput -File).Count -ne 14) { throw 'Expected fourteen merged assets' }
+    $failure = $null
+    try { & $mergeScript -Tag v1.2.1 -InputDirectory @($armOutput, $armOutput) -OutputDirectory (Join-Path $fixtureRoot 'output-duplicate') | Out-Null }
+    catch { $failure = $_.Exception.Message }
+    if (-not $failure -or -not $failure.Contains('Duplicate updater platform')) { throw "Merge accepted a duplicate platform: $failure" }
+    $failure = $null
+    try { & $mergeScript -Tag v1.2.2 -InputDirectory @($armOutput) -OutputDirectory (Join-Path $fixtureRoot 'output-wrong-tag') | Out-Null }
+    catch { $failure = $_.Exception.Message }
+    if (-not $failure -or -not $failure.Contains('does not match')) { throw "Merge accepted another version: $failure" }
+    Write-Output 'PASS: packaging merge'
 } finally {
     $env:CODEX_PACKAGING_TEST_MODE = $originalMode
     # Delete only this newly-created fixture under the system temp root.

@@ -18,7 +18,7 @@ git tag -a v1.6.0-preview.1 -m "v1.6.0-preview.1"
 git push origin v1.6.0-preview.1
 ```
 
-5. The **Release overlay** workflow installs dependencies, runs frontend/Rust tests, builds NSIS and MSI installers, and packages the standalone executable into a ZIP. It verifies ZIP contents against the source executable and documentation and generates SHA256 checksums for all three packages.
+5. The **Release overlay** workflow builds each architecture natively on its own runner: x64 on `windows-latest` and ARM64 on `windows-11-arm`. Each build job installs dependencies, runs the frontend/Rust tests, builds NSIS and MSI installers, packages the standalone executable into a ZIP, and runs `Build-TauriRelease.ps1 -Arch x64|arm64`, which refuses binaries of the other architecture, verifies ZIP contents against the source executable and documentation, and writes that architecture's `latest.json` and SHA256 checksums. The publish job runs only when both builds pass; `Merge-TauriRelease.ps1` combines them into one `latest.json` with the `windows-x86_64-*` and `windows-aarch64-*` platforms and one `SHA256SUMS.txt`, re-checking every hash, and the release is published from that set. The app's updater picks the platform entry of its own architecture, so an x64 copy running under emulation on an ARM64 PC keeps updating to x64.
 6. A tag containing a prerelease suffix creates a GitHub prerelease and does not replace the latest stable release. If a draft release already exists for the tag, the workflow uploads assets to that draft; publish it after the workflow succeeds and the expected installers, signatures, portable ZIP, checksums, and `latest.json` are verified.
 
 For a new release, the workflow uses `docs/releases/<tag>.md` as its release body when that file exists; otherwise it generates GitHub release notes. Keep preview limitations and migration changes in that file before pushing the tag.
@@ -27,7 +27,9 @@ Expected assets for `v1.6.0-preview.1`:
 
 - `codex-usage-overlay_1.6.0-preview.1_x64-setup.exe` and its `.sig`
 - `codex-usage-overlay_1.6.0-preview.1_x64_en-US.msi` and its `.sig`
-- `CodexUsageOverlay-v1.6.0-preview.1-Windows-x64.zip`
+- `CodexUsageOverlay-v1.6.0-preview.1-Windows-x64.zip` and its `.sig`
+- the same three packages and signatures with `arm64` in place of `x64`
+- `dsh-codex-usage-overlay-bridge-<version>.tgz`
 - `SHA256SUMS.txt`
 - `latest.json`
 

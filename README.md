@@ -11,7 +11,7 @@ Windows 桌面悬浮窗，显示 Codex 配额和 Credit 余额。通过本机 Co
 
 ## 下载与启动
 
-从[发布页](https://github.com/SeptYagu/codex-usage-overlay/releases)下载最新发布版，可选择 NSIS 安装程序、MSI 安装包或 Windows x64 便携 ZIP。`SHA256SUMS.txt` 包含全部三个包的校验值。
+从[发布页](https://github.com/SeptYagu/codex-usage-overlay/releases)下载最新发布版，可选择 NSIS 安装程序、MSI 安装包或便携 ZIP，每种均有 x64 和 ARM64 两个版本：文件名中的 `x64` 用于常见的 Intel/AMD 电脑，`arm64` 用于 Snapdragon 等 ARM 电脑。`SHA256SUMS.txt` 包含全部安装包的校验值。每个版本只会更新到同一架构的新版；在 ARM 电脑上已安装 x64 版的用户，可安装一次 ARM64 版改用原生版本。
 
 安装程序直接安装；便携版解压后运行 `CodexUsageOverlay.exe`。需要 Windows 10/11、WebView2，以及已安装并登录的 Codex 应用。无需额外 PowerShell 启动脚本；查找 Microsoft Store 版 Codex 时会使用 Windows 自带的 PowerShell。
 
@@ -110,7 +110,7 @@ cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin codex-
 .\scripts\Build-TauriRelease.ps1 -Tag v1.9.0
 ```
 
-发布前需设置 Tauri 更新签名私钥环境变量。标签发布流程会生成 NSIS、MSI、便携 ZIP、签名和 `latest.json`；便携版更新助手也会一并打包。安装包会包含打包时已存在的所有 Cargo 可执行文件，因此需在 `tauri build` 之前构建 Claude 和 Antigravity 助手。
+发布前需设置 Tauri 更新签名私钥环境变量。标签发布流程分别在 x64 和 ARM64 的 GitHub 运行器上原生构建并测试，生成两种架构的 NSIS、MSI、便携 ZIP 和签名，再合并为一个 `latest.json`；便携版更新助手也会一并打包。安装包会包含打包时已存在的所有 Cargo 可执行文件，因此需在 `tauri build` 之前构建 Claude 和 Antigravity 助手。
 预览版的自动化结果与尚未完成的 Windows 实机检查见[预览说明](docs/v1.1.0-preview-notes.md)。
 
 ## 开源协议
