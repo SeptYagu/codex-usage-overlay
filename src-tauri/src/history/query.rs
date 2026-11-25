@@ -476,6 +476,28 @@ mod tests {
     }
 
     #[test]
+    fn an_antigravity_reset_followed_by_an_unused_window_is_one_reset() {
+        // The installed client's agy readings: after the reset, agy reported
+        // an unused window to the next five-hour mark, then no window, then
+        // a new window at the first use hours later.
+        let old = DAY0 + 5 * H;
+        let first_use = old + 12 * H;
+        let records = vec![
+            five(old - 1_629, 51.26, Some(old)),
+            five(old + 30, 0.0, None),
+            five(old + 390, 0.0, Some(old + 5 * H)),
+            five(old + 2_071, 0.0, None),
+            five(old + 3_871, 0.0, None),
+            five(first_use, 4.06, Some(first_use - 60 + 5 * H)),
+        ];
+        let now = first_use + 600;
+        let view = view("antigravity", &records, DAY0, now, now, &utc()).unwrap();
+        assert_eq!(view.resets, vec![ResetMarker { t: old, kind: WindowKind::FiveHour }]);
+        let windows: Vec<_> = view.windows.iter().map(|w| (w.start, w.resets_at, w.peak)).collect();
+        assert_eq!(windows, vec![(first_use - 60, first_use - 60 + 5 * H, 4.06), (old - 5 * H, old, 51.26)]);
+    }
+
+    #[test]
     fn an_unused_codex_window_does_not_slide_its_window_or_reset() {
         // Codex reports an unused window's reset a full window from each read.
         let start = DAY0 + 2 * H;

@@ -59,9 +59,6 @@ pub struct Record {
 
 /// Reset times this close are one reset time read twice.
 const RESET_JITTER_SECS: i64 = 60;
-/// A 0% window whose reset is at least this close to a full window away has
-/// not started: the provider projects its reset from "now".
-const UNSTARTED_SLACK_SECS: i64 = 5 * 60;
 
 impl WindowReading {
     fn same_as(self, other: WindowReading) -> bool {
@@ -72,14 +69,16 @@ impl WindowReading {
             }
     }
 
-    /// The reading as the history compares it. A window nobody has used yet
-    /// has no reset: Codex reports one a full window from every read, so it
-    /// slides forward each poll. Claude publishes whole-minute resets but
-    /// reads them back a second early now and then.
-    fn normalized(self, provider: Provider, kind: WindowKind, t: i64) -> WindowReading {
-        let r = self.r.map(|r| if provider == Provider::Claude { (r + 30).div_euclid(60) * 60 } else { r });
-        let unstarted = self.u <= 0.0 && r.is_some_and(|r| r >= t + kind.duration_secs() - UNSTARTED_SLACK_SECS);
-        WindowReading { u: self.u, r: if unstarted { None } else { r } }
+    /// The reading as the history compares it. A 0% window has no reset: no
+    /// window is in use, and the reset providers report for it means
+    /// nothing. Codex reports one a full window from every read, so it
+    /// slides forward each poll; agy reports one, then none, after a reset.
+    /// Claude publishes whole-minute resets but reads them back a second
+    /// early now and then.
+    fn normalized(self, provider: Provider) -> WindowReading {
+        let r = self.r.filter(|_| self.u > 0.0);
+        let r = r.map(|r| if provider == Provider::Claude { (r + 30).div_euclid(60) * 60 } else { r });
+        WindowReading { u: self.u, r }
     }
 }
 
@@ -100,11 +99,10 @@ impl Record {
     /// The record with each window [`WindowReading::normalized`]; lines
     /// written before normalization existed read the same as new ones.
     pub fn normalized(&self, provider: Provider) -> Record {
-        let t = self.t;
         Record {
-            fh: self.fh.map(|w| w.normalized(provider, WindowKind::FiveHour, t)),
-            wk: self.wk.map(|w| w.normalized(provider, WindowKind::Weekly, t)),
-            ar: self.ar.map(|w| w.normalized(provider, WindowKind::Argon, t)),
+            fh: self.fh.map(|w| w.normalized(provider)),
+            wk: self.wk.map(|w| w.normalized(provider)),
+            ar: self.ar.map(|w| w.normalized(provider)),
             ..self.clone()
         }
     }

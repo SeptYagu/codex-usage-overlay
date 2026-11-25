@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- An Antigravity 5-hour reset is drawn once. After a reset, agy can report an unused 0% window running to the next five-hour mark and then no window at all; the history took that drop as a second reset (for example at 01:46 after a 01:12 reset) and listed an empty window. Any window at 0% is now treated as not in use, for every provider, so its reported reset time is ignored. Existing history files are read with the same rule.
+
 ## [1.10.0] - 2026-11-23
 
 Stable release of usage history. Includes everything from `1.10.0-preview.1` through `1.10.0-preview.3`, with no further changes.
