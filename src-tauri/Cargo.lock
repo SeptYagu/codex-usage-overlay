@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "codex-usage-overlay"
-version = "1.10.0"
+version = "1.10.1-preview.1"
 dependencies = [
  "agent-bridge",
  "anyhow",

@@ -1,5 +1,10 @@
 # Status
 
+## v1.10.1-preview.1 source — 2026-11-25
+
+- Adds Windows ARM64 packages and treats a 0% usage history window as not in use, so an Antigravity reset is drawn once ([release notes](docs/releases/v1.10.1-preview.1.md)). The Release workflow builds x64 on `windows-latest` and ARM64 on `windows-11-arm`, then merges both into one `latest.json`; the updater stays on its own architecture. App version `1.10.1-preview.1`, MSI version `1.10.1.1`.
+- CI passes on both architectures. This is the first build of the ARM64 NSIS and MSI packages; nobody has installed them on an ARM64 PC yet.
+
 ## v1.10.0 stable source — 2026-11-23
 
 - Combines the linear previews `v1.10.0-preview.1` to `v1.10.0-preview.3` (usage history, the History window freeze fix and accurate reset times) with no further code changes. App and MSI versions are aligned to `1.10.0`; [release notes](docs/releases/v1.10.0.md).

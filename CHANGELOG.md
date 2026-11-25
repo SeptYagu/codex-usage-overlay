@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1-preview.1] - 2026-11-25
+
 ### Added
 - Windows ARM64 packages. Every release now also ships the NSIS installer, MSI and portable ZIP built natively for ARM64 (`arm64` in the file name), next to the x64 ones. The Release workflow builds and tests each architecture on its own GitHub runner and merges both into one `latest.json`. The updater installs packages of its own architecture only, so an x64 copy running under emulation on an ARM64 PC stays on x64 until the ARM64 package is installed. CI also runs the tests on ARM64.
 
