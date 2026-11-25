@@ -66,6 +66,16 @@ jobs:
           npm test
           if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed.' }
 
+      - name: Warm up Windows PowerShell
+        # The DSH companion sets file permissions through Windows PowerShell 5.1
+        # with a 15 s limit; its first start on a fresh runner can take longer.
+        shell: pwsh
+        run: |
+          $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $elapsed = Measure-Command { & $powershell -NoLogo -NoProfile -NonInteractive -Command 'exit 0' }
+          if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell did not start.' }
+          Write-Output ("Windows PowerShell first start: {0:N1} s" -f $elapsed.TotalSeconds)
+
       - name: DSH Companion Offline Security Tests
         shell: pwsh
         run: |
