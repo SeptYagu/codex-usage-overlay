@@ -150,6 +150,44 @@ fn reset_time(prev: &Record, prev_w: WindowReading, cur: &Record) -> i64 {
     prev_w.r.map_or(cur.t, |r| r.clamp(prev.t, cur.t))
 }
 
+/// Unused readings inside a window that is still running, which providers
+/// report now and then around a reset: agy read a weekly window at 91%, then
+/// 0% with no reset, then 91% with the same reset, then 0% again. A window
+/// that comes back with its reset time and no less usage never ended, so
+/// those readings take the window's last value instead of drawing a reset.
+fn fill_flickers(records: &mut [Record]) {
+    for kind in WindowKind::ALL {
+        let mut anchor: Option<usize> = None;
+        let mut unused: Vec<usize> = Vec::new();
+        for i in 0..records.len() {
+            let Some(w) = records[i].window(kind) else { continue };
+            if let Some(a) = anchor {
+                if records[a].acct != records[i].acct || records[a].pool != records[i].pool {
+                    anchor = None;
+                    unused.clear();
+                }
+            }
+            match w.r {
+                Some(r) => {
+                    if let Some(aw) = anchor.and_then(|a| records[a].window(kind)) {
+                        let same = aw.r.is_some_and(|ar| (ar - r).abs() <= kind.reset_tolerance_secs());
+                        if same && w.u >= aw.u {
+                            for &j in &unused {
+                                *records[j].window_mut(kind) = Some(aw);
+                            }
+                        }
+                    }
+                    anchor = Some(i);
+                    unused.clear();
+                }
+                None if w.u <= 0.0 => unused.push(i),
+                // Still in use without a reset time: not a flicker.
+                None => unused.clear(),
+            }
+        }
+    }
+}
+
 /// Readings of one window kind, oldest first, with their record.
 fn readings(records: &[Record], kind: WindowKind) -> impl Iterator<Item = (&Record, WindowReading)> {
     records.iter().filter_map(move |record| record.window(kind).map(|w| (record, w)))
@@ -224,12 +262,15 @@ fn daily<Tz: TimeZone>(records: &[Record], from: i64, to: i64, tz: &Tz) -> Vec<D
     days
 }
 
-fn summarize(kind: WindowKind, group: &[(&Record, WindowReading)], now: i64) -> Option<WindowSummary> {
-    let resets_at = group.iter().rev().find_map(|(_, w)| w.r)?;
-    let start = resets_at - kind.duration_secs();
+/// `ended` is when a reset ended the window, if one has. A window the
+/// provider reset well before its reported time ends there instead.
+fn summarize(kind: WindowKind, group: &[(&Record, WindowReading)], ended: Option<i64>, now: i64) -> Option<WindowSummary> {
+    let reported = group.iter().rev().find_map(|(_, w)| w.r)?;
+    let start = reported - kind.duration_secs();
+    let resets_at = ended.filter(|&t| t < reported - kind.reset_tolerance_secs()).unwrap_or(reported);
     let peak = group.iter().map(|(_, w)| w.u).fold(0.0_f64, f64::max);
     let limit_at = group.iter().find(|(_, w)| w.u >= LIMIT_PERCENT).map(|(record, _)| record.t);
-    let complete = now >= resets_at;
+    let complete = ended.is_some() || now >= resets_at;
     Some(WindowSummary {
         kind,
         start,
@@ -255,19 +296,17 @@ fn windows(records: &[Record], from: i64, to: i64, now: i64) -> (Vec<WindowSumma
             if let Some(&(prev_record, prev_reading)) = group.last() {
                 let link = continuity(kind, prev_record, prev_reading, record, reading);
                 if link != Continuity::Same {
-                    summaries.extend(summarize(kind, &group, now));
+                    let ended = (link == Continuity::New).then(|| reset_time(prev_record, prev_reading, record));
+                    summaries.extend(summarize(kind, &group, ended, now));
                     group.clear();
-                    if link == Continuity::New {
-                        let t = reset_time(prev_record, prev_reading, record);
-                        if t >= from && t <= to {
-                            resets.push(ResetMarker { t, kind });
-                        }
+                    if let Some(t) = ended.filter(|&t| t >= from && t <= to) {
+                        resets.push(ResetMarker { t, kind });
                     }
                 }
             }
             group.push((record, reading));
         }
-        summaries.extend(summarize(kind, &group, now));
+        summaries.extend(summarize(kind, &group, None, now));
     }
     summaries.retain(|w| w.resets_at >= from && w.start <= to);
     summaries.sort_by(|a, b| b.resets_at.cmp(&a.resets_at).then(a.kind_order().cmp(&b.kind_order())));
@@ -345,7 +384,8 @@ fn starts_new_window(prev: &Record, cur: &Record) -> bool {
 /// so changes just before `from` still count.
 pub fn view<Tz: TimeZone>(series: &str, records: &[Record], from: i64, to: i64, now: i64, tz: &Tz) -> Option<HistoryView> {
     let provider = provider_of(series)?;
-    let records: Vec<Record> = records.iter().map(|record| record.normalized(provider)).collect();
+    let mut records: Vec<Record> = records.iter().map(|record| record.normalized(provider)).collect();
+    fill_flickers(&mut records);
     let records = records.as_slice();
     let mut points = Vec::new();
     let mut gaps = Vec::new();
@@ -527,6 +567,41 @@ mod tests {
         let records = vec![five(reset - 600, 48.0, Some(reset)), five(reset - 16, 0.0, None), five(reset + 90, 1.0, Some(reset + 5 * H))];
         let view = view("antigravity", &records, DAY0, reset + H, reset + H, &utc()).unwrap();
         assert_eq!(view.resets, vec![ResetMarker { t: reset - 16, kind: WindowKind::FiveHour }]);
+    }
+
+    fn week(t: i64, u: f64, r: Option<i64>) -> Record {
+        Record { t, acct: Some("a".into()), pool: Some("gemini".into()), fh: None, wk: Some(WindowReading { u, r }), ar: None }
+    }
+
+    #[test]
+    fn an_unused_flicker_inside_a_window_is_not_a_reset() {
+        // The installed client's agy readings around an early weekly reset:
+        // 0%, back to the old window, 0% again, then the new window.
+        let old = DAY0 + 4 * 24 * H;
+        let first_use = DAY0 + 2_075;
+        let records = vec![
+            week(DAY0, 91.34, Some(old)),
+            week(DAY0 + 840, 0.0, None),
+            week(DAY0 + 960, 91.34, Some(old)),
+            week(DAY0 + 1_200, 0.0, None),
+            week(DAY0 + 2_160, 2.34, Some(first_use + 7 * 24 * H)),
+            week(DAY0 + 2_400, 3.1, Some(first_use + 7 * 24 * H)),
+        ];
+        let now = DAY0 + H;
+        let view = view("antigravity", &records, DAY0 - H, now, now, &utc()).unwrap();
+        assert_eq!(view.resets, vec![ResetMarker { t: DAY0 + 1_200, kind: WindowKind::Weekly }]);
+        // The timeline holds the old window's value through the flicker.
+        assert_eq!(view.points.iter().map(|p| p.weekly.unwrap()).collect::<Vec<_>>(), vec![91.34, 91.34, 91.34, 0.0, 2.34, 3.1]);
+        let windows: Vec<_> = view.windows.iter().map(|w| (w.start, w.resets_at, w.peak, w.complete, w.unused_at_reset)).collect();
+        assert_eq!(
+            windows,
+            vec![
+                (first_use, first_use + 7 * 24 * H, 3.1, false, None),
+                // Reset days early: the window ends at the reset.
+                (old - 7 * 24 * H, DAY0 + 1_200, 91.34, true, Some(8.66)),
+            ]
+        );
+        assert_eq!(view.days.last().unwrap().weekly, 3.1);
     }
 
     #[test]

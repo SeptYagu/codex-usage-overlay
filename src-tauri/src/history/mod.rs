@@ -114,6 +114,14 @@ impl Record {
             WindowKind::Argon => self.ar,
         }
     }
+
+    pub fn window_mut(&mut self, kind: WindowKind) -> &mut Option<WindowReading> {
+        match kind {
+            WindowKind::FiveHour => &mut self.fh,
+            WindowKind::Weekly => &mut self.wk,
+            WindowKind::Argon => &mut self.ar,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

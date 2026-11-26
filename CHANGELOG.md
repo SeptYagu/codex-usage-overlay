@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1-preview.3] - 2026-11-26
+
+### Fixed
+- A quota window that flickers to 0% is not a reset. Around an early weekly reset, agy reported the weekly window at 91%, then 0% with no reset time, then 91% with the old reset time again, then 0%. The History window drew two weekly resets, listed a two-minute window and counted 91% of weekly use for the day. When a window comes back with the same reset time and no less usage, the 0% readings in between now count as part of that window.
+- A window that was reset well before its reported reset time now ends at that reset in the window table, with its unused share, instead of showing as in progress until the old reset time.
+
 ## [1.10.1-preview.2] - 2026-11-26
 
 ### Changed
