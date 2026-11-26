@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1-preview.2] - 2026-11-26
+
+### Changed
+- The Usage history timeline now shows the percentage of quota remaining. Lines fall as quota is used and rise after resets; the 0–100% axis, hover values, selected points and protection thresholds use the same remaining-quota scale. Missing readings stay missing. Daily consumption, window summaries, recorded history and protection behavior are unchanged.
+
 ## [1.10.1-preview.1] - 2026-11-25
 
 ### Added

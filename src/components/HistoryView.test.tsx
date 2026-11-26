@@ -4,6 +4,7 @@ import i18n from '../i18n';
 import { DEFAULT_SETTINGS, OverlaySettings } from '../types';
 import type { HistorySeriesInfo, HistoryViewData } from '../history';
 import { HistoryView } from './HistoryView';
+import { TimelineChart } from './history/TimelineChart';
 
 const tauri = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -90,6 +91,8 @@ describe('usage history window', () => {
     // Timeline: one line per window kind, broken at the segment change.
     const fiveHour = view.container.querySelector('[data-series="fiveHour"]')!;
     expect(fiveHour.getAttribute('d')!.match(/M/g)).toHaveLength(2);
+    const remainingYs = [...fiveHour.getAttribute('d')!.matchAll(/[ML][\d.]+,([\d.]+)/g)].map(match => Number(match[1]));
+    expect(remainingYs).toEqual([34, 144, 23, 56]); // used 10 → 60, reset to 5 → 20
     expect(view.container.querySelector('[data-series="weekly"]')).not.toBeNull();
     expect(view.container.querySelector('[data-series="argon"]')).toBeNull();
     expect(view.container.querySelectorAll('[data-reset="fiveHour"]')).toHaveLength(1);
@@ -127,21 +130,44 @@ describe('usage history window', () => {
   it('shows the crosshair readout on hover and from the keyboard', async () => {
     mockHistory();
     const view = await mount();
-    const chart = view.getByRole('img', { name: 'Usage over time' });
+    const chart = view.getByRole('img', { name: 'Remaining quota over time' });
     fireEvent.keyDown(chart, { key: 'End' });
     const tooltip = view.getByRole('tooltip');
-    expect(tooltip.textContent).toContain('20%');
+    expect(tooltip.textContent).toContain('80%');
     expect(tooltip.textContent).toContain('50%');
+    fireEvent.keyDown(chart, { key: 'Home' });
+    expect(tooltip.textContent).toContain('90%');
+    expect(tooltip.textContent).toContain('60%');
+    fireEvent(chart, new MouseEvent('pointermove', { bubbles: true, clientX: 44 + 840 }));
+    expect(tooltip.textContent).toContain('80%');
     fireEvent.keyDown(chart, { key: 'Escape' });
     expect(view.queryByRole('tooltip')).toBeNull();
   });
 
-  it('draws protection thresholds as used percent', async () => {
+  it('draws protection thresholds at their remaining percentages', async () => {
     mockHistory();
     const prefs = { ...DEFAULT_SETTINGS.providerPreferences, codex: { ...DEFAULT_SETTINGS.providerPreferences.codex, protectionEnabled: true } };
     const view = await mount({ providerPreferences: prefs });
-    expect(view.container.querySelector('[data-threshold="fiveHour"]')).not.toBeNull();
-    expect(view.container.querySelector('[data-threshold="weekly"]')).not.toBeNull();
+    expect(view.container.querySelector('[data-threshold="fiveHour"] line')!.getAttribute('y1')).toBe('221'); // 5% remaining
+    expect(view.container.querySelector('[data-threshold="weekly"] line')!.getAttribute('y1')).toBe('227.6'); // 2% remaining
+    const axis = view.getByRole('img', { name: 'Remaining quota over time' });
+    expect(within(axis).getByText('100%').getAttribute('y')).toBe('12');
+    expect(within(axis).getByText('0%').getAttribute('y')).toBe('232');
+  });
+
+  it('keeps missing Argon readings absent and maps an isolated point to remaining quota', () => {
+    const data = viewFor('codex');
+    data.points = [
+      { t: DAY0, seg: 0, fiveHour: null, weekly: null, argon: null },
+      { t: DAY0 + H, seg: 0, fiveHour: null, weekly: null, argon: 20 },
+      { t: DAY0 + 2 * H, seg: 0, fiveHour: null, weekly: null, argon: null },
+    ];
+    const view = render(<TimelineChart view={data} kinds={['argon']} thresholds={{}} />);
+    const dot = view.container.querySelector('[data-isolated="argon"]')!;
+    expect(Number(dot.getAttribute('cy'))).toBeCloseTo(56); // 20% used = 80% remaining
+    expect(view.container.querySelector('[data-series="argon"]')!.getAttribute('d')!.match(/[ML]/g)).toHaveLength(1);
+    fireEvent.keyDown(view.getByRole('img', { name: 'Remaining quota over time' }), { key: 'Home' });
+    expect(view.getByRole('tooltip').textContent).toContain('—');
   });
 
   it('offers the daily numbers as a table', async () => {

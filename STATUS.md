@@ -1,5 +1,9 @@
 # Status
 
+## v1.10.1-preview.2 source — 2026-11-26
+
+- Implements the [remaining-quota timeline plan](docs/usage-history-remaining-chart-plan.md): lines, points, hover values and protection thresholds now show remaining percent, with 100% at the top and 0% at the bottom. Daily consumption, window summaries and recorded history keep their existing meanings. App version `1.10.1-preview.2`, MSI version `1.10.1.2`; [release notes](docs/releases/v1.10.1-preview.2.md).
+
 ## v1.10.1-preview.1 source — 2026-11-25
 
 - Adds Windows ARM64 packages and treats a 0% usage history window as not in use, so an Antigravity reset is drawn once ([release notes](docs/releases/v1.10.1-preview.1.md)). The Release workflow builds x64 on `windows-latest` and ARM64 on `windows-11-arm`, then merges both into one `latest.json`; the updater stays on its own architecture. App version `1.10.1-preview.1`, MSI version `1.10.1.1`.

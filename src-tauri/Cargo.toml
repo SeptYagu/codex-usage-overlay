@@ -12,7 +12,7 @@ debug = "line-tables-only"
 [package]
 name = "codex-usage-overlay"
 default-run = "codex-usage-overlay"
-version = "1.10.1-preview.1"
+version = "1.10.1-preview.2"
 description = "A lightweight Windows overlay for OpenAI Codex usage"
 authors = ["Justin"]
 edition = "2021"
