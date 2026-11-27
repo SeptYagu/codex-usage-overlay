@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0-preview.2] - 2026-11-27
+
+### Changed
+- Usage history's Remaining / Used choice is now a labeled dropdown in the History window and sits beside the history entry in Settings. Both control the same saved setting.
+- Local history files now offer three months, six months, one year or all retention; all is the default for new and upgraded settings. Selecting a shorter period previews the data to delete and asks for confirmation. The History window's viewing choices still end at 90 days.
+
 ## [1.11.0-preview.1] - 2026-11-26
 
 ### Changed

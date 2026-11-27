@@ -204,7 +204,7 @@ describe('usage history settings', () => {
   it('previews a shorter retention period before deleting old readings', async () => {
     tauri.invoke.mockImplementation(async (command: string) => {
       if (command === 'preview_usage_history_retention') return {
-        totalBytes: 5000, firstAt: 1_700_000_000, lastAt: 1_800_000_000,
+        asOf: 1_800_000_100, totalBytes: 5000, firstAt: 1_700_000_000, lastAt: 1_800_000_000,
         deleteBytesEstimate: 1250, deleteRecords: 12, deleteBefore: 1_790_000_000, cleanupError: null,
       };
       return null;

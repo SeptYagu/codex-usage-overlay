@@ -35,6 +35,7 @@ struct Inner {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageInfo {
+    pub as_of: i64,
     pub total_bytes: u64,
     pub first_at: Option<i64>,
     pub last_at: Option<i64>,
@@ -250,16 +251,28 @@ impl Store {
     pub fn storage_info(&self, target: HistoryRetention, now: i64) -> std::io::Result<StorageInfo> {
         let cutoff = target.cutoff(now);
         let mut info = StorageInfo {
+            as_of: now,
             total_bytes: 0, first_at: None, last_at: None, delete_bytes_estimate: 0,
             delete_records: 0, delete_before: cutoff,
             cleanup_error: self.inner.lock().unwrap_or_else(|p| p.into_inner()).cleanup_error.clone(),
         };
-        for (_, _, path) in self.files() {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(info),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue };
+            if parse_file_name(name).is_none() { continue; }
             let file = fs::File::open(&path)?;
             info.total_bytes += file.metadata()?.len();
             for line in BufReader::new(file).lines() {
                 let line = line?;
-                let Ok(record) = serde_json::from_str::<Record>(line.trim()) else { continue };
+                let record: Record = serde_json::from_str(line.trim()).map_err(|error| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {error}", path.display()))
+                })?;
                 info.first_at = Some(info.first_at.map_or(record.t, |first| first.min(record.t)));
                 info.last_at = Some(info.last_at.map_or(record.t, |last| last.max(record.t)));
                 if cutoff.is_some_and(|cutoff| record.t < cutoff) {
@@ -325,11 +338,21 @@ impl Store {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.series.clear();
         let mut first_error = None;
-        for (_, _, path) in self.files() {
-            if let Err(error) = fs::remove_file(&path) {
-                first_error.get_or_insert(error);
+        if self.dir.exists() {
+            for entry in fs::read_dir(&self.dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue };
+                let history_name = name.strip_suffix(".backup")
+                    .or_else(|| name.strip_suffix(".rewrite"))
+                    .unwrap_or(name);
+                if parse_file_name(history_name).is_none() { continue; }
+                if let Err(error) = fs::remove_file(&path) {
+                    first_error.get_or_insert(error);
+                }
             }
         }
+        if first_error.is_none() { inner.cleanup_error = None; }
         first_error.map_or(Ok(()), Err)
     }
 }
@@ -468,7 +491,7 @@ mod tests {
         let store = Store::new(dir.clone());
         assert!(store.set_retention(HistoryRetention::ThreeMonths, NOW).is_err());
         assert!(fs::read_to_string(&path).unwrap().contains("{broken"));
-        assert!(store.storage_info(HistoryRetention::All, NOW).unwrap().cleanup_error.is_some());
+        assert_eq!(store.storage_info(HistoryRetention::All, NOW).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -489,11 +512,16 @@ mod tests {
         let dir = temp_dir("clear");
         let store = Store::new(dir.clone());
         store.append("antigravity", record(NOW, 1.0), NOW).unwrap();
+        fs::write(dir.join("codex-2026-10.jsonl.backup"), "pending backup").unwrap();
+        fs::write(dir.join("codex-2026-10.jsonl.rewrite"), "pending rewrite").unwrap();
         fs::write(dir.join("unrelated.txt"), "keep").unwrap();
         store.clear().unwrap();
         assert!(store.records("antigravity", NOW).is_empty());
         assert!(store.series().is_empty());
+        assert!(!dir.join("codex-2026-10.jsonl.backup").exists());
+        assert!(!dir.join("codex-2026-10.jsonl.rewrite").exists());
         assert!(dir.join("unrelated.txt").is_file());
+        assert!(Store::new(dir.clone()).series().is_empty());
         // Recording starts again from scratch after a clear.
         assert!(store.append("antigravity", record(NOW + 60, 1.0), NOW + 60).unwrap());
         let _ = fs::remove_dir_all(dir);

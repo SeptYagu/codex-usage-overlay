@@ -35,6 +35,7 @@ export type AntigravityPool = 'auto' | 'gemini' | 'argon' | '3p';
 export type Provider = 'codex' | 'dsh' | 'claude' | 'antigravity';
 export type HistoryRetention = '3m' | '6m' | '1y' | 'all';
 export interface HistoryStorageInfo {
+  asOf: number;
   totalBytes: number;
   firstAt: number | null;
   lastAt: number | null;

@@ -1,5 +1,10 @@
 # Status
 
+## v1.11.0-preview.2 source — 2026-11-27
+
+- Implements [the unified usage-history plan](docs/usage-history-unified-implementation-plan.md) stages one and two ([release notes](docs/releases/v1.11.0-preview.2.md)): a labeled Remaining / Used select in the History window, the same choice beside the history entry in Settings, and local disk retention choices of three months, six months, one year or all (the default for new and existing settings). The History window still views at most 90 days. App version `1.11.0-preview.2`, MSI version `1.11.0.2`.
+- The prediction-state recovery assessment is a separate, pending decision. Earlier versions' deleted history cannot be restored.
+
 ## v1.11.0-preview.1 source — 2026-11-26
 
 - Reorganizes the Settings window around a sidebar with headed sections ([release notes](docs/releases/v1.11.0-preview.1.md)): General, Overlay, Quota rotation and Usage history pages, then one page per provider with Monitoring, Protection, Display and Notifications. No setting changes meaning or default. App version `1.11.0-preview.1`, MSI version `1.11.0.1`.

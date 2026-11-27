@@ -423,7 +423,7 @@
   "historyRetentionConfirmTitle": "Подтвердить срок хранения",
   "historyRetentionConfirm": "Переключить на {{choice}}? Записи с {{first}} до {{before}} будут удалены: около {{records}} записей ({{bytes}} байт). Это нельзя отменить.",
   "historyRetentionConfirmYes": "Удалить старую историю",
-  "historyStorageSummary": "Локальная история: {{bytes}} байт. Первая запись: {{first}}; последняя: {{last}}.",
+  "historyStorageSummary": "Локальная история на {{asOf}}: {{bytes}} байт. Первая запись: {{first}}; последняя: {{last}}.",
   "historyStorageNone": "нет",
   "historyStorageFailed": "Не удалось проверить локальную историю.",
   "historyCleanupIncomplete": "Очистка истории не завершена",

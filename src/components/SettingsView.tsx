@@ -302,6 +302,7 @@ function HistoryPage({ settings, savePatch }: { settings: OverlaySettings; saveP
           </div>
         </div>}
         {storage && <p className={hint}>{t('historyStorageSummary', {
+          asOf: new Date(storage.asOf * 1000).toLocaleString(),
           bytes: storage.totalBytes.toLocaleString(),
           first: storage.firstAt ? new Date(storage.firstAt * 1000).toLocaleString() : t('historyStorageNone'),
           last: storage.lastAt ? new Date(storage.lastAt * 1000).toLocaleString() : t('historyStorageNone'),

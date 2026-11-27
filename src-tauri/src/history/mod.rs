@@ -2,7 +2,8 @@
 //!
 //! Every successful read passes through [`record_reading`], which keeps a line
 //! only when a reading changed or a heartbeat is due. Lines are appended to
-//! one JSONL file per series and calendar month and kept for 90 days.
+//! one JSONL file per series and calendar month. Disk retention is configured
+//! independently of the History window's 90-day viewing range.
 //! [`query`] turns a series into the timeline, daily consumption and window
 //! summaries the History window draws.
 
@@ -16,7 +17,7 @@ use crate::config::{OverlaySettings, Provider};
 
 pub use store::Store;
 
-/// How long recorded readings are kept, and the widest range a query covers.
+/// The widest range a History window query covers.
 pub const RETENTION_SECS: i64 = 90 * 24 * 60 * 60;
 /// An unchanged reading is still written this often, so the charts can tell
 /// an idle stretch from one where the app was off or reads were failing.
