@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-11-26
+
+Stable release of Windows ARM64 packages and the usage history fixes from `1.10.1-preview.1` through `1.10.1-preview.3`, plus the timeline switch below.
+
 ### Added
 - A **Remaining / Used** switch on the Usage history timeline. Remaining stays the default; Used shows the timeline as it was before `1.10.1-preview.2`, with the matching title, hover values and protection threshold lines. The choice is saved in settings (`historyShowUsed`). Daily consumption and the window table are unchanged.
 

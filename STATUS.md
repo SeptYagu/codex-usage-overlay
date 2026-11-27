@@ -1,5 +1,10 @@
 # Status
 
+## v1.10.1 stable source — 2026-11-26
+
+- Combines `v1.10.1-preview.1` to `v1.10.1-preview.3` (Windows ARM64 packages, the remaining-quota timeline and the usage history reset fixes) with a Remaining / Used switch for the timeline, saved as `historyShowUsed`. App and MSI versions are aligned to `1.10.1`; [release notes](docs/releases/v1.10.1.md).
+- All CI steps pass locally. The switch was checked in a browser preview with real history, not in an installed copy; the ARM64 packages have not been installed on an ARM64 PC.
+
 ## v1.10.1-preview.3 source — 2026-11-26
 
 - Fixes usage history around an early weekly reset that flickers through 0% ([release notes](docs/releases/v1.10.1-preview.3.md)): 0% readings inside a window that comes back with the same reset time are part of that window, and a window reset well before its reported time ends at the reset. Checked against real Antigravity history (one weekly reset instead of two, 7.85% weekly use for the day instead of 99.19%; Claude and Codex unchanged). App version `1.10.1-preview.3`, MSI version `1.10.1.3`.
