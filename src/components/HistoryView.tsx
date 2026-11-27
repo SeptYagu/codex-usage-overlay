@@ -145,19 +145,20 @@ export const HistoryView: React.FC<{
               <div className="flex flex-wrap items-center gap-2">
                 <h2 id="history-timeline-title" className="text-sm font-semibold">{t(showUsed ? 'historyTimelineTitleUsed' : 'historyTimelineTitle')}</h2>
                 {onPatchSettings && (
-                  <div role="group" aria-label={t('historyTimelineModeLabel')} className="ml-auto flex gap-1">
-                    {([false, true] as const).map(used => (
-                      <button
-                        key={String(used)}
-                        type="button"
-                        aria-pressed={showUsed === used}
-                        onClick={() => { if (showUsed !== used) onPatchSettings({ historyShowUsed: used }); }}
-                        className={`rounded-md px-2.5 py-1 text-xs font-medium border ${showUsed === used ? 'border-cyan-600 bg-cyan-600 text-white' : 'border-slate-300 dark:border-slate-600'}`}
-                      >
-                        {t(used ? 'historyTimelineModeUsed' : 'historyTimelineModeRemaining')}
-                      </button>
-                    ))}
-                  </div>
+                  <label className="ml-auto flex flex-wrap items-center gap-2 text-xs font-medium">
+                    <span>{t('historyTimelineModeLabel')}</span>
+                    <select
+                      value={showUsed ? 'used' : 'remaining'}
+                      onChange={event => {
+                        const used = event.target.value === 'used';
+                        if (showUsed !== used) onPatchSettings({ historyShowUsed: used });
+                      }}
+                      className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                    >
+                      <option value="remaining">{t('historyTimelineModeRemaining')}</option>
+                      <option value="used">{t('historyTimelineModeUsed')}</option>
+                    </select>
+                  </label>
                 )}
               </div>
               <p className="text-xs" style={{ color: 'var(--viz-ink-2)' }}>{t(showUsed ? 'historyTimelineHintUsed' : 'historyTimelineHint')}</p>

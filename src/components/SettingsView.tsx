@@ -228,7 +228,7 @@ function RotationPage({ settings, savePatch, display }: { settings: OverlaySetti
   </>;
 }
 
-/** Local usage history: record on/off, open, clear (with a confirm step), and what the timeline shows. */
+/** Local usage history: recording, display mode, open, and clear. */
 function HistoryPage({ settings, savePatch }: { settings: OverlaySettings; savePatch: SavePatch }) {
   const { t } = useTranslation();
   const [confirming, setConfirming] = useState(false);
@@ -248,6 +248,13 @@ function HistoryPage({ settings, savePatch }: { settings: OverlaySettings; saveP
       <div className="space-y-2" data-usage-history-settings>
         <Toggle label={t('recordUsageHistory')} checked={settings.recordUsageHistory ?? true} hintText={t('recordUsageHistoryHint')} hintId="record-history-hint"
           onChange={recordUsageHistory => savePatch({ recordUsageHistory })} />
+        <label className={selectRow}>
+          <span className="text-sm font-medium">{t('historyTimelineModeLabel')}</span>
+          <select value={settings.historyShowUsed ? 'used' : 'remaining'} onChange={event => savePatch({ historyShowUsed: event.target.value === 'used' })} className={select}>
+            <option value="remaining">{t('historyTimelineModeRemaining')}</option>
+            <option value="used">{t('historyTimelineModeUsed')}</option>
+          </select>
+        </label>
         <div className="flex flex-wrap items-center gap-2 px-1">
           <button type="button" className={button} onClick={() => void invoke('open_history_window').catch(error => console.error('Could not open usage history:', error))}>
             {t('openUsageHistory')}
@@ -262,18 +269,10 @@ function HistoryPage({ settings, savePatch }: { settings: OverlaySettings; saveP
             <button type="button" className={button} onClick={() => { setStatus('idle'); setConfirming(true); }}>{t('clearUsageHistory')}</button>
           )}
         </div>
+        <p className={hint}>{t('historyOpenHint')}</p>
         {status === 'cleared' && <p role="status" className="px-1 text-xs text-cyan-600">{t('clearUsageHistoryDone')}</p>}
         {status === 'failed' && <p role="alert" className="px-1 text-xs text-red-600">{t('clearUsageHistoryFailed')}</p>}
       </div>
-    </Section>
-    <Section id="settings-history-timeline" title={t('sectionTimeline')}>
-      <label className={selectRow}>
-        <span className="text-sm font-medium">{t('historyTimelineShows')}</span>
-        <select value={settings.historyShowUsed ? 'used' : 'remaining'} onChange={event => savePatch({ historyShowUsed: event.target.value === 'used' })} className={select}>
-          <option value="remaining">{t('historyTimelineModeRemaining')}</option>
-          <option value="used">{t('historyTimelineModeUsed')}</option>
-        </select>
-      </label>
     </Section>
   </>;
 }

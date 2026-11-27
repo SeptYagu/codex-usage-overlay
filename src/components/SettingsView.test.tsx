@@ -193,8 +193,10 @@ describe('usage history settings', () => {
   it('chooses what the history timeline shows', async () => {
     const view = await mount();
     view.page('settingsPageHistory');
-    const shows = view.getByRole('combobox', { name: 'Timeline shows' }) as HTMLSelectElement;
+    const shows = view.getByRole('combobox', { name: 'Display mode' }) as HTMLSelectElement;
     expect(shows.value).toBe('remaining');
+    expect(view.getByText('Open usage history to view the timeline.')).toBeTruthy();
+    expect(view.queryByRole('heading', { name: 'Timeline' })).toBeNull();
     fireEvent.change(shows, { target: { value: 'used' } });
     expect(view.onPatchSettings).toHaveBeenCalledWith({ historyShowUsed: true });
   });

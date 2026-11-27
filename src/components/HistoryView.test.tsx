@@ -160,16 +160,17 @@ describe('usage history window', () => {
     const onPatchSettings = vi.fn();
     const prefs = { ...DEFAULT_SETTINGS.providerPreferences, codex: { ...DEFAULT_SETTINGS.providerPreferences.codex, protectionEnabled: true } };
     const remaining = await mount({ providerPreferences: prefs }, onPatchSettings);
-    const mode = within(remaining.getByRole('group', { name: 'Show' }));
-    expect(mode.getByRole('button', { name: 'Remaining' }).getAttribute('aria-pressed')).toBe('true');
-    fireEvent.click(mode.getByRole('button', { name: 'Remaining' }));
+    const mode = remaining.getByRole('combobox', { name: 'Display mode' }) as HTMLSelectElement;
+    expect(mode.value).toBe('remaining');
+    fireEvent.change(mode, { target: { value: 'remaining' } });
     expect(onPatchSettings).not.toHaveBeenCalled();
-    fireEvent.click(mode.getByRole('button', { name: 'Used' }));
+    fireEvent.change(mode, { target: { value: 'used' } });
     expect(onPatchSettings).toHaveBeenCalledWith({ historyShowUsed: true });
+    expect(onPatchSettings).toHaveBeenCalledTimes(1);
     cleanup();
 
     const used = await mount({ providerPreferences: prefs, historyShowUsed: true }, onPatchSettings);
-    expect(within(used.getByRole('group', { name: 'Show' })).getByRole('button', { name: 'Used' }).getAttribute('aria-pressed')).toBe('true');
+    expect((used.getByRole('combobox', { name: 'Display mode' }) as HTMLSelectElement).value).toBe('used');
     expect(used.getByRole('heading', { name: 'Usage over time' })).toBeTruthy();
     const fiveHour = used.container.querySelector('[data-series="fiveHour"]')!;
     const usedYs = [...fiveHour.getAttribute('d')!.matchAll(/[ML][\d.]+,([\d.]+)/g)].map(match => Number(match[1]));
@@ -183,7 +184,7 @@ describe('usage history window', () => {
   it('has no mode switch without a way to save it', async () => {
     mockHistory();
     const view = await mount();
-    expect(view.queryByRole('group', { name: 'Show' })).toBeNull();
+    expect(view.queryByRole('combobox', { name: 'Display mode' })).toBeNull();
   });
 
   it('keeps missing Argon readings absent and maps an isolated point to remaining quota', () => {
