@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0-preview.1] - 2026-11-26
+
 ### Changed
 - The Settings window is reorganized around a sidebar: **General** (language, startup, updates), **Overlay** (appearance, what the overlay shows, behavior), **Quota rotation** (with the included providers listed together), **Usage history** (recording, and what the timeline shows), then one page per provider with **Monitoring**, **Protection**, **Display** and **Notifications** sections. A dot marks the provider the overlay shows. No setting changed meaning or default.
 

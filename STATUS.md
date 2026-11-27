@@ -1,5 +1,10 @@
 # Status
 
+## v1.11.0-preview.1 source — 2026-11-26
+
+- Reorganizes the Settings window around a sidebar with headed sections ([release notes](docs/releases/v1.11.0-preview.1.md)): General, Overlay, Quota rotation and Usage history pages, then one page per provider with Monitoring, Protection, Display and Notifications. No setting changes meaning or default. App version `1.11.0-preview.1`, MSI version `1.11.0.1`.
+- All CI steps pass locally and every page was checked in a browser preview; the layout has not been checked in an installed copy.
+
 ## v1.10.1 stable source — 2026-11-26
 
 - Combines `v1.10.1-preview.1` to `v1.10.1-preview.3` (Windows ARM64 packages, the remaining-quota timeline and the usage history reset fixes) with a Remaining / Used switch for the timeline, saved as `historyShowUsed`. App and MSI versions are aligned to `1.10.1`; [release notes](docs/releases/v1.10.1.md).
