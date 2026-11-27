@@ -45,6 +45,14 @@ pub async fn clear_usage_history(state: State<'_, Arc<AppState>>) -> Result<(), 
     state.history.clear().map_err(|error| format!("Could not clear usage history: {error}"))
 }
 
+#[tauri::command]
+pub async fn preview_usage_history_retention(
+    state: State<'_, Arc<AppState>>,
+    retention: crate::config::HistoryRetention,
+) -> Result<crate::history::store::StorageInfo, String> {
+    state.history.storage_info(retention, unix_now()).map_err(|error| format!("Could not inspect usage history: {error}"))
+}
+
 /// Async, so it never runs on the main thread; the window itself is built on
 /// a worker thread by `tray::open_history_window`.
 #[tauri::command]

@@ -168,6 +168,7 @@ pub fn run() {
             commands::get_usage_history_series,
             commands::get_usage_history,
             commands::clear_usage_history,
+            commands::preview_usage_history_retention,
             commands::is_installed_version,
             commands::get_tray_menu_generation,
             commands::layout_tray_menu,

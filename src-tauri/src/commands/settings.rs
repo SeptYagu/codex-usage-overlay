@@ -272,6 +272,8 @@ pub struct SettingsPatch {
     #[serde(default, deserialize_with = "deserialize_present_some")]
     pub record_usage_history: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_present_some")]
+    pub history_retention: Option<crate::config::HistoryRetention>,
+    #[serde(default, deserialize_with = "deserialize_present_some")]
     pub history_show_used: Option<bool>,
 }
 
@@ -359,6 +361,9 @@ impl SettingsPatch {
         }
         if let Some(v) = self.record_usage_history {
             settings.record_usage_history = v;
+        }
+        if let Some(v) = self.history_retention {
+            settings.history_retention = v;
         }
         if let Some(v) = self.history_show_used {
             settings.history_show_used = v;
@@ -612,6 +617,23 @@ mod settings_patch_tests {
         assert!(validate_settings_patch(&serde_json::json!({"historyShowUsed": null}), false).is_err());
     }
 
+    #[test]
+    fn history_retention_defaults_to_all_and_rejects_invalid_patches() {
+        assert_eq!(crate::config::OverlaySettings::default().history_retention, crate::config::HistoryRetention::All);
+        let upgraded: crate::config::OverlaySettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(upgraded.history_retention, crate::config::HistoryRetention::All);
+        let malformed: crate::config::OverlaySettings = serde_json::from_value(serde_json::json!({"historyRetention": "invalid"})).unwrap();
+        assert_eq!(malformed.history_retention, crate::config::HistoryRetention::All);
+        for value in ["3m", "6m", "1y", "all"] {
+            let patch = serde_json::json!({"historyRetention": value});
+            let parsed = validate_settings_patch(&patch, false).unwrap();
+            assert!(parsed.history_retention.is_some());
+        }
+        for value in [serde_json::json!("90d"), serde_json::json!(null), serde_json::json!(3)] {
+            assert!(validate_settings_patch(&serde_json::json!({"historyRetention": value}), false).is_err());
+        }
+    }
+
     /// The offline half of P3-4: the same `validate -> merge -> save` chain the
     /// command runs, minus the `&AppHandle`-only side effects. The reload asserts the
     /// *value*, so a key that silently fails to map onto `OverlaySettings` (or a
@@ -713,6 +735,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
     if changes.dsh_account_id.is_some() || changes.dsh_session_ids.is_some() {
         return Err("Use the current DSH connection revision to bind protection targets".into());
     }
+    let retention_changed = changes.history_retention;
     let (
         mut envelope,
         auto_check_just_enabled,
@@ -748,6 +771,11 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
             previous_settings.include_prerelease_updates != next.include_prerelease_updates,
         )
     };
+
+    let retention_cleanup_error = retention_changed.and_then(|retention| {
+        state.history.set_retention(retention, crate::codex::reader::unix_now())
+            .err().map(|error| format!("History retention saved, but cleanup is incomplete: {error}"))
+    });
 
     // An update found on the other channel must not stay offered or prepared.
     if update_channel_changed {
@@ -872,6 +900,7 @@ pub(crate) async fn apply_settings_patch<S: TrayPresentationSink>(
             });
         }
     }
+    if let Some(error) = retention_cleanup_error { return Err(error) }
     Ok(envelope)
 }
 

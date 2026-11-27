@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { OverlaySettings, Provider, ProviderPreference, SettingsPatch, DisplayState } from '../types';
+import { OverlaySettings, Provider, ProviderPreference, SettingsPatch, DisplayState, HistoryRetention, HistoryStorageInfo } from '../types';
 import { providerPreference } from '../providerSettings';
 import { useProviderMonitors } from '../hooks/useProviderMonitors';
 import { APP_VERSION } from '../version';
@@ -233,6 +233,33 @@ function HistoryPage({ settings, savePatch }: { settings: OverlaySettings; saveP
   const { t } = useTranslation();
   const [confirming, setConfirming] = useState(false);
   const [status, setStatus] = useState<'idle' | 'cleared' | 'failed'>('idle');
+  const [storage, setStorage] = useState<HistoryStorageInfo | null>(null);
+  const [storageError, setStorageError] = useState(false);
+  const [pendingRetention, setPendingRetention] = useState<{ value: HistoryRetention; info: HistoryStorageInfo } | null>(null);
+  const [retentionBusy, setRetentionBusy] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void invoke<HistoryStorageInfo>('preview_usage_history_retention', { retention: 'all' })
+      .then(info => { if (active) { setStorage(info); setStorageError(false); } })
+      .catch(error => { console.error('Could not inspect usage history:', error); if (active) setStorageError(true); });
+    return () => { active = false; };
+  }, [settings, status]);
+  const changeRetention = async (value: HistoryRetention) => {
+    if (value === settings.historyRetention) return;
+    setRetentionBusy(true);
+    try {
+      const info = await invoke<HistoryStorageInfo>('preview_usage_history_retention', { retention: value });
+      const order: Record<HistoryRetention, number> = { '3m': 0, '6m': 1, '1y': 2, all: 3 };
+      if (order[value] < order[settings.historyRetention]) setPendingRetention({ value, info });
+      else savePatch({ historyRetention: value });
+      setStorageError(false);
+    } catch (error) {
+      console.error('Could not inspect usage history:', error);
+      setStorageError(true);
+    } finally {
+      setRetentionBusy(false);
+    }
+  };
   const clear = async () => {
     setConfirming(false);
     try {
@@ -248,6 +275,39 @@ function HistoryPage({ settings, savePatch }: { settings: OverlaySettings; saveP
       <div className="space-y-2" data-usage-history-settings>
         <Toggle label={t('recordUsageHistory')} checked={settings.recordUsageHistory ?? true} hintText={t('recordUsageHistoryHint')} hintId="record-history-hint"
           onChange={recordUsageHistory => savePatch({ recordUsageHistory })} />
+        <label className={selectRow}>
+          <span className="text-sm font-medium">{t('historyRetentionLabel')}</span>
+          <select value={settings.historyRetention ?? 'all'} disabled={retentionBusy || pendingRetention !== null}
+            onChange={event => void changeRetention(event.target.value as HistoryRetention)} className={select}>
+            <option value="3m">{t('historyRetention3m')}</option>
+            <option value="6m">{t('historyRetention6m')}</option>
+            <option value="1y">{t('historyRetention1y')}</option>
+            <option value="all">{t('historyRetentionAll')}</option>
+          </select>
+        </label>
+        {pendingRetention && <div role="group" aria-label={t('historyRetentionConfirmTitle')} className="px-1 space-y-2 text-xs">
+          <p>{t('historyRetentionConfirm', {
+            choice: t(`historyRetention${pendingRetention.value === '3m' ? '3m' : pendingRetention.value === '6m' ? '6m' : pendingRetention.value === '1y' ? '1y' : 'All'}`),
+            records: pendingRetention.info.deleteRecords,
+            bytes: pendingRetention.info.deleteBytesEstimate.toLocaleString(),
+            first: pendingRetention.info.firstAt ? new Date(pendingRetention.info.firstAt * 1000).toLocaleString() : t('historyStorageNone'),
+            before: pendingRetention.info.deleteBefore ? new Date(pendingRetention.info.deleteBefore * 1000).toLocaleString() : t('historyStorageNone'),
+          })}</p>
+          <div className="flex gap-2">
+            <button type="button" className="rounded bg-red-600 px-2.5 py-1 text-white" onClick={() => {
+              savePatch({ historyRetention: pendingRetention.value });
+              setPendingRetention(null);
+            }}>{t('historyRetentionConfirmYes')}</button>
+            <button type="button" className={button} onClick={() => setPendingRetention(null)}>{t('clearUsageHistoryCancel')}</button>
+          </div>
+        </div>}
+        {storage && <p className={hint}>{t('historyStorageSummary', {
+          bytes: storage.totalBytes.toLocaleString(),
+          first: storage.firstAt ? new Date(storage.firstAt * 1000).toLocaleString() : t('historyStorageNone'),
+          last: storage.lastAt ? new Date(storage.lastAt * 1000).toLocaleString() : t('historyStorageNone'),
+        })}</p>}
+        {storage?.cleanupError && <p role="alert" className="px-1 text-xs text-red-600">{t('historyCleanupIncomplete')}: {storage.cleanupError}</p>}
+        {storageError && <p role="alert" className="px-1 text-xs text-red-600">{t('historyStorageFailed')}</p>}
         <label className={selectRow}>
           <span className="text-sm font-medium">{t('historyTimelineModeLabel')}</span>
           <select value={settings.historyShowUsed ? 'used' : 'remaining'} onChange={event => savePatch({ historyShowUsed: event.target.value === 'used' })} className={select}>

@@ -200,4 +200,27 @@ describe('usage history settings', () => {
     fireEvent.change(shows, { target: { value: 'used' } });
     expect(view.onPatchSettings).toHaveBeenCalledWith({ historyShowUsed: true });
   });
+
+  it('previews a shorter retention period before deleting old readings', async () => {
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === 'preview_usage_history_retention') return {
+        totalBytes: 5000, firstAt: 1_700_000_000, lastAt: 1_800_000_000,
+        deleteBytesEstimate: 1250, deleteRecords: 12, deleteBefore: 1_790_000_000, cleanupError: null,
+      };
+      return null;
+    });
+    const view = await mount();
+    view.page('settingsPageHistory');
+    const retention = view.getByRole('combobox', { name: 'Keep history' }) as HTMLSelectElement;
+    expect(retention.value).toBe('all');
+    await act(async () => { fireEvent.change(retention, { target: { value: '3m' } }); });
+    const confirm = view.getByRole('group', { name: 'Confirm history retention' });
+    expect(confirm.textContent).toContain('12 readings');
+    expect(view.onPatchSettings).not.toHaveBeenCalledWith({ historyRetention: '3m' });
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Cancel' }));
+    expect(view.onPatchSettings).not.toHaveBeenCalledWith({ historyRetention: '3m' });
+    await act(async () => { fireEvent.change(retention, { target: { value: '3m' } }); });
+    fireEvent.click(within(view.getByRole('group', { name: 'Confirm history retention' })).getByRole('button', { name: 'Delete older history' }));
+    expect(view.onPatchSettings).toHaveBeenCalledWith({ historyRetention: '3m' });
+  });
 });

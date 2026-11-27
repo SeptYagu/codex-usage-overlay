@@ -21,6 +21,30 @@ pub enum SoundMode {
     Windows,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistoryRetention {
+    #[serde(rename = "3m")]
+    ThreeMonths,
+    #[serde(rename = "6m")]
+    SixMonths,
+    #[serde(rename = "1y")]
+    OneYear,
+    #[default]
+    #[serde(rename = "all")]
+    All,
+}
+
+fn recover_history_retention<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<HistoryRetention, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match serde_json::from_value(value) {
+        Ok(retention) => Ok(retention),
+        Err(error) => {
+            eprintln!("Invalid history retention in settings; preserving all history: {error}");
+            Ok(HistoryRetention::All)
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all="lowercase")]
 pub enum FiveHourBurnRateAlgorithm { #[default] Legacy, Weighted, Personalized }
@@ -314,6 +338,10 @@ pub struct OverlaySettings {
     /// History window. On by default; turning it off keeps existing files.
     #[serde(default = "default_true")]
     pub record_usage_history: bool,
+    /// Local history files are kept until this calendar-month deadline; `all`
+    /// is the safe default for existing settings without this field.
+    #[serde(default, deserialize_with = "recover_history_retention")]
+    pub history_retention: HistoryRetention,
     /// Whether the History window's timeline shows used percent instead of
     /// remaining percent. Off by default: remaining, like the overlay.
     #[serde(default)]
@@ -378,6 +406,7 @@ impl Default for OverlaySettings {
             mouse_passthrough: false,
             show_percentage_grid: false,
             record_usage_history: true,
+            history_retention: HistoryRetention::All,
             history_show_used: false,
         }
     }

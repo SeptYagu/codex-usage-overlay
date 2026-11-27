@@ -33,6 +33,16 @@ export interface CodexUsage {
 
 export type AntigravityPool = 'auto' | 'gemini' | 'argon' | '3p';
 export type Provider = 'codex' | 'dsh' | 'claude' | 'antigravity';
+export type HistoryRetention = '3m' | '6m' | '1y' | 'all';
+export interface HistoryStorageInfo {
+  totalBytes: number;
+  firstAt: number | null;
+  lastAt: number | null;
+  deleteBytesEstimate: number;
+  deleteRecords: number;
+  deleteBefore: number | null;
+  cleanupError: string | null;
+}
 
 export interface ProviderPreference {
   fiveHourBurnRateAlgorithm: FiveHourBurnRateAlgorithm;
@@ -116,6 +126,7 @@ export interface OverlaySettings {
   mousePassthrough: boolean;
   showPercentageGrid: boolean;
   recordUsageHistory: boolean;
+  historyRetention: HistoryRetention;
   /** The History timeline shows used percent instead of remaining. */
   historyShowUsed: boolean;
 }
@@ -170,6 +181,7 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   mousePassthrough: false,
   showPercentageGrid: false,
   recordUsageHistory: true,
+  historyRetention: 'all',
   historyShowUsed: false,
 };
 

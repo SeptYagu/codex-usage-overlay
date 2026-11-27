@@ -164,6 +164,10 @@ impl std::ops::Deref for AppState {
 
 impl AppState {
     pub fn new(config_manager: ConfigManager, settings: OverlaySettings) -> Self {
+        let history = crate::history::Store::with_retention(config_manager.runtime_dir().join("history"), settings.history_retention);
+        if let Err(error) = history.set_retention(settings.history_retention, crate::codex::reader::unix_now()) {
+            eprintln!("Could not apply usage history retention at startup: {error}");
+        }
         let services = Arc::new(AppServices {
             tray_gate: StdMutex::new(()),
             dsh: Default::default(),
@@ -189,7 +193,7 @@ impl AppState {
             carousel_enabled: AtomicBool::new(settings.quota_carousel_enabled),
             snapshot_revision: AtomicU64::new(0),
             snapshot_gate: Mutex::new(()),
-            history: crate::history::Store::new(config_manager.runtime_dir().join("history")),
+            history,
         });
         let monitors = crate::monitor::Registry::new(&services, &config_manager, &settings, 0);
         Self {
