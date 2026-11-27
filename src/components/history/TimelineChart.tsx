@@ -10,13 +10,14 @@ import { useChartWidth } from './useChartWidth';
 const HEIGHT = 260;
 const M = { top: 12, right: 16, bottom: 28, left: 44 };
 const Y_TICKS = [0, 25, 50, 75, 100];
-const remaining = (used: number) => 100 - used;
 
+/** Readings are used percent; the chart shows used or remaining percent. */
 export const TimelineChart: React.FC<{
   view: HistoryViewData;
   kinds: WindowKind[];
   thresholds: Partial<Record<WindowKind, number>>;
-}> = ({ view, kinds, thresholds }) => {
+  showUsed?: boolean;
+}> = ({ view, kinds, thresholds, showUsed = false }) => {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage;
   const [ref, width] = useChartWidth();
@@ -26,12 +27,13 @@ export const TimelineChart: React.FC<{
   const span = Math.max(1, view.to - view.from);
   const x = (time: number) => M.left + ((time - view.from) / span) * plotW;
   const y = (value: number) => M.top + (1 - Math.min(100, Math.max(0, value)) / 100) * plotH;
-  const yRemaining = (used: number) => y(remaining(used));
+  const shown = (used: number) => (showUsed ? used : 100 - used);
+  const yShown = (used: number) => y(shown(used));
   const ticks = useMemo(() => timeTicks(view.from, view.to, locale, Math.max(3, Math.floor(plotW / 110))), [view.from, view.to, locale, plotW]);
-  const paths = kinds.map(kind => ({ kind, d: linePath(view.points, kind, x, yRemaining) }));
+  const paths = kinds.map(kind => ({ kind, d: linePath(view.points, kind, x, yShown) }));
   const point = active !== null ? view.points[active] : null;
   const thresholdKinds = kinds.filter(kind => thresholds[kind] !== undefined);
-  const thresholdLabelY = stackLabels(thresholdKinds.map(kind => yRemaining(thresholds[kind]!)));
+  const thresholdLabelY = stackLabels(thresholdKinds.map(kind => yShown(thresholds[kind]!)));
 
   const pick = (clientX: number, rect: DOMRect) => {
     const time = view.from + ((clientX - rect.left - M.left) / plotW) * span;
@@ -63,7 +65,7 @@ export const TimelineChart: React.FC<{
           height={HEIGHT}
           role="img"
           tabIndex={0}
-          aria-label={t('historyTimelineTitle')}
+          aria-label={t(showUsed ? 'historyTimelineTitleUsed' : 'historyTimelineTitle')}
           onPointerMove={event => pick(event.clientX, event.currentTarget.getBoundingClientRect())}
           onPointerLeave={() => setActive(null)}
           onKeyDown={onKeyDown}
@@ -86,7 +88,7 @@ export const TimelineChart: React.FC<{
           ))}
           {thresholdKinds.map((kind, index) => (
             <g key={`threshold-${kind}`} data-threshold={kind}>
-              <line x1={M.left} x2={M.left + plotW} y1={yRemaining(thresholds[kind]!)} y2={yRemaining(thresholds[kind]!)} stroke={KIND_COLOR[kind]} strokeOpacity={0.55} strokeWidth={1} strokeDasharray="4 3" />
+              <line x1={M.left} x2={M.left + plotW} y1={yShown(thresholds[kind]!)} y2={yShown(thresholds[kind]!)} stroke={KIND_COLOR[kind]} strokeOpacity={0.55} strokeWidth={1} strokeDasharray="4 3" />
               <text x={M.left + plotW - 4} y={thresholdLabelY[index]} textAnchor="end" fontSize={10} fill="var(--viz-ink-2)">
                 {t(KIND_LABEL_KEY[kind])} · {t('historyThreshold')}
               </text>
@@ -96,13 +98,13 @@ export const TimelineChart: React.FC<{
             <path key={kind} data-series={kind} d={d} fill="none" stroke={KIND_COLOR[kind]} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
           ))}
           {kinds.flatMap(kind => isolatedPoints(view.points, kind).map(p => (
-            <circle key={`dot-${kind}-${p.t}`} data-isolated={kind} cx={x(p.t)} cy={yRemaining(p[kind]!)} r={2.5} fill={KIND_COLOR[kind]} />
+            <circle key={`dot-${kind}-${p.t}`} data-isolated={kind} cx={x(p.t)} cy={yShown(p[kind]!)} r={2.5} fill={KIND_COLOR[kind]} />
           )))}
           {point && (
             <g pointerEvents="none">
               <line x1={x(point.t)} x2={x(point.t)} y1={M.top} y2={M.top + plotH} stroke="var(--viz-muted)" strokeWidth={1} />
               {kinds.map(kind => point[kind] !== null && point[kind] !== undefined && (
-                <circle key={kind} cx={x(point.t)} cy={yRemaining(point[kind]!)} r={4} fill={KIND_COLOR[kind]} stroke="var(--viz-surface)" strokeWidth={2} />
+                <circle key={kind} cx={x(point.t)} cy={yShown(point[kind]!)} r={4} fill={KIND_COLOR[kind]} stroke="var(--viz-surface)" strokeWidth={2} />
               ))}
             </g>
           )}
@@ -121,7 +123,7 @@ export const TimelineChart: React.FC<{
                   <span aria-hidden className="inline-block h-0.5 w-3 rounded" style={{ background: KIND_COLOR[kind] }} />
                   {t(KIND_LABEL_KEY[kind])}
                 </span>
-                <strong>{formatPercent(point[kind] === null || point[kind] === undefined ? null : remaining(point[kind]!))}</strong>
+                <strong>{formatPercent(point[kind] === null || point[kind] === undefined ? null : shown(point[kind]!))}</strong>
               </div>
             ))}
           </div>

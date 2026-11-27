@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTranslation } from 'react-i18next';
-import type { OverlaySettings } from '../types';
+import type { OverlaySettings, SettingsPatch } from '../types';
 import {
   HISTORY_RANGES, HistoryRange, HistorySeriesInfo, HistoryViewData, RANGE_SECONDS, WINDOW_KINDS, WindowKind,
   formatDay, seriesLabels, sortSeries, usedThresholds,
@@ -22,7 +22,10 @@ function presentKinds(view: HistoryViewData): WindowKind[] {
     || view.days.some(day => day[kind] > 0));
 }
 
-export const HistoryView: React.FC<{ settings: OverlaySettings }> = ({ settings }) => {
+export const HistoryView: React.FC<{
+  settings: OverlaySettings;
+  onPatchSettings?: (patch: SettingsPatch) => void;
+}> = ({ settings, onPatchSettings }) => {
   const { t, i18n } = useTranslation();
   const [seriesList, setSeriesList] = useState<HistorySeriesInfo[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -87,6 +90,7 @@ export const HistoryView: React.FC<{ settings: OverlaySettings }> = ({ settings 
   const kinds = view ? presentKinds(view) : [];
   const thresholds = view ? usedThresholds(settings, view.provider) : {};
   const locale = i18n.resolvedLanguage;
+  const showUsed = settings.historyShowUsed ?? false;
 
   return (
     <div className="viz-root h-screen flex flex-col bg-[#F5F6F8] dark:bg-slate-900 text-slate-800 dark:text-slate-100 font-sans">
@@ -138,9 +142,26 @@ export const HistoryView: React.FC<{ settings: OverlaySettings }> = ({ settings 
               <p className="text-xs" style={{ color: 'var(--viz-ink-2)' }}>{t('historyRecordingSince', { date: formatDay(view.recordingSince, locale) })}</p>
             )}
             <section className="viz-card p-4 space-y-2" aria-labelledby="history-timeline-title">
-              <h2 id="history-timeline-title" className="text-sm font-semibold">{t('historyTimelineTitle')}</h2>
-              <p className="text-xs" style={{ color: 'var(--viz-ink-2)' }}>{t('historyTimelineHint')}</p>
-              <TimelineChart view={view} kinds={kinds} thresholds={thresholds} />
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 id="history-timeline-title" className="text-sm font-semibold">{t(showUsed ? 'historyTimelineTitleUsed' : 'historyTimelineTitle')}</h2>
+                {onPatchSettings && (
+                  <div role="group" aria-label={t('historyTimelineModeLabel')} className="ml-auto flex gap-1">
+                    {([false, true] as const).map(used => (
+                      <button
+                        key={String(used)}
+                        type="button"
+                        aria-pressed={showUsed === used}
+                        onClick={() => { if (showUsed !== used) onPatchSettings({ historyShowUsed: used }); }}
+                        className={`rounded-md px-2.5 py-1 text-xs font-medium border ${showUsed === used ? 'border-cyan-600 bg-cyan-600 text-white' : 'border-slate-300 dark:border-slate-600'}`}
+                      >
+                        {t(used ? 'historyTimelineModeUsed' : 'historyTimelineModeRemaining')}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <p className="text-xs" style={{ color: 'var(--viz-ink-2)' }}>{t(showUsed ? 'historyTimelineHintUsed' : 'historyTimelineHint')}</p>
+              <TimelineChart view={view} kinds={kinds} thresholds={thresholds} showUsed={showUsed} />
             </section>
             <section className="viz-card p-4 space-y-2" aria-labelledby="history-daily-title">
               <h2 id="history-daily-title" className="text-sm font-semibold">{t('historyDailyTitle')}</h2>

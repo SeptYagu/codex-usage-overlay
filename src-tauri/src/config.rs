@@ -314,6 +314,10 @@ pub struct OverlaySettings {
     /// History window. On by default; turning it off keeps existing files.
     #[serde(default = "default_true")]
     pub record_usage_history: bool,
+    /// Whether the History window's timeline shows used percent instead of
+    /// remaining percent. Off by default: remaining, like the overlay.
+    #[serde(default)]
+    pub history_show_used: bool,
 }
 
 fn default_scale() -> u32 {
@@ -374,6 +378,7 @@ impl Default for OverlaySettings {
             mouse_passthrough: false,
             show_percentage_grid: false,
             record_usage_history: true,
+            history_show_used: false,
         }
     }
 }

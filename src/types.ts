@@ -116,6 +116,8 @@ export interface OverlaySettings {
   mousePassthrough: boolean;
   showPercentageGrid: boolean;
   recordUsageHistory: boolean;
+  /** The History timeline shows used percent instead of remaining. */
+  historyShowUsed: boolean;
 }
 
 export interface SettingsEnvelope {
@@ -168,6 +170,7 @@ export const DEFAULT_SETTINGS: OverlaySettings = {
   mousePassthrough: false,
   showPercentageGrid: false,
   recordUsageHistory: true,
+  historyShowUsed: false,
 };
 
 export interface UsageStatus {

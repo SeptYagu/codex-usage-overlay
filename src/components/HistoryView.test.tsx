@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '../i18n';
-import { DEFAULT_SETTINGS, OverlaySettings } from '../types';
+import { DEFAULT_SETTINGS, OverlaySettings, SettingsPatch } from '../types';
 import type { HistorySeriesInfo, HistoryViewData } from '../history';
 import { HistoryView } from './HistoryView';
 import { TimelineChart } from './history/TimelineChart';
@@ -65,8 +65,8 @@ function mockHistory(series: HistorySeriesInfo[] = SERIES) {
   });
 }
 
-async function mount(settings: Partial<OverlaySettings> = {}) {
-  const view = render(<HistoryView settings={{ ...DEFAULT_SETTINGS, ...settings }} />);
+async function mount(settings: Partial<OverlaySettings> = {}, onPatchSettings?: (patch: SettingsPatch) => void) {
+  const view = render(<HistoryView settings={{ ...DEFAULT_SETTINGS, ...settings }} onPatchSettings={onPatchSettings} />);
   await act(async () => {});
   await act(async () => {});
   return view;
@@ -153,6 +153,37 @@ describe('usage history window', () => {
     const axis = view.getByRole('img', { name: 'Remaining quota over time' });
     expect(within(axis).getByText('100%').getAttribute('y')).toBe('12');
     expect(within(axis).getByText('0%').getAttribute('y')).toBe('232');
+  });
+
+  it('switches the timeline between remaining and used quota', async () => {
+    mockHistory();
+    const onPatchSettings = vi.fn();
+    const prefs = { ...DEFAULT_SETTINGS.providerPreferences, codex: { ...DEFAULT_SETTINGS.providerPreferences.codex, protectionEnabled: true } };
+    const remaining = await mount({ providerPreferences: prefs }, onPatchSettings);
+    const mode = within(remaining.getByRole('group', { name: 'Show' }));
+    expect(mode.getByRole('button', { name: 'Remaining' }).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(mode.getByRole('button', { name: 'Remaining' }));
+    expect(onPatchSettings).not.toHaveBeenCalled();
+    fireEvent.click(mode.getByRole('button', { name: 'Used' }));
+    expect(onPatchSettings).toHaveBeenCalledWith({ historyShowUsed: true });
+    cleanup();
+
+    const used = await mount({ providerPreferences: prefs, historyShowUsed: true }, onPatchSettings);
+    expect(within(used.getByRole('group', { name: 'Show' })).getByRole('button', { name: 'Used' }).getAttribute('aria-pressed')).toBe('true');
+    expect(used.getByRole('heading', { name: 'Usage over time' })).toBeTruthy();
+    const fiveHour = used.container.querySelector('[data-series="fiveHour"]')!;
+    const usedYs = [...fiveHour.getAttribute('d')!.matchAll(/[ML][\d.]+,([\d.]+)/g)].map(match => Number(match[1]));
+    expect(usedYs).toEqual([210, 100, 221, 188]); // used 10 → 60, reset to 5 → 20
+    expect(Number(used.container.querySelector('[data-threshold="fiveHour"] line')!.getAttribute('y1'))).toBeCloseTo(23); // 95% used
+    const chart = used.getByRole('img', { name: 'Usage over time' });
+    fireEvent.keyDown(chart, { key: 'Home' });
+    expect(used.getByRole('tooltip').textContent).toContain('10%');
+  });
+
+  it('has no mode switch without a way to save it', async () => {
+    mockHistory();
+    const view = await mount();
+    expect(view.queryByRole('group', { name: 'Show' })).toBeNull();
   });
 
   it('keeps missing Argon readings absent and maps an isolated point to remaining quota', () => {

@@ -271,6 +271,8 @@ pub struct SettingsPatch {
     pub show_percentage_grid: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_present_some")]
     pub record_usage_history: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_present_some")]
+    pub history_show_used: Option<bool>,
 }
 
 impl SettingsPatch {
@@ -357,6 +359,9 @@ impl SettingsPatch {
         }
         if let Some(v) = self.record_usage_history {
             settings.record_usage_history = v;
+        }
+        if let Some(v) = self.history_show_used {
+            settings.history_show_used = v;
         }
     }
 }
@@ -589,6 +594,22 @@ mod settings_patch_tests {
         assert!(!settings.record_usage_history);
         assert!(validate_settings_patch(&serde_json::json!({"recordUsageHistory": "no"}), false).is_err());
         assert!(validate_settings_patch(&serde_json::json!({"recordUsageHistory": null}), false).is_err());
+    }
+
+    #[test]
+    fn history_show_used_defaults_off_and_patches_strictly() {
+        let absent: crate::config::OverlaySettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!absent.history_show_used, "an upgraded profile shows remaining quota");
+        assert!(!crate::config::OverlaySettings::default().history_show_used);
+        let changes = validate_settings_patch(&serde_json::json!({"historyShowUsed": true}), false).unwrap();
+        assert_eq!(changes.history_show_used, Some(true));
+        let mut settings = crate::config::OverlaySettings::default();
+        changes.apply_to(&mut settings);
+        assert!(settings.history_show_used);
+        let wire = serde_json::to_value(&settings).unwrap();
+        assert_eq!(wire.get("historyShowUsed"), Some(&serde_json::json!(true)));
+        assert!(validate_settings_patch(&serde_json::json!({"historyShowUsed": "yes"}), false).is_err());
+        assert!(validate_settings_patch(&serde_json::json!({"historyShowUsed": null}), false).is_err());
     }
 
     /// The offline half of P3-4: the same `validate -> merge -> save` chain the

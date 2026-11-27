@@ -207,7 +207,7 @@ export const App: React.FC = () => {
 
   if (windowLabel === 'history' || window.location.hash === '#history') {
     if (settingsLoadState === 'loading') return null;
-    return <HistoryView settings={settings} />;
+    return <HistoryView settings={settings} onPatchSettings={handlePatchSettings} />;
   }
 
   if (windowLabel === 'tray-menu' || window.location.hash === '#tray-menu') {
