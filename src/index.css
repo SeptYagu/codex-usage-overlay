@@ -186,7 +186,8 @@ html, body, #root {
 ::-webkit-scrollbar-thumb:hover { background: rgba(128, 128, 128, .4); }
 
 .settings-shell { box-sizing:border-box; height:100vh; display:flex; flex-direction:column; gap:12px; padding:20px; overflow:hidden; }
-.settings-tab-list { min-width:0; overflow-x:auto; }
+.settings-body { flex:1; min-height:0; display:flex; gap:12px; }
+.settings-nav { width:180px; flex-shrink:0; display:flex; flex-direction:column; gap:2px; overflow-y:auto; }
 .settings-content { flex:1; min-width:0; min-height:0; overflow-y:auto; overflow-x:hidden; overflow-wrap:anywhere; }
 .settings-provider-column { min-width:0; display:flex; flex-direction:column; }
 .settings-provider-body { overflow-wrap:anywhere; }

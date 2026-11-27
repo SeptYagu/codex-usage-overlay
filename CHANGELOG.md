@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The Settings window is reorganized around a sidebar: **General** (language, startup, updates), **Overlay** (appearance, what the overlay shows, behavior), **Quota rotation** (with the included providers listed together), **Usage history** (recording, and what the timeline shows), then one page per provider with **Monitoring**, **Protection**, **Display** and **Notifications** sections. A dot marks the provider the overlay shows. No setting changed meaning or default.
+
 ## [1.10.1] - 2026-11-26
 
 Stable release of Windows ARM64 packages and the usage history fixes from `1.10.1-preview.1` through `1.10.1-preview.3`, plus the timeline switch below.

@@ -50,7 +50,8 @@ async function mount(overrides: Partial<OverlaySettings> = {}) {
     ) }));
     return within(view.container.querySelector(`[data-provider-settings="${provider}"]`)! as HTMLElement);
   };
-  return { ...view, panel, onPatchSettings };
+  const page = (label: string) => fireEvent.click(view.getByRole('tab', { name: i18n.t(label) }));
+  return { ...view, panel, page, onPatchSettings };
 }
 
 describe('settings tabs', () => {
@@ -68,15 +69,42 @@ describe('settings tabs', () => {
   });
   it('shows one settings page at a time with unique control ids', async () => {
     const view = await mount();
-    expect(view.getAllByRole('tab')).toHaveLength(5);
+    const tabs = view.getAllByRole('tab');
+    expect(tabs.map(tab => tab.textContent)).toEqual(['General', 'Overlay', 'Quota rotation', 'Usage history', 'Local Codex', 'Claude', 'DSH Codex subscription', 'Antigravity']);
+    expect(view.getByRole('tablist').getAttribute('aria-orientation')).toBe('vertical');
     expect(view.container.querySelectorAll('[data-provider-settings]')).toHaveLength(0);
-    expect(view.queryByLabelText('Provider settings')).toBeNull();
-    expect(view.container.querySelectorAll('[data-common-settings]')).toHaveLength(1);
+    expect(view.container.querySelectorAll('[data-app-settings="general"]')).toHaveLength(1);
+    for (const label of ['settingsPageGeneral', 'settingsPageOverlay', 'settingsPageRotation', 'settingsPageHistory']) {
+      view.page(label);
+      const ids = [...view.container.querySelectorAll('[id]')].map(el => el.id);
+      expect(new Set(ids).size).toBe(ids.length);
+    }
+    view.panel('dsh');
+    expect(view.container.querySelectorAll('[data-app-settings]')).toHaveLength(0);
+    expect(view.container.querySelectorAll('[data-provider-settings]')).toHaveLength(1);
     const ids = [...view.container.querySelectorAll('[id]')].map(el => el.id);
     expect(new Set(ids).size).toBe(ids.length);
-    view.panel('dsh');
-    expect(view.container.querySelectorAll('[data-common-settings]')).toHaveLength(0);
-    expect(view.container.querySelectorAll('[data-provider-settings]')).toHaveLength(1);
+  });
+
+  it('moves between pages with the arrow keys and groups each page into headed sections', async () => {
+    const view = await mount();
+    const general = view.getByRole('tab', { name: 'General' });
+    general.focus();
+    fireEvent.keyDown(general, { key: 'ArrowDown' });
+    expect(view.getByRole('tab', { name: 'Overlay' }).getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(view.getByRole('tab', { name: 'Overlay' }));
+    for (const name of ['Appearance', 'Show on overlay', 'Behavior']) expect(view.getByRole('heading', { name })).toBeTruthy();
+    fireEvent.keyDown(document.activeElement!, { key: 'End' });
+    expect(view.getByRole('tab', { name: 'Antigravity' }).getAttribute('aria-selected')).toBe('true');
+    for (const name of ['Monitoring', 'Protection', 'Display', 'Notifications']) expect(view.getByRole('heading', { name })).toBeTruthy();
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(view.getByRole('tab', { name: 'General' }).getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('marks the provider the overlay shows in the sidebar', async () => {
+    const view = await mount({ provider: 'claude' });
+    expect(view.getByRole('tab', { name: 'Claude' }).querySelector('[title="Showing"]')).not.toBeNull();
+    expect(view.getByRole('tab', { name: 'Local Codex' }).querySelector('[title="Showing"]')).toBeNull();
   });
   it('writes refresh only to the initiating provider even when the overlay shows another', async () => {
     const { panel, onPatchSettings } = await mount({provider: 'dsh'});
@@ -114,7 +142,7 @@ describe('settings tabs', () => {
   it.each(['en-US','zh-CN','zh-Hant'])('keeps all provider tabs in %s', async locale => {
     await i18n.changeLanguage(locale);
     const view = await mount();
-    for (const key of ['commonSettings','providerCodex','providerClaude','providerDsh','providerAntigravity']) expect(view.getByRole('tab',{name:i18n.t(key)})).toBeTruthy();
+    for (const key of ['settingsPageGeneral','settingsPageOverlay','settingsPageRotation','settingsPageHistory','providerCodex','providerClaude','providerDsh','providerAntigravity']) expect(view.getByRole('tab',{name:i18n.t(key)})).toBeTruthy();
   });
   it('updates Antigravity quota pool selection and live polling from the Antigravity settings tab', async () => {
     const { panel, onPatchSettings } = await mount({ antigravityPool: 'auto', antigravityLivePolling: true });
@@ -127,18 +155,21 @@ describe('settings tabs', () => {
 });
 
 it('keeps carousel participation separate and saves every slider second through debounce',async()=>{
-  const {panel,getByRole,onPatchSettings}=await mount({quotaCarouselEnabled:true,quotaCarouselIntervalSeconds:9});
+  const {page,getByRole,onPatchSettings}=await mount({quotaCarouselEnabled:true,quotaCarouselIntervalSeconds:9});
+  page('settingsPageRotation');
   const slider=getByRole('slider',{name:'Rotation interval'}) as HTMLInputElement;
   expect([slider.min,slider.max,slider.step,slider.value]).toEqual(['3','30','1','9']);
   fireEvent.change(slider,{target:{value:'11'}});expect(onPatchSettings).toHaveBeenLastCalledWith({quotaCarouselIntervalSeconds:11},true);
   fireEvent.click(getByRole('checkbox',{name:'Automatically rotate quotas'}));expect(onPatchSettings).toHaveBeenLastCalledWith({quotaCarouselEnabled:false});
-  fireEvent.click(panel('claude').getByRole('checkbox',{name:'Include in quota rotation'}));
+  const included=within(getByRole('region',{name:'Included providers'}));
+  fireEvent.click(included.getByRole('checkbox',{name:'Claude'}));
   expect(onPatchSettings).toHaveBeenLastCalledWith({providerPreferences:{claude:{carouselIncluded:false}}});
 });
 
 describe('usage history settings', () => {
   it('toggles recording, opens the history window and clears only after confirmation', async () => {
     const view = await mount();
+    view.page('settingsPageHistory');
     const block = within(view.container.querySelector('[data-usage-history-settings]') as HTMLElement);
     const toggle = block.getByRole('checkbox', { name: 'Record usage history' }) as HTMLInputElement;
     expect(toggle.checked).toBe(true);
@@ -157,5 +188,14 @@ describe('usage history settings', () => {
     await act(async () => { fireEvent.click(block.getByRole('button', { name: 'Delete' })); });
     expect(tauri.invoke).toHaveBeenCalledWith('clear_usage_history');
     expect(block.getByRole('status').textContent).toBe('Usage history cleared.');
+  });
+
+  it('chooses what the history timeline shows', async () => {
+    const view = await mount();
+    view.page('settingsPageHistory');
+    const shows = view.getByRole('combobox', { name: 'Timeline shows' }) as HTMLSelectElement;
+    expect(shows.value).toBe('remaining');
+    fireEvent.change(shows, { target: { value: 'used' } });
+    expect(view.onPatchSettings).toHaveBeenCalledWith({ historyShowUsed: true });
   });
 });

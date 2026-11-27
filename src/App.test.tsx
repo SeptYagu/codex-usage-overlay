@@ -89,9 +89,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** Settings open on General; the overlay controls are on the Overlay page. */
+async function openOverlayPage() {
+  fireEvent.click(await screen.findByRole('tab', { name: 'Overlay' }));
+}
+
 describe('settings synchronization', () => {
   it('loads preferences and saves only the changed field', async () => {
     render(<App />);
+    await openOverlayPage();
     const layout = await screen.findByRole('combobox', { name: 'Overlay layout' }) as HTMLSelectElement;
     expect(layout.value).toBe('stacks');
     fireEvent.change(layout, { target: { value: 'grouped' } });
@@ -125,6 +131,7 @@ describe('settings synchronization', () => {
 
   it('saves the auto edge hide preference from settings', async () => {
     render(<App />);
+    await openOverlayPage();
     const toggle = await screen.findByRole('checkbox', { name: 'Auto hide at screen edge' });
     fireEvent.click(toggle);
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
@@ -134,6 +141,7 @@ describe('settings synchronization', () => {
 
   it('saves mouse click-through independently from the settings window', async () => {
     render(<App />);
+    await openOverlayPage();
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Mouse click-through' }));
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('patch_settings', {
       patch: { mousePassthrough: true },
@@ -188,6 +196,7 @@ describe('settings synchronization', () => {
     await act(async () => {
       tauri.listeners.get('settings_updated')!({ payload: { revision: 2, settings: { ...savedSettings, scalePercent: 150 } } });
     });
+    await openOverlayPage();
     expect((screen.getByRole('slider', { name: 'Overlay Size' }) as HTMLInputElement).value).toBe('150');
     await act(async () => initial.resolve({ revision: 1, settings: savedSettings }));
     expect((screen.getByRole('slider', { name: 'Overlay Size' }) as HTMLInputElement).value).toBe('150');
@@ -207,6 +216,7 @@ describe('settings synchronization', () => {
       return null;
     });
     render(<App />);
+    await openOverlayPage();
     const layout = await screen.findByRole('combobox', { name: 'Overlay layout' });
     fireEvent.change(layout, { target: { value: 'grouped' } });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Show Credit Balance' }));
@@ -223,6 +233,7 @@ describe('settings synchronization', () => {
 
   it('coalesces fast slider edits and flushes on pagehide', async () => {
     render(<App />);
+    await openOverlayPage();
     const slider = await screen.findByRole('slider', { name: 'Overlay Size' });
     vi.useFakeTimers();
     fireEvent.change(slider, { target: { value: '200' } });
@@ -247,6 +258,7 @@ describe('settings synchronization', () => {
     expect((await screen.findByRole('alert')).textContent).toBe('Unable to load settings. Please try again.');
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await act(async () => retry.resolve({ revision: 0, settings: savedSettings }));
+    await openOverlayPage();
     expect((screen.getByRole('slider', { name: 'Overlay Size' }) as HTMLInputElement).value).toBe('220');
   });
 
@@ -257,7 +269,7 @@ describe('settings synchronization', () => {
       return null;
     });
     render(<App />);
-    await screen.findByRole('slider', { name: 'Overlay Size' });
+    await screen.findByRole('combobox', { name: 'Language' });
     await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('is_installed_version'));
     expect(screen.queryByRole('checkbox', { name: 'Start automatically on boot' })).toBeNull();
   });
@@ -499,7 +511,7 @@ it('rolls back failed optimistic edits even when reloading settings also fails',
     if(command==='patch_settings')throw new Error('disk failed');
     return null;
   });
-  render(<App/>);const checkbox=await screen.findByRole('checkbox',{name:'Show Credit Balance'}) as HTMLInputElement;
+  render(<App/>);await openOverlayPage();const checkbox=await screen.findByRole('checkbox',{name:'Show Credit Balance'}) as HTMLInputElement;
   expect(checkbox.checked).toBe(false);fireEvent.click(checkbox);
   await waitFor(()=>expect(checkbox.checked).toBe(false));
   expect(await screen.findByRole('alert')).toBeTruthy();
